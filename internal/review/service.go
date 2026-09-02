@@ -10,8 +10,8 @@ import (
 )
 
 type Service struct {
-	GitHub      *github.Client
-	LLM         *llm.Client
+	GitHub       *github.Client
+	LLM          *llm.Client
 	MaxDiffLines int
 }
 
@@ -37,8 +37,8 @@ func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int) 
 		return fmt.Errorf("review code: %w", err)
 	}
 	comment := "## Automated Code Review\n\n" + reviewText
-	if err := s.GitHub.CreateIssueComment(ctx, owner, repo, number, comment); err != nil {
-		return fmt.Errorf("create comment: %w", err)
+	if err := s.GitHub.CreatePullRequestReview(ctx, owner, repo, number, comment); err != nil {
+		return fmt.Errorf("create pull request review: %w", err)
 	}
 	return nil
 }

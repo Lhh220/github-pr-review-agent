@@ -43,7 +43,13 @@ func NewAppClient(auth AppAuth) *Client {
 				return "", err
 			}
 			cachedToken = token
-			log.Printf("github installation token refreshed: expires_at=%s permissions=[%s]", token.ExpiresAt.Format(time.RFC3339), token.PermissionSummary())
+			log.Printf(
+				"github installation token refreshed: expires_at=%s repository_selection=%s repositories=[%s] permissions=[%s]",
+				token.ExpiresAt.Format(time.RFC3339),
+				token.RepositorySelection,
+				token.RepositorySummary(),
+				token.PermissionSummary(),
+			)
 			return token.Token, nil
 		},
 		http: &http.Client{Timeout: 30 * time.Second},
@@ -135,5 +141,14 @@ func (c *Client) GetPullRequestFiles(ctx context.Context, owner, repo string, nu
 func (c *Client) CreateIssueComment(ctx context.Context, owner, repo string, number int, body string) error {
 	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, repo, number)
 	payload := map[string]string{"body": body}
+	return c.do(ctx, http.MethodPost, path, payload, nil)
+}
+
+func (c *Client) CreatePullRequestReview(ctx context.Context, owner, repo string, number int, body string) error {
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews", owner, repo, number)
+	payload := map[string]string{
+		"body":  body,
+		"event": "COMMENT",
+	}
 	return c.do(ctx, http.MethodPost, path, payload, nil)
 }

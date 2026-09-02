@@ -31,9 +31,15 @@ type AppAuth struct {
 }
 
 type InstallationToken struct {
-	Token       string
-	ExpiresAt   time.Time
-	Permissions map[string]string
+	Token               string
+	ExpiresAt           time.Time
+	Permissions         map[string]string
+	RepositorySelection string
+	Repositories        []InstallationRepository
+}
+
+type InstallationRepository struct {
+	FullName string `json:"full_name"`
 }
 
 func (t InstallationToken) PermissionSummary() string {
@@ -47,6 +53,14 @@ func (t InstallationToken) PermissionSummary() string {
 		parts = append(parts, key+"="+t.Permissions[key])
 	}
 	return strings.Join(parts, ", ")
+}
+
+func (t InstallationToken) RepositorySummary() string {
+	names := make([]string, 0, len(t.Repositories))
+	for _, repo := range t.Repositories {
+		names = append(names, repo.FullName)
+	}
+	return strings.Join(names, ", ")
 }
 
 func LoadPrivateKey(path string) (*rsa.PrivateKey, error) {
@@ -154,9 +168,11 @@ func CreateInstallationToken(auth AppAuth) (*InstallationToken, error) {
 		return nil, fmt.Errorf("get installation token: status=%d body=%s", resp.StatusCode, string(body))
 	}
 	var out struct {
-		Token       string            `json:"token"`
-		ExpiresAt   time.Time         `json:"expires_at"`
-		Permissions map[string]string `json:"permissions"`
+		Token               string                   `json:"token"`
+		ExpiresAt           time.Time                `json:"expires_at"`
+		Permissions         map[string]string        `json:"permissions"`
+		RepositorySelection string                   `json:"repository_selection"`
+		Repositories        []InstallationRepository `json:"repositories"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, err
@@ -165,9 +181,11 @@ func CreateInstallationToken(auth AppAuth) (*InstallationToken, error) {
 		return nil, errors.New("empty installation token")
 	}
 	return &InstallationToken{
-		Token:       out.Token,
-		ExpiresAt:   out.ExpiresAt,
-		Permissions: out.Permissions,
+		Token:               out.Token,
+		ExpiresAt:           out.ExpiresAt,
+		Permissions:         out.Permissions,
+		RepositorySelection: out.RepositorySelection,
+		Repositories:        out.Repositories,
 	}, nil
 }
 

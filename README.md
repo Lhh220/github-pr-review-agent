@@ -14,6 +14,12 @@
 
 后续会逐步加入 RabbitMQ、Redis 分布式锁、状态机、Tool Calling 和 tree-sitter 上下文裁剪。
 
+GitHub App 需要的仓库权限：
+
+- `Pull requests`: `Read & write`，用于读取 PR 并提交 Review
+- `Contents`: `Read-only`，用于读取 diff
+- `Metadata`: `Read-only`
+
 ## 本地运行
 
 1. 准备环境变量：
