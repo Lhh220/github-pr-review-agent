@@ -16,6 +16,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -26,6 +28,25 @@ type AppAuth struct {
 	InstallationID string
 	PrivateKey     string
 	PrivateKeyPath string
+}
+
+type InstallationToken struct {
+	Token       string
+	ExpiresAt   time.Time
+	Permissions map[string]string
+}
+
+func (t InstallationToken) PermissionSummary() string {
+	keys := make([]string, 0, len(t.Permissions))
+	for key := range t.Permissions {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key+"="+t.Permissions[key])
+	}
+	return strings.Join(parts, ", ")
 }
 
 func LoadPrivateKey(path string) (*rsa.PrivateKey, error) {
@@ -88,52 +109,66 @@ func signJWT(header map[string]string, claims map[string]any, key *rsa.PrivateKe
 }
 
 func GetInstallationToken(auth AppAuth) (string, error) {
+	token, err := CreateInstallationToken(auth)
+	if err != nil {
+		return "", err
+	}
+	return token.Token, nil
+}
+
+func CreateInstallationToken(auth AppAuth) (*InstallationToken, error) {
 	if auth.AppID == "" || auth.InstallationID == "" || (auth.PrivateKey == "" && auth.PrivateKeyPath == "") {
-		return "", ErrMissingAppConfig
+		return nil, ErrMissingAppConfig
 	}
 	var key *rsa.PrivateKey
 	var err error
 	if auth.PrivateKey != "" {
 		key, err = ParsePrivateKey([]byte(auth.PrivateKey))
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 	} else {
 		key, err = LoadPrivateKey(auth.PrivateKeyPath)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 	}
 	jwt, err := CreateAppJWT(auth.AppID, key)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	url := "https://api.github.com/app/installations/" + auth.InstallationID + "/access_tokens"
 	req, err := http.NewRequest(http.MethodPost, url, nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+jwt)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("get installation token: status=%d body=%s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("get installation token: status=%d body=%s", resp.StatusCode, string(body))
 	}
 	var out struct {
-		Token string `json:"token"`
+		Token       string            `json:"token"`
+		ExpiresAt   time.Time         `json:"expires_at"`
+		Permissions map[string]string `json:"permissions"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", err
+		return nil, err
 	}
 	if out.Token == "" {
-		return "", errors.New("empty installation token")
+		return nil, errors.New("empty installation token")
 	}
-	return out.Token, nil
+	return &InstallationToken{
+		Token:       out.Token,
+		ExpiresAt:   out.ExpiresAt,
+		Permissions: out.Permissions,
+	}, nil
 }
 
 func VerifyWebhookSignature(secret string, body []byte, signature string) bool {
