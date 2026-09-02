@@ -32,6 +32,8 @@ Agent Loop
    |-- Tool: list_changed_files
    |-- Tool: read_diff
    |-- Tool: read_file_context
+   |-- Tool: search_references
+   |-- Tool: run_static_checks
    |-- Tool: get_commit_history
    v
 Context Builder (tree-sitter 裁剪)
@@ -80,8 +82,10 @@ MySQL (任务/结果/审计) + Redis (锁/去重/限流)
   1. 调 `get_pr_meta` 了解 PR 标题、描述、改动文件列表。
   2. 调 `read_diff` 读取完整 diff。
   3. 对关注文件调 `read_file_context`，用 tree-sitter 取函数级上下文。
-  4. 必要时调 `get_commit_history` 理解修改动机。
-  5. 输出结构化审查意见。
+  4. 对被删除或改名的字段、函数、类型，调 `search_references` 确认是否仍有引用。
+  5. 必要时调 `run_static_checks` 获取编译、测试或静态分析结果。
+  6. 必要时调 `get_commit_history` 理解修改动机。
+  7. 输出结构化审查意见。
 - 每一步工具调用记录到审计表。
 
 ### 4.5 工具注册
@@ -105,7 +109,48 @@ type Tool interface {
   - 设置 token 预算，超出则降级为只看 diff。
 - 目标：控制单次审查 token 成本，避免超长导致质量下降。
 
-### 4.7 审查结果
+### 4.7 当前能力边界与增强方向
+
+当前 MVP 是 **diff-only reviewer**：
+
+- 只把 PR diff 交给 LLM。
+- 看不到改动文件之外的完整代码。
+- 无法确认被删除的字段、函数、类型是否仍被其他文件引用。
+- 无法验证 PR 是否能通过编译、测试或静态检查。
+
+因此它只能给出“可能存在风险”的提示，不能把跨文件引用问题定位成确定的编译错误。
+
+下一阶段要把它升级成 **code-aware agent**：
+
+1. `read_file_context`
+   - 读取变更文件及关联文件的完整上下文。
+   - 优先读取被改动函数、结构体、接口的定义和使用位置。
+2. `search_references`
+   - 对被删除或改名的符号做引用检索。
+   - 输出引用文件、行号和上下文片段。
+3. `run_static_checks`
+   - 在隔离环境中执行 `go test`、`go vet` 或编译检查。
+   - 把失败信息回传给 Agent，作为确定性证据。
+4. 结论分级
+   - `confirmed`：有代码上下文或静态检查证据。
+   - `needs_verification`：仅有 diff 推理，缺少跨文件证据。
+
+目标示例：
+
+```text
+internal/config/config.go 删除了 MaxDiffLines 字段，
+但 cmd/server/main.go:40 仍在引用 cfg.MaxDiffLines，
+go test ./... 会编译失败。
+```
+
+静态检查安全要求：
+
+- 在一次性容器或临时目录中执行。
+- 不注入 GitHub App 私钥、LLM Key 等敏感环境变量。
+- 限制 CPU、内存、执行时长和网络访问。
+- 只允许执行白名单命令，避免把 PR 中的代码当成任意命令执行。
+
+### 4.8 审查结果
 
 结构化输出：
 ```json
@@ -125,7 +170,7 @@ type Tool interface {
 ```
 回写策略：按文件分组，生成一条总结评论 + 多条行内评论；无问题时可发一条通过评论。
 
-### 4.8 存储设计
+### 4.9 存储设计
 
 MySQL 表：
 - `review_task`：id, repo, pr_number, commit_sha, status, created_at, updated_at, error。
@@ -138,7 +183,7 @@ Redis Key：
 - `dedup:pr:{repo}:{number}:{sha}`：事件去重。
 - `ratelimit:webhook:{repo}`：限流。
 
-### 4.9 状态机
+### 4.10 状态机
 
 ```text
 received -> queued -> running -> formatting -> commenting -> done

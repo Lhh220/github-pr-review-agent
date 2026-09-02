@@ -47,11 +47,29 @@
 任务：
 - Tool Calling 框架 + 工具注册
 - 实现 get_pr_meta / list_changed_files / read_diff / read_file_context / get_commit_history
+- 新增 search_references，检索被删除或改名符号的跨文件引用
+- 新增 run_static_checks，执行 go test / go vet 并回传结果
 - tree-sitter 函数级上下文裁剪
 - 结构化输出：bug/performance/style/security
+- 结论分级：confirmed / needs_verification
 - 基础评测集 + 准确率/误报率统计
 
-验收：Agent 能多步调工具；审查意见结构化；评测有指标。
+验收：
+- Agent 能多步调工具
+- 能读取文件上下文并检索跨文件引用
+- 能把编译失败定位到具体文件和行号
+- 审查意见区分 confirmed 和 needs_verification
+- 评测有指标
+
+回归样本：
+
+- 删除 `Config.MaxDiffLines` 字段，但保留 `cmd/server/main.go` 中的引用。
+- 期望 Agent 输出：
+  ```text
+  internal/config/config.go 删除了 MaxDiffLines，
+  但 cmd/server/main.go:40 仍在引用 cfg.MaxDiffLines，
+  go test ./... 会编译失败
+  ```
 
 ## 阶段 4：交付（几天）
 
