@@ -6,21 +6,47 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"sync"
 	"time"
 )
 
 const apiBaseURL = "https://api.github.com"
 
 type Client struct {
-	token string
-	http  *http.Client
+	token       string
+	tokenSource func() (string, error)
+	http        *http.Client
 }
 
 func NewClient(token string) *Client {
 	return &Client{
 		token: token,
 		http:  &http.Client{Timeout: 30 * time.Second},
+	}
+}
+
+func NewAppClient(auth AppAuth) *Client {
+	var mu sync.Mutex
+	var cachedToken *InstallationToken
+
+	return &Client{
+		tokenSource: func() (string, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if cachedToken != nil && time.Until(cachedToken.ExpiresAt) > 2*time.Minute {
+				return cachedToken.Token, nil
+			}
+			token, err := CreateInstallationToken(auth)
+			if err != nil {
+				return "", err
+			}
+			cachedToken = token
+			log.Printf("github installation token refreshed: expires_at=%s permissions=[%s]", token.ExpiresAt.Format(time.RFC3339), token.PermissionSummary())
+			return token.Token, nil
+		},
+		http: &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
@@ -47,6 +73,14 @@ type PullRequestFile struct {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) error {
+	token := c.token
+	if c.tokenSource != nil {
+		var err error
+		token, err = c.tokenSource()
+		if err != nil {
+			return fmt.Errorf("get github token: %w", err)
+		}
+	}
 	var reader io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
@@ -59,7 +93,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	if body != nil {
