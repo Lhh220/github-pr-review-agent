@@ -17,6 +17,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("resolve github token: %v", err)
 	}
+	if cfg.GitHubToken != "" {
+		log.Printf("github auth mode: personal access token")
+	} else {
+		log.Printf("github auth mode: GitHub App, installation_id=%s", cfg.GitHubInstallationID)
+	}
 	gh := github.NewClient(token)
 	l := llm.New(cfg.DeepSeekAPIKey, cfg.DeepSeekBaseURL, cfg.DeepSeekModel)
 	reviewer := review.New(gh, l, cfg.MaxDiffLines)
