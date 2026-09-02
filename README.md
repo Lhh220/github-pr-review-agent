@@ -28,6 +28,7 @@ $env:DEEPSEEK_API_KEY="你的 DeepSeek API key"
 
 ```powershell
 $env:GITHUB_APP_ID="你的 App ID"
+$env:GITHUB_APP_PRIVATE_KEY="你的私钥内容"
 $env:GITHUB_APP_PRIVATE_KEY_PATH="D:\path\to\private-key.pem"
 $env:GITHUB_INSTALLATION_ID="你的 installation ID"
 ```

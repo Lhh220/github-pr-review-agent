@@ -42,6 +42,7 @@ func resolveGitHubToken(cfg *config.Config) (string, error) {
 	auth := github.AppAuth{
 		AppID:          cfg.GitHubAppID,
 		InstallationID: cfg.GitHubInstallationID,
+		PrivateKey:     cfg.GitHubAppPrivateKey,
 		PrivateKeyPath: cfg.GitHubAppPrivateKeyPath,
 	}
 	return github.GetInstallationToken(auth)

@@ -10,6 +10,7 @@ type Config struct {
 	GitHubWebhookSecret      string
 	GitHubToken              string
 	GitHubAppID              string
+	GitHubAppPrivateKey      string
 	GitHubAppPrivateKeyPath  string
 	GitHubInstallationID     string
 	DeepSeekAPIKey           string
@@ -24,6 +25,7 @@ func Load() *Config {
 		GitHubWebhookSecret:     getEnv("GITHUB_WEBHOOK_SECRET", ""),
 		GitHubToken:             getEnv("GITHUB_TOKEN", ""),
 		GitHubAppID:             getEnv("GITHUB_APP_ID", ""),
+		GitHubAppPrivateKey:     getEnv("GITHUB_APP_PRIVATE_KEY", ""),
 		GitHubAppPrivateKeyPath: getEnv("GITHUB_APP_PRIVATE_KEY_PATH", ""),
 		GitHubInstallationID:    getEnv("GITHUB_INSTALLATION_ID", ""),
 		DeepSeekAPIKey:          getEnv("DEEPSEEK_API_KEY", ""),

@@ -11,6 +11,7 @@
 - 后端：Webhook 接入、异步任务队列、并发控制、分布式锁、状态机、审计、限流。
 - Agent：Tool Calling 框架、上下文裁剪、结构化输出、评测集、token 成本控制。
 - 真实可跑：能部署成 GitHub App，在自己仓库上演示。
+- a7f3d9c2b1e8f4a9d6c3b2e1f8a7d9c4
 
 ## 3. 整体架构
 

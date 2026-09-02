@@ -24,6 +24,7 @@ var ErrMissingAppConfig = errors.New("github app config incomplete")
 type AppAuth struct {
 	AppID          string
 	InstallationID string
+	PrivateKey     string
 	PrivateKeyPath string
 }
 
@@ -32,6 +33,10 @@ func LoadPrivateKey(path string) (*rsa.PrivateKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read private key: %w", err)
 	}
+	return ParsePrivateKey(data)
+}
+
+func ParsePrivateKey(data []byte) (*rsa.PrivateKey, error) {
 	block, _ := pem.Decode(data)
 	if block == nil {
 		return nil, errors.New("invalid private key pem")
@@ -83,12 +88,21 @@ func signJWT(header map[string]string, claims map[string]any, key *rsa.PrivateKe
 }
 
 func GetInstallationToken(auth AppAuth) (string, error) {
-	if auth.AppID == "" || auth.InstallationID == "" || auth.PrivateKeyPath == "" {
+	if auth.AppID == "" || auth.InstallationID == "" || (auth.PrivateKey == "" && auth.PrivateKeyPath == "") {
 		return "", ErrMissingAppConfig
 	}
-	key, err := LoadPrivateKey(auth.PrivateKeyPath)
-	if err != nil {
-		return "", err
+	var key *rsa.PrivateKey
+	var err error
+	if auth.PrivateKey != "" {
+		key, err = ParsePrivateKey([]byte(auth.PrivateKey))
+		if err != nil {
+			return "", err
+		}
+	} else {
+		key, err = LoadPrivateKey(auth.PrivateKeyPath)
+		if err != nil {
+			return "", err
+		}
 	}
 	jwt, err := CreateAppJWT(auth.AppID, key)
 	if err != nil {
