@@ -6,17 +6,16 @@ import (
 )
 
 type Config struct {
-	Port                     string
-	GitHubWebhookSecret      string
-	GitHubToken              string
-	GitHubAppID              string
-	GitHubAppPrivateKey      string
-	GitHubAppPrivateKeyPath  string
-	GitHubInstallationID     string
-	DeepSeekAPIKey           string
-	DeepSeekBaseURL          string
-	DeepSeekModel            string
-	MaxDiffLines             int
+	Port                    string
+	GitHubWebhookSecret     string
+	GitHubToken             string
+	GitHubAppID             string
+	GitHubAppPrivateKey     string
+	GitHubAppPrivateKeyPath string
+	GitHubInstallationID    string
+	DeepSeekAPIKey          string
+	DeepSeekBaseURL         string
+	DeepSeekModel           string
 }
 
 func Load() *Config {
