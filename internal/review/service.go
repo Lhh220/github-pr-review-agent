@@ -29,7 +29,7 @@ func New(gh *github.Client, l *llm.Client, maxDiffLines, maxFileContexts, maxFil
 	}
 }
 
-func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int) error {
+func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int, taskID uint64) error {
 	pr, err := s.GitHub.GetPullRequest(ctx, owner, repo, number)
 	if err != nil {
 		return fmt.Errorf("get pull request: %w", err)
@@ -51,11 +51,23 @@ func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int) 
 	if err != nil {
 		return fmt.Errorf("review code: %w", err)
 	}
-	comment := "## Automated Code Review\n\n" + reviewText
+	comment := buildReviewComment(reviewText, taskID, pr.Head.SHA)
 	if err := s.GitHub.CreatePullRequestReview(ctx, owner, repo, number, comment); err != nil {
 		return fmt.Errorf("create pull request review: %w", err)
 	}
 	return nil
+}
+
+func buildReviewComment(reviewText string, taskID uint64, commitSHA string) string {
+	footer := fmt.Sprintf("Task #%d | commit %s", taskID, shortCommitSHA(commitSHA))
+	return fmt.Sprintf("## Automated Code Review\n\n%s\n\n---\n%s", reviewText, footer)
+}
+
+func shortCommitSHA(commitSHA string) string {
+	if len(commitSHA) >= 7 {
+		return commitSHA[:7]
+	}
+	return commitSHA
 }
 
 func (s *Service) fetchFileContents(ctx context.Context, owner, repo, ref string, files []github.PullRequestFile) []github.FileContent {

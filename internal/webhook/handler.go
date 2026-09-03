@@ -101,7 +101,7 @@ func (h *Handler) runReview(taskID uint64, owner, repo string, number int) {
 	if err := h.Store.UpdateTaskStatus(context.Background(), taskID, "running", ""); err != nil {
 		log.Printf("mark review task running failed: task_id=%d error=%v", taskID, err)
 	}
-	if err := h.Reviewer.ReviewPR(ctx, owner, repo, number); err != nil {
+	if err := h.Reviewer.ReviewPR(ctx, owner, repo, number, taskID); err != nil {
 		errMessage := err.Error()
 		log.Printf("review pr failed: owner=%s repo=%s number=%d task_id=%d error=%v", owner, repo, number, taskID, err)
 		if updateErr := h.Store.UpdateTaskStatus(context.Background(), taskID, "failed", errMessage); updateErr != nil {

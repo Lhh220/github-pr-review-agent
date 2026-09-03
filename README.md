@@ -168,6 +168,14 @@ Authorization: Bearer <ADMIN_TOKEN>
 }
 ```
 
+PR 审查评论末尾会附带任务标识，例如：
+
+```text
+Task #1 | commit 291ac5a
+```
+
+可以通过这个任务 ID 到 `/tasks/:id` 查询完整状态。
+
 ## 当前能力边界
 
 当前 MVP 是 **diff + changed-file-context reviewer**：
