@@ -47,9 +47,15 @@ type chatResponse struct {
 	} `json:"choices"`
 }
 
-func (c *Client) ReviewCode(ctx context.Context, title, body, diff string) (string, error) {
+func (c *Client) ReviewCode(ctx context.Context, title, body, diff, fileContext string) (string, error) {
 	system := "You are a senior code reviewer. Focus on real bugs, performance issues, security risks, and important readability problems. Be concise and specific. If the code looks good, say so briefly."
-	user := fmt.Sprintf("Pull request title: %s\n\nPull request description:\n%s\n\nChanged files diff:\n%s", title, body, diff)
+	user := fmt.Sprintf(
+		"Pull request title: %s\n\nPull request description:\n%s\n\nChanged files diff:\n%s\n\nChanged file context:\n%s",
+		title,
+		body,
+		diff,
+		fileContext,
+	)
 	reqBody := chatRequest{
 		Model: c.model,
 		Messages: []message{

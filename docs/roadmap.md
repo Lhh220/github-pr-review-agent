@@ -17,13 +17,16 @@
 目标：跑通“PR 事件 -> 审查 -> 回写评论”主链路。
 
 任务：
-- Webhook 接收 PR 事件，签名校验
-- 用 GitHub API 拿 PR meta、diff、文件内容
-- 调 DeepSeek 生成审查意见（先不用 Tool Calling，直接给 diff）
-- 回写 PR 评论
-- 简单任务表记录状态
+- [x] Webhook 接收 PR 事件，签名校验
+- [x] 用 GitHub API 拿 PR meta、diff、文件内容
+- [x] 调 DeepSeek 生成审查意见（先不用 Tool Calling，直接给 diff + 变更文件上下文）
+- [x] 回写 PR 评论
+- [x] MySQL 简单任务表记录状态
+- [x] `/tasks`、`/tasks/:id` 查询任务状态
 
 验收：在一个测试仓库开 PR，能收到评论，任务状态能查。
+
+当前状态：已完成。线上链路已验证能回写 PR Review；本地 MySQL 已验证任务创建、去重、状态流转和查询。
 
 ## 阶段 2：工程化（1-2 周）
 

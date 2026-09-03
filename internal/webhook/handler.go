@@ -12,21 +12,31 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/liaohonghui/github-pr-review-agent/internal/github"
 	"github.com/liaohonghui/github-pr-review-agent/internal/review"
+	"github.com/liaohonghui/github-pr-review-agent/internal/store"
 )
 
 type Handler struct {
-	Secret  string
+	Secret   string
 	Reviewer *review.Service
+	Store    TaskStore
 }
 
-func New(secret string, reviewer *review.Service) *Handler {
-	return &Handler{Secret: secret, Reviewer: reviewer}
+func New(secret string, reviewer *review.Service, taskStore TaskStore) *Handler {
+	return &Handler{Secret: secret, Reviewer: reviewer, Store: taskStore}
+}
+
+type TaskStore interface {
+	CreateTask(ctx context.Context, input store.NewTask) (*store.Task, bool, error)
+	UpdateTaskStatus(ctx context.Context, id uint64, status, taskError string) error
 }
 
 type payload struct {
 	Action      string `json:"action"`
 	PullRequest struct {
 		Number int `json:"number"`
+		Head   struct {
+			SHA string `json:"sha"`
+		} `json:"head"`
 	} `json:"pull_request"`
 	Repository struct {
 		FullName string `json:"full_name"`
@@ -61,12 +71,45 @@ func (h *Handler) Handle(c *gin.Context) {
 		return
 	}
 	owner, repo := parts[0], parts[1]
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-		if err := h.Reviewer.ReviewPR(ctx, owner, repo, p.PullRequest.Number); err != nil {
-			log.Printf("review pr failed: owner=%s repo=%s number=%d error=%v", owner, repo, p.PullRequest.Number, err)
+	createCtx, cancelCreate := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelCreate()
+	task, created, err := h.Store.CreateTask(createCtx, store.NewTask{
+		Repo:       p.Repository.FullName,
+		PRNumber:   p.PullRequest.Number,
+		CommitSHA:  p.PullRequest.Head.SHA,
+		Action:     p.Action,
+		DeliveryID: c.GetHeader("X-GitHub-Delivery"),
+	})
+	if err != nil {
+		log.Printf("create review task failed: owner=%s repo=%s number=%d error=%v", owner, repo, p.PullRequest.Number, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "create review task"})
+		return
+	}
+	if !created {
+		c.JSON(http.StatusAccepted, gin.H{"status": "duplicate", "task_id": task.ID})
+		return
+	}
+
+	go h.runReview(task.ID, owner, repo, p.PullRequest.Number)
+	c.JSON(http.StatusAccepted, gin.H{"status": "accepted", "task_id": task.ID})
+}
+
+func (h *Handler) runReview(taskID uint64, owner, repo string, number int) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	if err := h.Store.UpdateTaskStatus(context.Background(), taskID, "running", ""); err != nil {
+		log.Printf("mark review task running failed: task_id=%d error=%v", taskID, err)
+	}
+	if err := h.Reviewer.ReviewPR(ctx, owner, repo, number); err != nil {
+		errMessage := err.Error()
+		log.Printf("review pr failed: owner=%s repo=%s number=%d task_id=%d error=%v", owner, repo, number, taskID, err)
+		if updateErr := h.Store.UpdateTaskStatus(context.Background(), taskID, "failed", errMessage); updateErr != nil {
+			log.Printf("mark review task failed failed: task_id=%d error=%v", taskID, updateErr)
 		}
-	}()
-	c.JSON(http.StatusAccepted, gin.H{"status": "accepted"})
+		return
+	}
+	if err := h.Store.UpdateTaskStatus(context.Background(), taskID, "done", ""); err != nil {
+		log.Printf("mark review task done failed: task_id=%d error=%v", taskID, err)
+	}
 }

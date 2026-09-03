@@ -9,9 +9,11 @@ MVP 已经跑通并部署到 Railway：
 - 接收 GitHub Webhook
 - 校验 `X-Hub-Signature-256`
 - 使用 GitHub App installation token 访问 GitHub API
-- 读取 PR 信息和 diff
+- 读取 PR 信息、diff 和变更文件内容
 - 调用 DeepSeek 生成审查意见
 - 通过 PR Review API 回写 `COMMENT` 类型审查
+- MySQL `review_task` 表记录任务状态
+- 提供 `/tasks` 和 `/tasks/:id` 查询任务状态
 
 当前线上示例：
 
@@ -60,6 +62,10 @@ DEEPSEEK_API_KEY=...
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-chat
 MAX_DIFF_LINES=2000
+MAX_FILE_CONTEXTS=10
+MAX_FILE_CONTEXT_LINES=200
+MYSQL_DSN=root:<password>@tcp(127.0.0.1:3306)/github_pr_review_agent?charset=utf8mb4&parseTime=true&loc=Local
+ADMIN_TOKEN=...
 ```
 
 说明：
@@ -68,6 +74,12 @@ MAX_DIFF_LINES=2000
 - `GITHUB_APP_PRIVATE_KEY_PATH`：私钥文件路径，适合本地调试。
 - `GITHUB_INSTALLATION_ID`：GitHub App 安装到仓库后的 installation ID。
 - `MAX_DIFF_LINES`：控制送给 LLM 的 diff 长度，避免 token 成本过高。
+- `MAX_FILE_CONTEXTS`：最多读取几个变更文件的完整内容，`0` 表示关闭。
+- `MAX_FILE_CONTEXT_LINES`：每个文件最多送多少行内容给 LLM。
+- `MYSQL_DSN`：MySQL 连接串。不要把真实密码提交进 Git。
+- `ADMIN_TOKEN`：查询任务接口的 Bearer Token；为空时接口不鉴权，生产环境建议配置。
+
+注意：Railway 容器无法通过 `127.0.0.1` 访问你本机的 MySQL。线上要在 Railway 里创建 MySQL 服务，或使用其他公网可达的 MySQL，并把对应的 `MYSQL_DSN` 配到 Railway 变量里。
 
 本地快速调试也可以用 PAT：
 
@@ -86,8 +98,10 @@ GITHUB_TOKEN=...
    $env:GITHUB_APP_ID="你的 App ID"
    $env:GITHUB_APP_PRIVATE_KEY_PATH="D:\path\to\private-key.pem"
    $env:GITHUB_INSTALLATION_ID="你的 installation ID"
-   $env:DEEPSEEK_API_KEY="你的 DeepSeek API key"
-   ```
+$env:DEEPSEEK_API_KEY="你的 DeepSeek API key"
+$env:MYSQL_DSN="root:<password>@tcp(127.0.0.1:3306)/github_pr_review_agent?charset=utf8mb4&parseTime=true&loc=Local"
+$env:ADMIN_TOKEN="本地调试 token，可不配"
+```
 
 2. 启动服务：
 
@@ -116,12 +130,50 @@ go test ./...
 go vet ./...
 ```
 
+## 任务状态查询
+
+服务启动后会自动创建 `review_task` 表。任务状态流转：
+
+```text
+received -> running -> done
+                 |
+                 v
+               failed
+```
+
+查询任务列表：
+
+```text
+GET /tasks?repo=Lhh220/github-pr-review-agent&status=done&limit=20
+Authorization: Bearer <ADMIN_TOKEN>
+```
+
+查询单个任务：
+
+```text
+GET /tasks/<task_id>
+Authorization: Bearer <ADMIN_TOKEN>
+```
+
+返回示例：
+
+```json
+{
+  "id": 1,
+  "repo": "Lhh220/github-pr-review-agent",
+  "pr_number": 7,
+  "commit_sha": "0123456789abcdef0123456789abcdef01234567",
+  "action": "opened",
+  "status": "done"
+}
+```
+
 ## 当前能力边界
 
-当前 MVP 是 **diff-only reviewer**：
+当前 MVP 是 **diff + changed-file-context reviewer**：
 
-- 只把 PR diff 交给 LLM
-- 看不到改动文件之外的完整代码
+- 会把 PR diff 和变更文件内容交给 LLM
+- 还看不到改动文件之外的关联代码
 - 无法确认被删除的字段、函数、类型是否仍被其他文件引用
 - 无法验证 PR 是否能通过编译、测试或静态检查
 

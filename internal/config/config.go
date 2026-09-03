@@ -6,17 +6,21 @@ import (
 )
 
 type Config struct {
-	Port                     string
-	GitHubWebhookSecret      string
-	GitHubToken              string
-	GitHubAppID              string
-	GitHubAppPrivateKey      string
-	GitHubAppPrivateKeyPath  string
-	GitHubInstallationID     string
-	DeepSeekAPIKey           string
-	DeepSeekBaseURL          string
-	DeepSeekModel            string
-	MaxDiffLines             int
+	Port                    string
+	GitHubWebhookSecret     string
+	GitHubToken             string
+	GitHubAppID             string
+	GitHubAppPrivateKey     string
+	GitHubAppPrivateKeyPath string
+	GitHubInstallationID    string
+	DeepSeekAPIKey          string
+	DeepSeekBaseURL         string
+	DeepSeekModel           string
+	MaxDiffLines            int
+	MaxFileContexts         int
+	MaxFileContextLines     int
+	MySQLDSN                string
+	AdminToken              string
 }
 
 func Load() *Config {
@@ -32,6 +36,10 @@ func Load() *Config {
 		DeepSeekBaseURL:         getEnv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
 		DeepSeekModel:           getEnv("DEEPSEEK_MODEL", "deepseek-chat"),
 		MaxDiffLines:            getEnvInt("MAX_DIFF_LINES", 2000),
+		MaxFileContexts:         getEnvInt("MAX_FILE_CONTEXTS", 10),
+		MaxFileContextLines:     getEnvInt("MAX_FILE_CONTEXT_LINES", 200),
+		MySQLDSN:                getEnv("MYSQL_DSN", ""),
+		AdminToken:              getEnv("ADMIN_TOKEN", ""),
 	}
 }
 

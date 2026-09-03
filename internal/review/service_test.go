@@ -28,3 +28,23 @@ func TestBuildDiffTruncates(t *testing.T) {
 		t.Fatalf("expected truncation marker, got: %s", got)
 	}
 }
+
+func TestBuildFileContext(t *testing.T) {
+	contents := []github.FileContent{
+		{Path: "internal/config/config.go", Content: "line 1\nline 2"},
+	}
+	got := buildFileContext(contents, 10)
+	if !strings.Contains(got, "### internal/config/config.go") || !strings.Contains(got, "line 1") {
+		t.Fatalf("unexpected file context: %s", got)
+	}
+}
+
+func TestBuildFileContextTruncates(t *testing.T) {
+	contents := []github.FileContent{
+		{Path: "a.go", Content: "1\n2\n3\n4\n5"},
+	}
+	got := buildFileContext(contents, 3)
+	if !strings.Contains(got, "content truncated") {
+		t.Fatalf("expected truncation marker, got: %s", got)
+	}
+}

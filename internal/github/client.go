@@ -3,11 +3,13 @@ package github
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -78,6 +80,16 @@ type PullRequestFile struct {
 	Patch     string `json:"patch"`
 }
 
+type FileContent struct {
+	Path    string
+	Content string
+}
+
+type fileContentResponse struct {
+	Content  string `json:"content"`
+	Encoding string `json:"encoding"`
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) error {
 	token := c.token
 	if c.tokenSource != nil {
@@ -136,6 +148,29 @@ func (c *Client) GetPullRequestFiles(ctx context.Context, owner, repo string, nu
 		return nil, err
 	}
 	return files, nil
+}
+
+func (c *Client) GetFileContent(ctx context.Context, owner, repo, path, ref string) (string, error) {
+	query := ""
+	if ref != "" {
+		query = "?ref=" + url.QueryEscape(ref)
+	}
+	apiPath := fmt.Sprintf("/repos/%s/%s/contents/%s%s", owner, repo, url.PathEscape(path), query)
+	var out fileContentResponse
+	if err := c.do(ctx, http.MethodGet, apiPath, nil, &out); err != nil {
+		return "", err
+	}
+	if out.Content == "" {
+		return "", nil
+	}
+	if out.Encoding != "base64" {
+		return "", fmt.Errorf("unsupported file encoding: %s", out.Encoding)
+	}
+	content, err := base64.StdEncoding.DecodeString(out.Content)
+	if err != nil {
+		return "", fmt.Errorf("decode file content: %w", err)
+	}
+	return string(content), nil
 }
 
 func (c *Client) CreateIssueComment(ctx context.Context, owner, repo string, number int, body string) error {
