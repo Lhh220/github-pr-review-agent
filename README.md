@@ -1,59 +1,146 @@
 # GitHub PR 智能代码审查 Agent
 
-一个基于 Go 的 GitHub PR 自动审查 Agent。收到 GitHub PR 事件后，自动读取 PR 上下文和 diff，调用 LLM 生成审查意见，并回写 PR 评论。
+一个基于 Go 的 GitHub PR 自动审查 Agent。收到 GitHub PR 事件后，自动读取 PR 上下文和 diff，调用 DeepSeek 生成审查意见，并以 GitHub App bot 身份回写 PR Review。
 
 ## 当前进度
 
-当前是 MVP 版本，先跑通最小闭环：
+MVP 已经跑通并部署到 Railway：
 
 - 接收 GitHub Webhook
-- 校验签名
+- 校验 `X-Hub-Signature-256`
+- 使用 GitHub App installation token 访问 GitHub API
 - 读取 PR 信息和 diff
 - 调用 DeepSeek 生成审查意见
-- 回写 PR 评论
+- 通过 PR Review API 回写 `COMMENT` 类型审查
 
-后续会逐步加入 RabbitMQ、Redis 分布式锁、状态机、Tool Calling 和 tree-sitter 上下文裁剪。
+当前线上示例：
 
-GitHub App 需要的仓库权限：
+```text
+https://github-pr-review-agent-production.up.railway.app
+```
 
-- `Pull requests`: `Read & write`，用于读取 PR 并提交 Review
-- `Contents`: `Read-only`，用于读取 diff
-- `Metadata`: `Read-only`
+健康检查：
+
+```text
+GET /healthz
+```
+
+## GitHub App 配置
+
+创建 GitHub App 时需要：
+
+- Webhook URL：
+  ```text
+  https://github-pr-review-agent-production.up.railway.app/webhook/github
+  ```
+- Webhook secret：和 Railway 里的 `GITHUB_WEBHOOK_SECRET` 保持一致
+- Subscribe to events：`Pull request`
+
+需要的仓库权限：
+
+| 权限 | 级别 | 用途 |
+| --- | --- | --- |
+| `Pull requests` | `Read & write` | 读取 PR / diff，提交 PR Review |
+| `Contents` | `Read-only` | 读取仓库文件内容 |
+| `Metadata` | `Read-only` | 基础仓库信息 |
+
+不再需要 `Issues: write`。当前实现使用 PR Review API，不是 Issue Comment API。
+
+## 环境变量
+
+Railway / 生产环境建议使用 GitHub App：
+
+```text
+PORT=8080
+GITHUB_WEBHOOK_SECRET=...
+GITHUB_APP_ID=...
+GITHUB_APP_PRIVATE_KEY=...
+GITHUB_INSTALLATION_ID=...
+DEEPSEEK_API_KEY=...
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-chat
+MAX_DIFF_LINES=2000
+```
+
+说明：
+
+- `GITHUB_APP_PRIVATE_KEY`：GitHub App 私钥内容，适合 Railway。
+- `GITHUB_APP_PRIVATE_KEY_PATH`：私钥文件路径，适合本地调试。
+- `GITHUB_INSTALLATION_ID`：GitHub App 安装到仓库后的 installation ID。
+- `MAX_DIFF_LINES`：控制送给 LLM 的 diff 长度，避免 token 成本过高。
+
+本地快速调试也可以用 PAT：
+
+```text
+GITHUB_TOKEN=...
+```
+
+但正式演示和部署建议使用 GitHub App，这样评论会以独立 bot 身份发出。
 
 ## 本地运行
 
 1. 准备环境变量：
 
-```powershell
-$env:GITHUB_WEBHOOK_SECRET="你的webhook secret"
-$env:GITHUB_TOKEN="你的 GitHub token"
-$env:DEEPSEEK_API_KEY="你的 DeepSeek API key"
-```
-
-如果使用 GitHub App，也可以配置：
-
-```powershell
-$env:GITHUB_APP_ID="你的 App ID"
-$env:GITHUB_APP_PRIVATE_KEY="你的私钥内容"
-$env:GITHUB_APP_PRIVATE_KEY_PATH="D:\path\to\private-key.pem"
-$env:GITHUB_INSTALLATION_ID="你的 installation ID"
-```
+   ```powershell
+   $env:GITHUB_WEBHOOK_SECRET="你的 webhook secret"
+   $env:GITHUB_APP_ID="你的 App ID"
+   $env:GITHUB_APP_PRIVATE_KEY_PATH="D:\path\to\private-key.pem"
+   $env:GITHUB_INSTALLATION_ID="你的 installation ID"
+   $env:DEEPSEEK_API_KEY="你的 DeepSeek API key"
+   ```
 
 2. 启动服务：
 
+   ```powershell
+   go run ./cmd/server
+   ```
+
+3. 如需本地接收 GitHub Webhook，再用 ngrok 临时暴露端口：
+
+   ```powershell
+   ngrok http 8080
+   ```
+
+   然后把 GitHub App 的 webhook URL 临时改成：
+
+   ```text
+   https://<你的-ngrok-域名>/webhook/github
+   ```
+
+ngrok 只用于本地调试；线上部署使用 Railway 的公网 HTTPS 地址，不需要 ngrok。
+
+## 测试
+
 ```powershell
-go run ./cmd/server
+go test ./...
+go vet ./...
 ```
 
-3. 用 ngrok 暴露本地端口：
+## 当前能力边界
 
-```powershell
-ngrok http 8080
-```
+当前 MVP 是 **diff-only reviewer**：
 
-4. 在 GitHub App 或仓库 Webhook 里把 `POST /webhook/github` 指向 ngrok 地址。
+- 只把 PR diff 交给 LLM
+- 看不到改动文件之外的完整代码
+- 无法确认被删除的字段、函数、类型是否仍被其他文件引用
+- 无法验证 PR 是否能通过编译、测试或静态检查
 
-## 说明
+下一阶段计划升级为 **code-aware agent**，增加：
 
-- `GITHUB_TOKEN` 适合本地快速调试。
-- 正式演示建议用 GitHub App，评论会以独立 bot 身份发出。
+- `read_file_context`
+- `search_references`
+- `run_static_checks`
+- `confirmed / needs_verification` 结论分级
+
+详细设计见 [docs/design.md](docs/design.md)。
+
+## 后续计划
+
+- RabbitMQ 异步队列
+- Redis 分布式锁和限流
+- MySQL 任务、结果、审计存储
+- Tool Calling 框架
+- tree-sitter 上下文裁剪
+- 结构化审查输出和评测集
+
+开发节奏见 [docs/roadmap.md](docs/roadmap.md)。
