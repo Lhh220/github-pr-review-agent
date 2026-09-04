@@ -8,8 +8,9 @@ MVP 已经跑通并部署到 Railway：
 
 - 接收 GitHub Webhook
 - 校验 `X-Hub-Signature-256`
+- 只接受 `pull_request` 事件，并过滤有效 action
 - 使用 GitHub App installation token 访问 GitHub API
-- 读取 PR 信息、diff 和变更文件内容
+- 读取 PR 信息、diff 和变更文件内容，PR 文件列表支持分页
 - 调用 DeepSeek 生成审查意见
 - 通过 PR Review API 回写 `COMMENT` 类型审查
 - MySQL `review_task` 表记录任务状态
@@ -54,6 +55,7 @@ Railway / 生产环境建议使用 GitHub App：
 
 ```text
 PORT=8080
+APP_ENV=production
 GITHUB_WEBHOOK_SECRET=...
 GITHUB_APP_ID=...
 GITHUB_APP_PRIVATE_KEY=...
@@ -71,6 +73,7 @@ ADMIN_TOKEN=...
 说明：
 
 - `GITHUB_APP_PRIVATE_KEY`：GitHub App 私钥内容，适合 Railway。
+- `APP_ENV`：`production` 时启动强制要求 `GITHUB_WEBHOOK_SECRET` 和 `ADMIN_TOKEN`；本地默认 `local`，允许为空方便调试。
 - `GITHUB_APP_PRIVATE_KEY_PATH`：私钥文件路径，适合本地调试。
 - `GITHUB_INSTALLATION_ID`：GitHub App 安装到仓库后的 installation ID。
 - `MAX_DIFF_LINES`：控制送给 LLM 的 diff 长度，避免 token 成本过高。

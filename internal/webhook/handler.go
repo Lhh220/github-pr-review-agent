@@ -3,6 +3,7 @@ package webhook
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -11,17 +12,23 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/liaohonghui/github-pr-review-agent/internal/github"
-	"github.com/liaohonghui/github-pr-review-agent/internal/review"
 	"github.com/liaohonghui/github-pr-review-agent/internal/store"
 )
 
 type Handler struct {
-	Secret   string
-	Reviewer *review.Service
-	Store    TaskStore
+	Secret string
+	Store  TaskStore
+
+	// Reviewer is an interface so the webhook handler can be tested without a
+	// real GitHub client or LLM provider.
+	Reviewer Reviewer
 }
 
-func New(secret string, reviewer *review.Service, taskStore TaskStore) *Handler {
+type Reviewer interface {
+	ReviewPR(ctx context.Context, owner, repo string, number int, taskID uint64) error
+}
+
+func New(secret string, reviewer Reviewer, taskStore TaskStore) *Handler {
 	return &Handler{Secret: secret, Reviewer: reviewer, Store: taskStore}
 }
 
@@ -52,6 +59,10 @@ func (h *Handler) Handle(c *gin.Context) {
 	signature := c.GetHeader("X-Hub-Signature-256")
 	if !github.VerifyWebhookSignature(h.Secret, body, signature) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid signature"})
+		return
+	}
+	if c.GetHeader("X-GitHub-Event") != "pull_request" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid event type"})
 		return
 	}
 	var p payload
@@ -98,18 +109,39 @@ func (h *Handler) runReview(taskID uint64, owner, repo string, number int) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	if err := h.Store.UpdateTaskStatus(context.Background(), taskID, "running", ""); err != nil {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			message := fmt.Sprintf("review panicked: %v", recovered)
+			log.Printf("%s task_id=%d", message, taskID)
+			statusCtx, cancelStatus := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancelStatus()
+			if err := h.Store.UpdateTaskStatus(statusCtx, taskID, "failed", message); err != nil {
+				log.Printf("mark panicked review task failed failed: task_id=%d error=%v", taskID, err)
+			}
+		}
+	}()
+
+	statusCtx, cancelStatus := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := h.Store.UpdateTaskStatus(statusCtx, taskID, "running", ""); err != nil {
 		log.Printf("mark review task running failed: task_id=%d error=%v", taskID, err)
 	}
+	cancelStatus()
+
 	if err := h.Reviewer.ReviewPR(ctx, owner, repo, number, taskID); err != nil {
 		errMessage := err.Error()
 		log.Printf("review pr failed: owner=%s repo=%s number=%d task_id=%d error=%v", owner, repo, number, taskID, err)
-		if updateErr := h.Store.UpdateTaskStatus(context.Background(), taskID, "failed", errMessage); updateErr != nil {
+		failedCtx, cancelFailed := context.WithTimeout(context.Background(), 5*time.Second)
+		updateErr := h.Store.UpdateTaskStatus(failedCtx, taskID, "failed", errMessage)
+		cancelFailed()
+		if updateErr != nil {
 			log.Printf("mark review task failed failed: task_id=%d error=%v", taskID, updateErr)
 		}
 		return
 	}
-	if err := h.Store.UpdateTaskStatus(context.Background(), taskID, "done", ""); err != nil {
+	doneCtx, cancelDone := context.WithTimeout(context.Background(), 5*time.Second)
+	err := h.Store.UpdateTaskStatus(doneCtx, taskID, "done", "")
+	cancelDone()
+	if err != nil {
 		log.Printf("mark review task done failed: task_id=%d error=%v", taskID, err)
 	}
 }

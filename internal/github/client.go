@@ -16,16 +16,20 @@ import (
 
 const apiBaseURL = "https://api.github.com"
 
+const maxPullRequestFilePages = 10
+
 type Client struct {
 	token       string
 	tokenSource func() (string, error)
 	http        *http.Client
+	baseURL     string
 }
 
 func NewClient(token string) *Client {
 	return &Client{
-		token: token,
-		http:  &http.Client{Timeout: 30 * time.Second},
+		token:   token,
+		http:    &http.Client{Timeout: 30 * time.Second},
+		baseURL: apiBaseURL,
 	}
 }
 
@@ -54,7 +58,8 @@ func NewAppClient(auth AppAuth) *Client {
 			)
 			return token.Token, nil
 		},
-		http: &http.Client{Timeout: 30 * time.Second},
+		http:    &http.Client{Timeout: 30 * time.Second},
+		baseURL: apiBaseURL,
 	}
 }
 
@@ -107,7 +112,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 		}
 		reader = bytes.NewReader(buf)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, apiBaseURL+path, reader)
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
 	if err != nil {
 		return err
 	}
@@ -143,9 +148,19 @@ func (c *Client) GetPullRequest(ctx context.Context, owner, repo string, number 
 
 func (c *Client) GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]PullRequestFile, error) {
 	var files []PullRequestFile
-	path := fmt.Sprintf("/repos/%s/%s/pulls/%d/files?per_page=100", owner, repo, number)
-	if err := c.do(ctx, http.MethodGet, path, nil, &files); err != nil {
-		return nil, err
+	for page := 1; page <= maxPullRequestFilePages; page++ {
+		path := fmt.Sprintf(
+			"/repos/%s/%s/pulls/%d/files?per_page=100&page=%d",
+			owner, repo, number, page,
+		)
+		var pageFiles []PullRequestFile
+		if err := c.do(ctx, http.MethodGet, path, nil, &pageFiles); err != nil {
+			return nil, err
+		}
+		files = append(files, pageFiles...)
+		if len(pageFiles) < 100 {
+			break
+		}
 	}
 	return files, nil
 }
@@ -171,12 +186,6 @@ func (c *Client) GetFileContent(ctx context.Context, owner, repo, path, ref stri
 		return "", fmt.Errorf("decode file content: %w", err)
 	}
 	return string(content), nil
-}
-
-func (c *Client) CreateIssueComment(ctx context.Context, owner, repo string, number int, body string) error {
-	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, repo, number)
-	payload := map[string]string{"body": body}
-	return c.do(ctx, http.MethodPost, path, payload, nil)
 }
 
 func (c *Client) CreatePullRequestReview(ctx context.Context, owner, repo string, number int, body string) error {

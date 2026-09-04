@@ -6,6 +6,7 @@ import (
 )
 
 type Config struct {
+	AppEnv                  string
 	Port                    string
 	GitHubWebhookSecret     string
 	GitHubToken             string
@@ -25,6 +26,7 @@ type Config struct {
 
 func Load() *Config {
 	return &Config{
+		AppEnv:                  getEnv("APP_ENV", "local"),
 		Port:                    getEnv("PORT", "8080"),
 		GitHubWebhookSecret:     getEnv("GITHUB_WEBHOOK_SECRET", ""),
 		GitHubToken:             getEnv("GITHUB_TOKEN", ""),

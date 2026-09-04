@@ -57,6 +57,7 @@ MySQL (任务/结果/审计) + Redis (锁/去重/限流)
 
 - 路由：`POST /webhook/github`
 - 校验 GitHub 签名（X-Hub-Signature-256）。
+- 校验 `X-GitHub-Event` 必须是 `pull_request`，拒绝无关事件进入任务链路。
 - 解析 PR 事件，只处理 `opened / synchronize / reopened`。
 - 生成 taskId，幂等写入 MySQL（repo + pr_number + commit_sha 唯一），避免重复投递。
 - 投递到 RabbitMQ 后立即返回 202。
@@ -231,6 +232,8 @@ type Provider interface {
 ## 7. 安全与成本
 
 - Webhook 签名校验，防止伪造。
+- `APP_ENV=production` 时启动强制要求 `GITHUB_WEBHOOK_SECRET` 和 `ADMIN_TOKEN`，避免生产环境误配置。
+- 任务查询接口使用 Bearer Token 鉴权。
 - 工具调用只读，不执行写操作（除回写评论）。
 - Redis 限流，防止同仓库洪泛。
 - token 成本统计：每次 LLM 调用记录 input/output tokens，落库。

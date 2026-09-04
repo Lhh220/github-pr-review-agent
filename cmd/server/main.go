@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/liaohonghui/github-pr-review-agent/internal/config"
@@ -16,6 +17,14 @@ import (
 
 func main() {
 	cfg := config.Load()
+	if strings.EqualFold(cfg.AppEnv, "production") {
+		if cfg.GitHubWebhookSecret == "" {
+			log.Fatal("GITHUB_WEBHOOK_SECRET is required in production")
+		}
+		if cfg.AdminToken == "" {
+			log.Fatal("ADMIN_TOKEN is required in production")
+		}
+	}
 	if cfg.MySQLDSN == "" {
 		log.Fatal("MYSQL_DSN is required")
 	}

@@ -8,18 +8,28 @@ import (
 	"strings"
 
 	"github.com/liaohonghui/github-pr-review-agent/internal/github"
-	"github.com/liaohonghui/github-pr-review-agent/internal/llm"
 )
 
+type GitHubClient interface {
+	GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error)
+	GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, error)
+	GetFileContent(ctx context.Context, owner, repo, path, ref string) (string, error)
+	CreatePullRequestReview(ctx context.Context, owner, repo string, number int, body string) error
+}
+
+type LLMClient interface {
+	ReviewCode(ctx context.Context, title, body, diff, fileContext string) (string, error)
+}
+
 type Service struct {
-	GitHub              *github.Client
-	LLM                 *llm.Client
+	GitHub              GitHubClient
+	LLM                 LLMClient
 	MaxDiffLines        int
 	MaxFileContexts     int
 	MaxFileContextLines int
 }
 
-func New(gh *github.Client, l *llm.Client, maxDiffLines, maxFileContexts, maxFileContextLines int) *Service {
+func New(gh GitHubClient, l LLMClient, maxDiffLines, maxFileContexts, maxFileContextLines int) *Service {
 	return &Service{
 		GitHub:              gh,
 		LLM:                 l,
