@@ -22,6 +22,21 @@ func TestMySQLTaskStore(t *testing.T) {
 	}
 	defer s.Close()
 
+	var createdPrecision, updatedPrecision int
+	err = s.db.QueryRowContext(ctx, `
+SELECT
+    MAX(CASE WHEN column_name = 'created_at' THEN datetime_precision END),
+    MAX(CASE WHEN column_name = 'updated_at' THEN datetime_precision END)
+FROM information_schema.columns
+WHERE table_schema = DATABASE()
+  AND table_name = 'review_task'`).Scan(&createdPrecision, &updatedPrecision)
+	if err != nil {
+		t.Fatalf("check timestamp precision: %v", err)
+	}
+	if createdPrecision < 3 || updatedPrecision < 3 {
+		t.Fatalf("timestamp precision = created:%d updated:%d, want at least 3", createdPrecision, updatedPrecision)
+	}
+
 	deliveryID := fmt.Sprintf("test-%d", time.Now().UnixNano())
 	task, created, err := s.CreateTask(ctx, NewTask{
 		Repo:       "Lhh220/github-pr-review-agent-test",

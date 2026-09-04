@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -25,13 +26,18 @@ type fakeTaskStore struct {
 	statuses      []string
 	statusUpdates chan string
 	mu            sync.Mutex
+	createCalls   int
 }
 
 func (f *fakeTaskStore) CreateTask(ctx context.Context, input store.NewTask) (*store.Task, bool, error) {
 	if f.err != nil {
 		return nil, false, f.err
 	}
-	return f.task, f.created, nil
+	f.mu.Lock()
+	created := f.created && f.createCalls == 0
+	f.createCalls++
+	f.mu.Unlock()
+	return f.task, created, nil
 }
 
 func (f *fakeTaskStore) UpdateTaskStatus(ctx context.Context, id uint64, status, taskError string) error {
@@ -190,5 +196,83 @@ func TestHandleMarksTaskFailedWhenReviewerPanics(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatalf("timed out waiting for task status %s", expected)
 		}
+	}
+}
+
+func TestHandleDuplicateDeliveryRunsReviewOnce(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	body := webhookPayload("opened")
+	reviewer := &fakeReviewer{calls: make(chan struct{}, 2)}
+	taskStore := &fakeTaskStore{
+		task:          &store.Task{ID: 1, Repo: "owner/repo", PRNumber: 12, Status: "received"},
+		created:       true,
+		statusUpdates: make(chan string, 2),
+	}
+	router.POST("/webhook/github", New("secret", reviewer, taskStore).Handle)
+
+	for i, expectedStatus := range []string{"accepted", "duplicate"} {
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, signedRequest(http.MethodPost, "/webhook/github", body, "pull_request", "secret"))
+		if recorder.Code != http.StatusAccepted {
+			t.Fatalf("request %d status = %d, want %d, body = %s", i+1, recorder.Code, http.StatusAccepted, recorder.Body.String())
+		}
+		if !strings.Contains(recorder.Body.String(), expectedStatus) {
+			t.Fatalf("request %d body = %s, want status %s", i+1, recorder.Body.String(), expectedStatus)
+		}
+	}
+
+	select {
+	case <-reviewer.calls:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first review")
+	}
+	select {
+	case <-reviewer.calls:
+		t.Fatal("duplicate delivery triggered a second review")
+	case <-time.After(100 * time.Millisecond):
+	}
+	for _, expected := range []string{"running", "done"} {
+		select {
+		case status := <-taskStore.statusUpdates:
+			if status != expected {
+				t.Fatalf("unexpected task status: got %s, want %s", status, expected)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for task status %s", expected)
+		}
+	}
+}
+
+func TestWaitContextWaitsForInFlightWork(t *testing.T) {
+	handler := New("", &fakeReviewer{}, &fakeTaskStore{})
+	release := make(chan struct{})
+	handler.workers.Add(1)
+	go func() {
+		defer handler.workers.Done()
+		<-release
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- handler.WaitContext(ctx)
+	}()
+
+	select {
+	case err := <-result:
+		t.Fatalf("WaitContext returned before work finished: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("WaitContext() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for WaitContext")
 	}
 }

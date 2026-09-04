@@ -73,7 +73,7 @@ func TestReviewPR(t *testing.T) {
 		t.Fatalf("unexpected model context: diff=%q fileContext=%q", llm.diff, llm.fileContext)
 	}
 	if !strings.Contains(gh.reviewBody, "No blocking issues.") ||
-		!strings.Contains(gh.reviewBody, "Task #1 | commit 291ac5a") {
+		!strings.Contains(gh.reviewBody, "Task ID: 1 | commit 291ac5a") {
 		t.Fatalf("unexpected review comment: %s", gh.reviewBody)
 	}
 }

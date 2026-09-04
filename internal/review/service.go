@@ -69,7 +69,7 @@ func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int, 
 }
 
 func buildReviewComment(reviewText string, taskID uint64, commitSHA string) string {
-	footer := fmt.Sprintf("Task #%d | commit %s", taskID, shortCommitSHA(commitSHA))
+	footer := fmt.Sprintf("Task ID: %d | commit %s", taskID, shortCommitSHA(commitSHA))
 	return fmt.Sprintf("## Automated Code Review\n\n%s\n\n---\n%s", reviewText, footer)
 }
 

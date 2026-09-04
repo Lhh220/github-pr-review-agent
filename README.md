@@ -14,6 +14,8 @@ MVP 已经跑通并部署到 Railway：
 - 调用 DeepSeek 生成审查意见
 - 通过 PR Review API 回写 `COMMENT` 类型审查
 - MySQL `review_task` 表记录任务状态
+- 通过 `delivery_id` 唯一约束实现 Webhook 幂等，重复投递不会重复审查
+- 支持优雅停机，退出前等待正在执行的审查任务
 - 提供 `/tasks` 和 `/tasks/:id` 查询任务状态
 
 当前线上示例：
@@ -151,6 +153,8 @@ GET /tasks?repo=Lhh220/github-pr-review-agent&status=done&limit=20
 Authorization: Bearer <ADMIN_TOKEN>
 ```
 
+列表和详情会返回 `duration_ms`，表示从任务创建到最后一次状态更新的耗时。任务仍在运行时，该值是到最近一次状态更新的耗时；任务完成后是总耗时。
+
 查询单个任务：
 
 ```text
@@ -167,14 +171,15 @@ Authorization: Bearer <ADMIN_TOKEN>
   "pr_number": 7,
   "commit_sha": "0123456789abcdef0123456789abcdef01234567",
   "action": "opened",
-  "status": "done"
+  "status": "done",
+  "duration_ms": 3200
 }
 ```
 
 PR 审查评论末尾会附带任务标识，例如：
 
 ```text
-Task #1 | commit 291ac5a
+Task ID: 1 | commit 291ac5a
 ```
 
 可以通过这个任务 ID 到 `/tasks/:id` 查询完整状态。

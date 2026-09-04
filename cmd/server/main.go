@@ -2,8 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
+	"net/http"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/liaohonghui/github-pr-review-agent/internal/config"
@@ -16,6 +23,9 @@ import (
 )
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	cfg := config.Load()
 	if strings.EqualFold(cfg.AppEnv, "production") {
 		if cfg.GitHubWebhookSecret == "" {
@@ -38,12 +48,16 @@ func main() {
 		token := cfg.GitHubToken
 		log.Printf("github auth mode: personal access token")
 		gh := github.NewClient(token)
-		startServer(cfg, gh, taskStore)
+		if err := startServer(ctx, cfg, gh, taskStore); err != nil {
+			log.Fatal(err)
+		}
 	} else {
 		auth := appAuth(cfg)
 		gh := github.NewAppClient(auth)
 		log.Printf("github auth mode: GitHub App, app_id=%s, installation_id=%s", cfg.GitHubAppID, cfg.GitHubInstallationID)
-		startServer(cfg, gh, taskStore)
+		if err := startServer(ctx, cfg, gh, taskStore); err != nil {
+			log.Fatal(err)
+		}
 	}
 }
 
@@ -56,10 +70,18 @@ func appAuth(cfg *config.Config) github.AppAuth {
 	}
 }
 
-func startServer(cfg *config.Config, gh *github.Client, taskStore *store.Store) {
+func startServer(ctx context.Context, cfg *config.Config, gh *github.Client, taskStore *store.Store) error {
 	l := llm.New(cfg.DeepSeekAPIKey, cfg.DeepSeekBaseURL, cfg.DeepSeekModel)
 	reviewer := review.New(gh, l, cfg.MaxDiffLines, cfg.MaxFileContexts, cfg.MaxFileContextLines)
 	handler := webhook.New(cfg.GitHubWebhookSecret, reviewer, taskStore)
+
+	defer func() {
+		waitCtx, cancelWait := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancelWait()
+		if err := handler.WaitContext(waitCtx); err != nil {
+			log.Printf("wait for in-flight reviews timed out: %v", err)
+		}
+	}()
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -69,8 +91,31 @@ func startServer(cfg *config.Config, gh *github.Client, taskStore *store.Store) 
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
-	log.Printf("github pr review agent listening on :%s", cfg.Port)
-	if err := r.Run(":" + cfg.Port); err != nil {
-		log.Fatalf("server exited: %v", err)
+
+	server := &http.Server{
+		Addr:              ":" + cfg.Port,
+		Handler:           r,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	serverErrors := make(chan error, 1)
+	go func() {
+		log.Printf("github pr review agent listening on :%s", cfg.Port)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErrors <- err
+		}
+	}()
+
+	select {
+	case err := <-serverErrors:
+		return fmt.Errorf("server exited: %w", err)
+	case <-ctx.Done():
+		log.Printf("shutdown signal received, draining in-flight requests and reviews")
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancelShutdown()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("shutdown server: %w", err)
+		}
+		log.Printf("server stopped gracefully")
+		return nil
 	}
 }

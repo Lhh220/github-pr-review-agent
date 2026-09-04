@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -22,6 +23,8 @@ type Handler struct {
 	// Reviewer is an interface so the webhook handler can be tested without a
 	// real GitHub client or LLM provider.
 	Reviewer Reviewer
+
+	workers sync.WaitGroup
 }
 
 type Reviewer interface {
@@ -30,6 +33,22 @@ type Reviewer interface {
 
 func New(secret string, reviewer Reviewer, taskStore TaskStore) *Handler {
 	return &Handler{Secret: secret, Reviewer: reviewer, Store: taskStore}
+}
+
+// WaitContext waits for in-flight reviews. A timeout prevents a stuck worker
+// from blocking process shutdown indefinitely.
+func (h *Handler) WaitContext(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		h.workers.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 type TaskStore interface {
@@ -101,7 +120,11 @@ func (h *Handler) Handle(c *gin.Context) {
 		return
 	}
 
-	go h.runReview(task.ID, owner, repo, p.PullRequest.Number)
+	h.workers.Add(1)
+	go func() {
+		defer h.workers.Done()
+		h.runReview(task.ID, owner, repo, p.PullRequest.Number)
+	}()
 	c.JSON(http.StatusAccepted, gin.H{"status": "accepted", "task_id": task.ID})
 }
 

@@ -2,6 +2,7 @@ package taskapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -46,7 +47,7 @@ func newTestTask() *store.Task {
 		Action:     "opened",
 		DeliveryID: "delivery-1",
 		Status:     "done",
-		CreatedAt:  now,
+		CreatedAt:  now.Add(-1500 * time.Millisecond),
 		UpdatedAt:  now,
 	}
 }
@@ -69,6 +70,50 @@ func TestListTasksWithoutConfiguredToken(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d body = %s", recorder.Code, recorder.Body.String())
 	}
+}
+
+func TestTaskResponsesIncludeDuration(t *testing.T) {
+	t.Run("list", func(t *testing.T) {
+		fake := &fakeStore{tasks: []store.Task{*newTestTask()}}
+		router := setupRouter(fake, "")
+
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+		router.ServeHTTP(recorder, req)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d body = %s", recorder.Code, recorder.Body.String())
+		}
+		var response struct {
+			Tasks []TaskResponse `json:"tasks"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if len(response.Tasks) != 1 || response.Tasks[0].DurationMS != 1500 {
+			t.Fatalf("unexpected response: %+v", response)
+		}
+	})
+
+	t.Run("get", func(t *testing.T) {
+		fake := &fakeStore{task: newTestTask()}
+		router := setupRouter(fake, "")
+
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/tasks/1", nil)
+		router.ServeHTTP(recorder, req)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d body = %s", recorder.Code, recorder.Body.String())
+		}
+		var response TaskResponse
+		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if response.DurationMS != 1500 {
+			t.Fatalf("duration_ms = %d, want 1500", response.DurationMS)
+		}
+	})
 }
 
 func TestAdminTokenAuthorization(t *testing.T) {

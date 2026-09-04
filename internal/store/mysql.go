@@ -78,14 +78,41 @@ CREATE TABLE IF NOT EXISTS review_task (
     delivery_id VARCHAR(64) NOT NULL,
     status VARCHAR(32) NOT NULL,
     error TEXT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     UNIQUE KEY uq_review_task_delivery (delivery_id),
     KEY idx_review_task_repo_pr (repo, pr_number),
     KEY idx_review_task_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
-	_, err := db.ExecContext(ctx, query)
-	return err
+	if _, err := db.ExecContext(ctx, query); err != nil {
+		return err
+	}
+	return ensureTimestampPrecision(ctx, db)
+}
+
+func ensureTimestampPrecision(ctx context.Context, db *sql.DB) error {
+	var impreciseColumns int
+	err := db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM information_schema.columns
+WHERE table_schema = DATABASE()
+  AND table_name = 'review_task'
+  AND column_name IN ('created_at', 'updated_at')
+  AND datetime_precision < 3`).Scan(&impreciseColumns)
+	if err != nil {
+		return fmt.Errorf("check review_task timestamp precision: %w", err)
+	}
+	if impreciseColumns == 0 {
+		return nil
+	}
+	_, err = db.ExecContext(ctx, `
+ALTER TABLE review_task
+    MODIFY created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    MODIFY updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)`)
+	if err != nil {
+		return fmt.Errorf("upgrade review_task timestamp precision: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) CreateTask(ctx context.Context, input NewTask) (*Task, bool, error) {
