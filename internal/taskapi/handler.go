@@ -16,6 +16,7 @@ import (
 type Store interface {
 	GetTask(ctx context.Context, id uint64) (*store.Task, error)
 	ListTasks(ctx context.Context, filter store.ListFilter) ([]store.Task, error)
+	GetReviewResultByTaskID(ctx context.Context, taskID uint64) (*store.ReviewResult, error)
 }
 
 type Handler struct {
@@ -37,6 +38,20 @@ type TaskResponse struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
+type ReviewResultResponse struct {
+	ID            uint64          `json:"id"`
+	TaskID        uint64          `json:"task_id"`
+	Summary       string          `json:"summary"`
+	Findings      []store.Finding `json:"findings"`
+	RawResponse   string          `json:"raw_response"`
+	Model         string          `json:"model"`
+	InputTokens   int             `json:"input_tokens"`
+	OutputTokens  int             `json:"output_tokens"`
+	TotalTokens   int             `json:"total_tokens"`
+	LLMDurationMS int64           `json:"llm_duration_ms"`
+	CreatedAt     time.Time       `json:"created_at"`
+}
+
 func New(store Store, adminToken string) *Handler {
 	return &Handler{store: store, adminToken: adminToken}
 }
@@ -45,6 +60,7 @@ func (h *Handler) Register(r *gin.Engine) {
 	group := r.Group("/tasks", h.authorize)
 	group.GET("", h.list)
 	group.GET("/:id", h.get)
+	group.GET("/:id/result", h.result)
 }
 
 func (h *Handler) authorize(c *gin.Context) {
@@ -103,6 +119,36 @@ func (h *Handler) get(c *gin.Context) {
 	c.JSON(http.StatusOK, newTaskResponse(*task))
 }
 
+func (h *Handler) result(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || id == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid task id"})
+		return
+	}
+	task, err := h.store.GetTask(c.Request.Context(), id)
+	if errors.Is(err, store.ErrTaskNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "get task"})
+		return
+	}
+	result, err := h.store.GetReviewResultByTaskID(c.Request.Context(), id)
+	if errors.Is(err, store.ErrReviewResultNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "review result not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "get review result"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"task":   newTaskResponse(*task),
+		"result": newReviewResultResponse(*result),
+	})
+}
+
 func newTaskResponse(task store.Task) TaskResponse {
 	var durationMS int64
 	if task.UpdatedAt.After(task.CreatedAt) {
@@ -120,6 +166,22 @@ func newTaskResponse(task store.Task) TaskResponse {
 		DurationMS: durationMS,
 		CreatedAt:  task.CreatedAt,
 		UpdatedAt:  task.UpdatedAt,
+	}
+}
+
+func newReviewResultResponse(result store.ReviewResult) ReviewResultResponse {
+	return ReviewResultResponse{
+		ID:            result.ID,
+		TaskID:        result.TaskID,
+		Summary:       result.Summary,
+		Findings:      result.Findings,
+		RawResponse:   result.RawResponse,
+		Model:         result.Model,
+		InputTokens:   result.InputTokens,
+		OutputTokens:  result.OutputTokens,
+		TotalTokens:   result.TotalTokens,
+		LLMDurationMS: result.LLMDurationMS,
+		CreatedAt:     result.CreatedAt,
 	}
 }
 

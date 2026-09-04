@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/liaohonghui/github-pr-review-agent/internal/github"
+	"github.com/liaohonghui/github-pr-review-agent/internal/store"
 )
 
 func TestBuildDiff(t *testing.T) {
@@ -50,7 +51,11 @@ func TestBuildFileContextTruncates(t *testing.T) {
 }
 
 func TestBuildReviewComment(t *testing.T) {
-	got := buildReviewComment("No issues.", 1, "291ac5aedc5fd96c5030a6c18e91923140677591")
+	result := store.ReviewResult{
+		Summary:  "No issues.",
+		Findings: []store.Finding{},
+	}
+	got := buildReviewComment(result, 1, "291ac5aedc5fd96c5030a6c18e91923140677591")
 	if !strings.Contains(got, "## Automated Code Review") ||
 		!strings.Contains(got, "No issues.") ||
 		!strings.Contains(got, "Task ID: 1 | commit 291ac5a") {

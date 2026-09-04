@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -24,6 +25,42 @@ type Task struct {
 	Error      string    `json:"error,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+type Finding struct {
+	Category   string `json:"category"`
+	File       string `json:"file"`
+	Line       int    `json:"line"`
+	Severity   string `json:"severity"`
+	Comment    string `json:"comment"`
+	Suggestion string `json:"suggestion,omitempty"`
+	Confidence string `json:"confidence"`
+}
+
+type ReviewResult struct {
+	ID            uint64    `json:"id"`
+	TaskID        uint64    `json:"task_id"`
+	Summary       string    `json:"summary"`
+	Findings      []Finding `json:"findings"`
+	RawResponse   string    `json:"raw_response"`
+	Model         string    `json:"model"`
+	InputTokens   int       `json:"input_tokens"`
+	OutputTokens  int       `json:"output_tokens"`
+	TotalTokens   int       `json:"total_tokens"`
+	LLMDurationMS int64     `json:"llm_duration_ms"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+type NewReviewResult struct {
+	TaskID        uint64
+	Summary       string
+	Findings      []Finding
+	RawResponse   string
+	Model         string
+	InputTokens   int
+	OutputTokens  int
+	TotalTokens   int
+	LLMDurationMS int64
 }
 
 type NewTask struct {
@@ -87,7 +124,31 @@ CREATE TABLE IF NOT EXISTS review_task (
 	if _, err := db.ExecContext(ctx, query); err != nil {
 		return err
 	}
-	return ensureTimestampPrecision(ctx, db)
+	if err := ensureTimestampPrecision(ctx, db); err != nil {
+		return err
+	}
+	resultQuery := `
+CREATE TABLE IF NOT EXISTS review_result (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    task_id BIGINT UNSIGNED NOT NULL,
+    summary VARCHAR(2048) NOT NULL,
+    payload_json JSON NOT NULL,
+    raw_response MEDIUMTEXT NOT NULL,
+    model VARCHAR(128) NOT NULL,
+    input_tokens INT UNSIGNED NOT NULL DEFAULT 0,
+    output_tokens INT UNSIGNED NOT NULL DEFAULT 0,
+    total_tokens INT UNSIGNED NOT NULL DEFAULT 0,
+    llm_duration_ms BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    UNIQUE KEY uq_review_result_task (task_id),
+    CONSTRAINT fk_review_result_task
+        FOREIGN KEY (task_id) REFERENCES review_task (id)
+        ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+	if _, err := db.ExecContext(ctx, resultQuery); err != nil {
+		return err
+	}
+	return nil
 }
 
 func ensureTimestampPrecision(ctx context.Context, db *sql.DB) error {
@@ -227,6 +288,87 @@ LIMIT ?`, args...)
 		return nil, fmt.Errorf("iterate review tasks: %w", err)
 	}
 	return tasks, nil
+}
+
+func (s *Store) CreateReviewResult(ctx context.Context, input NewReviewResult) (*ReviewResult, error) {
+	payload, err := json.Marshal(input.Findings)
+	if err != nil {
+		return nil, fmt.Errorf("marshal review findings: %w", err)
+	}
+	result, err := s.db.ExecContext(ctx, `
+INSERT INTO review_result
+    (task_id, summary, payload_json, raw_response, model,
+     input_tokens, output_tokens, total_tokens, llm_duration_ms)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		input.TaskID,
+		input.Summary,
+		payload,
+		input.RawResponse,
+		input.Model,
+		input.InputTokens,
+		input.OutputTokens,
+		input.TotalTokens,
+		input.LLMDurationMS,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("insert review result: %w", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return nil, fmt.Errorf("get review result id: %w", err)
+	}
+	return s.GetReviewResult(ctx, uint64(id))
+}
+
+func (s *Store) GetReviewResult(ctx context.Context, id uint64) (*ReviewResult, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT id, task_id, summary, payload_json, raw_response, model,
+       input_tokens, output_tokens, total_tokens, llm_duration_ms, created_at
+FROM review_result
+WHERE id = ?`, id)
+	return scanReviewResult(row.Scan)
+}
+
+func (s *Store) GetReviewResultByTaskID(ctx context.Context, taskID uint64) (*ReviewResult, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT id, task_id, summary, payload_json, raw_response, model,
+       input_tokens, output_tokens, total_tokens, llm_duration_ms, created_at
+FROM review_result
+WHERE task_id = ?`, taskID)
+	return scanReviewResult(row.Scan)
+}
+
+var ErrReviewResultNotFound = errors.New("review result not found")
+
+func scanReviewResult(scan func(dest ...any) error) (*ReviewResult, error) {
+	var result ReviewResult
+	var payload []byte
+	err := scan(
+		&result.ID,
+		&result.TaskID,
+		&result.Summary,
+		&payload,
+		&result.RawResponse,
+		&result.Model,
+		&result.InputTokens,
+		&result.OutputTokens,
+		&result.TotalTokens,
+		&result.LLMDurationMS,
+		&result.CreatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrReviewResultNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("scan review result: %w", err)
+	}
+	if err := json.Unmarshal(payload, &result.Findings); err != nil {
+		return nil, fmt.Errorf("unmarshal review findings: %w", err)
+	}
+	if result.Findings == nil {
+		result.Findings = []Finding{}
+	}
+	return &result, nil
 }
 
 var ErrTaskNotFound = errors.New("review task not found")

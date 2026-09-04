@@ -72,7 +72,7 @@ func appAuth(cfg *config.Config) github.AppAuth {
 
 func startServer(ctx context.Context, cfg *config.Config, gh *github.Client, taskStore *store.Store) error {
 	l := llm.New(cfg.DeepSeekAPIKey, cfg.DeepSeekBaseURL, cfg.DeepSeekModel)
-	reviewer := review.New(gh, l, cfg.MaxDiffLines, cfg.MaxFileContexts, cfg.MaxFileContextLines)
+	reviewer := review.New(gh, l, taskStore, cfg.MaxDiffLines, cfg.MaxFileContexts, cfg.MaxFileContextLines)
 	handler := webhook.New(cfg.GitHubWebhookSecret, reviewer, taskStore)
 
 	defer func() {

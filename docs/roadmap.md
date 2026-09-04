@@ -33,6 +33,7 @@
 目标：后端面试能讲。
 
 任务：
+- [x] Day 1：结构化审查输出，`review_result` 落库，token / 耗时统计，`/tasks/:id/result` 查询
 - RabbitMQ 接入，Webhook 后异步投递
 - Worker 池消费
 - Redis 分布式锁，同一 PR 幂等

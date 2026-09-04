@@ -2,12 +2,15 @@ package review
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"path/filepath"
 	"strings"
 
 	"github.com/liaohonghui/github-pr-review-agent/internal/github"
+	"github.com/liaohonghui/github-pr-review-agent/internal/llm"
+	"github.com/liaohonghui/github-pr-review-agent/internal/store"
 )
 
 type GitHubClient interface {
@@ -18,21 +21,27 @@ type GitHubClient interface {
 }
 
 type LLMClient interface {
-	ReviewCode(ctx context.Context, title, body, diff, fileContext string) (string, error)
+	ReviewCode(ctx context.Context, title, body, diff, fileContext string) (llm.ReviewResponse, error)
+}
+
+type ResultStore interface {
+	CreateReviewResult(ctx context.Context, input store.NewReviewResult) (*store.ReviewResult, error)
 }
 
 type Service struct {
 	GitHub              GitHubClient
 	LLM                 LLMClient
+	Results             ResultStore
 	MaxDiffLines        int
 	MaxFileContexts     int
 	MaxFileContextLines int
 }
 
-func New(gh GitHubClient, l LLMClient, maxDiffLines, maxFileContexts, maxFileContextLines int) *Service {
+func New(gh GitHubClient, l LLMClient, results ResultStore, maxDiffLines, maxFileContexts, maxFileContextLines int) *Service {
 	return &Service{
 		GitHub:              gh,
 		LLM:                 l,
+		Results:             results,
 		MaxDiffLines:        maxDiffLines,
 		MaxFileContexts:     maxFileContexts,
 		MaxFileContextLines: maxFileContextLines,
@@ -49,11 +58,17 @@ func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int, 
 		return fmt.Errorf("get pull request files: %w", err)
 	}
 	if len(files) == 0 {
-		comment := buildReviewComment(
-			"This pull request has no changed files relative to its base branch; review skipped.",
-			taskID,
-			pr.Head.SHA,
-		)
+		result, err := s.Results.CreateReviewResult(ctx, store.NewReviewResult{
+			TaskID:      taskID,
+			Summary:     "This pull request has no changed files relative to its base branch; review skipped.",
+			Findings:    []store.Finding{},
+			RawResponse: "No changed files relative to the base branch.",
+			Model:       "none",
+		})
+		if err != nil {
+			return fmt.Errorf("create no-diff review result: %w", err)
+		}
+		comment := buildReviewComment(*result, taskID, pr.Head.SHA)
 		if err := s.GitHub.CreatePullRequestReview(ctx, owner, repo, number, comment); err != nil {
 			return fmt.Errorf("create no-diff review: %w", err)
 		}
@@ -68,20 +83,97 @@ func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int, 
 	if strings.TrimSpace(fileContext) == "" {
 		fileContext = "No readable file context was available."
 	}
-	reviewText, err := s.LLM.ReviewCode(ctx, pr.Title, pr.Body, diff, fileContext)
+	response, err := s.LLM.ReviewCode(ctx, pr.Title, pr.Body, diff, fileContext)
 	if err != nil {
 		return fmt.Errorf("review code: %w", err)
 	}
-	comment := buildReviewComment(reviewText, taskID, pr.Head.SHA)
+	parsed := parseReviewResponse(response.Content)
+	result, err := s.Results.CreateReviewResult(ctx, store.NewReviewResult{
+		TaskID:        taskID,
+		Summary:       parsed.Summary,
+		Findings:      parsed.Findings,
+		RawResponse:   response.Content,
+		Model:         response.Model,
+		InputTokens:   response.Usage.InputTokens,
+		OutputTokens:  response.Usage.OutputTokens,
+		TotalTokens:   response.Usage.TotalTokens,
+		LLMDurationMS: response.DurationMS,
+	})
+	if err != nil {
+		return fmt.Errorf("create review result: %w", err)
+	}
+	comment := buildReviewComment(*result, taskID, pr.Head.SHA)
 	if err := s.GitHub.CreatePullRequestReview(ctx, owner, repo, number, comment); err != nil {
 		return fmt.Errorf("create pull request review: %w", err)
 	}
 	return nil
 }
 
-func buildReviewComment(reviewText string, taskID uint64, commitSHA string) string {
+type parsedReviewResponse struct {
+	Summary  string          `json:"summary"`
+	Findings []store.Finding `json:"findings"`
+}
+
+func parseReviewResponse(content string) parsedReviewResponse {
+	cleaned := extractJSONObject(content)
+	var parsed parsedReviewResponse
+	if err := json.Unmarshal([]byte(cleaned), &parsed); err != nil || strings.TrimSpace(parsed.Summary) == "" {
+		return parsedReviewResponse{
+			Summary:  content,
+			Findings: []store.Finding{},
+		}
+	}
+	if parsed.Findings == nil {
+		parsed.Findings = []store.Finding{}
+	}
+	return parsed
+}
+
+func extractJSONObject(content string) string {
+	trimmed := strings.TrimSpace(content)
+	if strings.HasPrefix(trimmed, "```") {
+		lines := strings.Split(trimmed, "\n")
+		if len(lines) > 1 {
+			trimmed = strings.Join(lines[1:], "\n")
+		}
+		if idx := strings.LastIndex(trimmed, "```"); idx >= 0 {
+			trimmed = trimmed[:idx]
+		}
+	}
+	start := strings.Index(trimmed, "{")
+	end := strings.LastIndex(trimmed, "}")
+	if start >= 0 && end > start {
+		return trimmed[start : end+1]
+	}
+	return trimmed
+}
+
+func buildReviewComment(result store.ReviewResult, taskID uint64, commitSHA string) string {
 	footer := fmt.Sprintf("Task ID: %d | commit %s", taskID, shortCommitSHA(commitSHA))
-	return fmt.Sprintf("## Automated Code Review\n\n%s\n\n---\n%s", reviewText, footer)
+	var b strings.Builder
+	b.WriteString("## Automated Code Review\n\n")
+	b.WriteString(result.Summary)
+	if len(result.Findings) > 0 {
+		b.WriteString("\n\n### Findings\n")
+		for i, finding := range result.Findings {
+			b.WriteString(fmt.Sprintf(
+				"\n%d. [%s / %s] `%s:%d` - %s\n",
+				i+1,
+				finding.Category,
+				finding.Severity,
+				finding.File,
+				finding.Line,
+				finding.Comment,
+			))
+			if finding.Suggestion != "" {
+				b.WriteString(fmt.Sprintf("   Suggestion: %s\n", finding.Suggestion))
+			}
+		}
+	} else {
+		b.WriteString("\n\nNo issues found.")
+	}
+	b.WriteString(fmt.Sprintf("\n\n---\n%s", footer))
+	return b.String()
 }
 
 func shortCommitSHA(commitSHA string) string {

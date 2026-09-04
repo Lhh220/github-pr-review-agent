@@ -4,8 +4,11 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/liaohonghui/github-pr-review-agent/internal/github"
+	"github.com/liaohonghui/github-pr-review-agent/internal/llm"
+	"github.com/liaohonghui/github-pr-review-agent/internal/store"
 )
 
 type fakeGitHubClient struct {
@@ -37,17 +40,42 @@ type fakeLLMClient struct {
 	body        string
 	diff        string
 	fileContext string
-	response    string
+	response    llm.ReviewResponse
 	called      bool
 }
 
-func (f *fakeLLMClient) ReviewCode(ctx context.Context, title, body, diff, fileContext string) (string, error) {
+func (f *fakeLLMClient) ReviewCode(ctx context.Context, title, body, diff, fileContext string) (llm.ReviewResponse, error) {
 	f.called = true
 	f.title = title
 	f.body = body
 	f.diff = diff
 	f.fileContext = fileContext
 	return f.response, nil
+}
+
+type fakeResultStore struct {
+	input store.NewReviewResult
+	err   error
+}
+
+func (f *fakeResultStore) CreateReviewResult(ctx context.Context, input store.NewReviewResult) (*store.ReviewResult, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	f.input = input
+	return &store.ReviewResult{
+		ID:            1,
+		TaskID:        input.TaskID,
+		Summary:       input.Summary,
+		Findings:      input.Findings,
+		RawResponse:   input.RawResponse,
+		Model:         input.Model,
+		InputTokens:   input.InputTokens,
+		OutputTokens:  input.OutputTokens,
+		TotalTokens:   input.TotalTokens,
+		LLMDurationMS: input.LLMDurationMS,
+		CreatedAt:     time.Now(),
+	}, nil
 }
 
 func TestReviewPRSkipsLLMWhenNoChangedFiles(t *testing.T) {
@@ -59,14 +87,18 @@ func TestReviewPRSkipsLLMWhenNoChangedFiles(t *testing.T) {
 		},
 		files: []github.PullRequestFile{},
 	}
-	llm := &fakeLLMClient{response: "should not be called"}
-	service := New(gh, llm, 100, 10, 100)
+	fakeLLM := &fakeLLMClient{response: llm.ReviewResponse{Content: "should not be called"}}
+	results := &fakeResultStore{}
+	service := New(gh, fakeLLM, results, 100, 10, 100)
 
 	if err := service.ReviewPR(context.Background(), "owner", "repo", 12, 1); err != nil {
 		t.Fatalf("ReviewPR() error = %v", err)
 	}
-	if llm.called {
+	if fakeLLM.called {
 		t.Fatal("LLM was called even though the pull request had no changed files")
+	}
+	if results.input.Model != "none" || len(results.input.Findings) != 0 {
+		t.Fatalf("unexpected no-diff result input: %+v", results.input)
 	}
 	if !strings.Contains(gh.reviewBody, "no changed files relative to its base branch") ||
 		!strings.Contains(gh.reviewBody, "Task ID: 1 | commit 291ac5a") {
@@ -86,17 +118,32 @@ func TestReviewPR(t *testing.T) {
 		},
 		fileContent: "func ValidateToken() {}",
 	}
-	llm := &fakeLLMClient{response: "No blocking issues."}
-	service := New(gh, llm, 100, 10, 100)
+	fakeLLM := &fakeLLMClient{response: llm.ReviewResponse{
+		Content: `{"summary":"No blocking issues.","findings":[]}`,
+		Model:   "deepseek-chat",
+		Usage: llm.Usage{
+			InputTokens:  100,
+			OutputTokens: 20,
+			TotalTokens:  120,
+		},
+		DurationMS: 1234,
+	}}
+	results := &fakeResultStore{}
+	service := New(gh, fakeLLM, results, 100, 10, 100)
 
 	if err := service.ReviewPR(context.Background(), "owner", "repo", 12, 1); err != nil {
 		t.Fatalf("ReviewPR() error = %v", err)
 	}
-	if llm.title != "Fix login bug" || llm.body != "Fixes token validation." {
-		t.Fatalf("unexpected PR metadata sent to LLM: %+v", llm)
+	if fakeLLM.title != "Fix login bug" || fakeLLM.body != "Fixes token validation." {
+		t.Fatalf("unexpected PR metadata sent to LLM: %+v", fakeLLM)
 	}
-	if !strings.Contains(llm.diff, "internal/auth/auth.go") || !strings.Contains(llm.fileContext, "func ValidateToken") {
-		t.Fatalf("unexpected model context: diff=%q fileContext=%q", llm.diff, llm.fileContext)
+	if !strings.Contains(fakeLLM.diff, "internal/auth/auth.go") || !strings.Contains(fakeLLM.fileContext, "func ValidateToken") {
+		t.Fatalf("unexpected model context: diff=%q fileContext=%q", fakeLLM.diff, fakeLLM.fileContext)
+	}
+	if results.input.Summary != "No blocking issues." || results.input.Model != "deepseek-chat" ||
+		results.input.InputTokens != 100 || results.input.OutputTokens != 20 ||
+		results.input.TotalTokens != 120 || results.input.LLMDurationMS != 1234 {
+		t.Fatalf("unexpected result input: %+v", results.input)
 	}
 	if !strings.Contains(gh.reviewBody, "No blocking issues.") ||
 		!strings.Contains(gh.reviewBody, "Task ID: 1 | commit 291ac5a") {

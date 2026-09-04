@@ -13,12 +13,15 @@ import (
 )
 
 type fakeStore struct {
-	task  *store.Task
-	tasks []store.Task
-	err   error
+	task   *store.Task
+	tasks  []store.Task
+	result *store.ReviewResult
+	err    error
 
-	getID  uint64
-	filter store.ListFilter
+	getID        uint64
+	filter       store.ListFilter
+	resultTaskID uint64
+	resultErr    error
 }
 
 func (f *fakeStore) GetTask(ctx context.Context, id uint64) (*store.Task, error) {
@@ -35,6 +38,14 @@ func (f *fakeStore) ListTasks(ctx context.Context, filter store.ListFilter) ([]s
 		return nil, f.err
 	}
 	return f.tasks, nil
+}
+
+func (f *fakeStore) GetReviewResultByTaskID(ctx context.Context, taskID uint64) (*store.ReviewResult, error) {
+	f.resultTaskID = taskID
+	if f.resultErr != nil {
+		return nil, f.resultErr
+	}
+	return f.result, nil
 }
 
 func newTestTask() *store.Task {
@@ -211,6 +222,79 @@ func TestGetTask(t *testing.T) {
 
 		recorder := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/tasks/99", nil)
+		router.ServeHTTP(recorder, req)
+
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
+		}
+	})
+}
+
+func TestGetReviewResult(t *testing.T) {
+	t.Run("valid result", func(t *testing.T) {
+		task := newTestTask()
+		result := &store.ReviewResult{
+			ID:      1,
+			TaskID:  task.ID,
+			Summary: "No blocking issues.",
+			Findings: []store.Finding{
+				{
+					Category:   "bug",
+					File:       "internal/foo/foo.go",
+					Line:       12,
+					Severity:   "high",
+					Comment:    "Potential nil pointer dereference.",
+					Confidence: "confirmed",
+				},
+			},
+			RawResponse:   `{"summary":"No blocking issues.","findings":[]}`,
+			Model:         "deepseek-chat",
+			InputTokens:   100,
+			OutputTokens:  20,
+			TotalTokens:   120,
+			LLMDurationMS: 1234,
+			CreatedAt:     time.Now(),
+		}
+		fake := &fakeStore{task: task, result: result}
+		router := setupRouter(fake, "")
+
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/tasks/1/result", nil)
+		router.ServeHTTP(recorder, req)
+
+		if recorder.Code != http.StatusOK || fake.resultTaskID != 1 {
+			t.Fatalf("status = %d taskID = %d body = %s", recorder.Code, fake.resultTaskID, recorder.Body.String())
+		}
+		var response struct {
+			Task   TaskResponse         `json:"task"`
+			Result ReviewResultResponse `json:"result"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if response.Result.Summary != "No blocking issues." || len(response.Result.Findings) != 1 ||
+			response.Result.Model != "deepseek-chat" || response.Result.TotalTokens != 120 {
+			t.Fatalf("unexpected result response: %+v", response.Result)
+		}
+	})
+	t.Run("result not found", func(t *testing.T) {
+		fake := &fakeStore{task: newTestTask(), resultErr: store.ErrReviewResultNotFound}
+		router := setupRouter(fake, "")
+
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/tasks/1/result", nil)
+		router.ServeHTTP(recorder, req)
+
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
+		}
+	})
+	t.Run("task not found", func(t *testing.T) {
+		fake := &fakeStore{err: store.ErrTaskNotFound}
+		router := setupRouter(fake, "")
+
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/tasks/99/result", nil)
 		router.ServeHTTP(recorder, req)
 
 		if recorder.Code != http.StatusNotFound {

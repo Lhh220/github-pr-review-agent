@@ -12,12 +12,13 @@ MVP 已经跑通并部署到 Railway：
 - 使用 GitHub App installation token 访问 GitHub API
 - 读取 PR 信息、diff 和变更文件内容，PR 文件列表支持分页
 - PR 没有变更文件时直接回固定评论，不再调用 LLM
-- 调用 DeepSeek 生成审查意见
+- 调用 DeepSeek 生成结构化 JSON 审查结果
+- 解析并保存 `summary`、`findings`、模型、token 用量和 LLM 耗时
 - 通过 PR Review API 回写 `COMMENT` 类型审查
-- MySQL `review_task` 表记录任务状态
+- MySQL `review_task` 表记录任务状态，`review_result` 表保存完整审查结果
 - 通过 `delivery_id` 唯一约束实现 Webhook 幂等，重复投递不会重复审查
 - 支持优雅停机，退出前等待正在执行的审查任务
-- 提供 `/tasks` 和 `/tasks/:id` 查询任务状态
+- 提供 `/tasks`、`/tasks/:id` 查询任务状态，以及 `/tasks/:id/result` 查询结构化审查结果
 
 当前线上示例：
 
@@ -177,6 +178,52 @@ Authorization: Bearer <ADMIN_TOKEN>
 }
 ```
 
+查询任务审查结果：
+
+```text
+GET /tasks/<task_id>/result
+Authorization: Bearer <ADMIN_TOKEN>
+```
+
+返回示例：
+
+```json
+{
+  "task": {
+    "id": 1,
+    "status": "done"
+  },
+  "result": {
+    "id": 1,
+    "task_id": 1,
+    "summary": "No blocking issues.",
+    "findings": [
+      {
+        "category": "bug",
+        "file": "internal/review/service.go",
+        "line": 12,
+        "severity": "medium",
+        "comment": "Example finding.",
+        "suggestion": "Example suggestion.",
+        "confidence": "confirmed"
+      }
+    ],
+    "model": "deepseek-chat",
+    "input_tokens": 1000,
+    "output_tokens": 200,
+    "total_tokens": 1200,
+    "llm_duration_ms": 2500
+  }
+}
+```
+
+说明：
+
+- `findings` 是结构化问题列表，字段包括 `category / file / line / severity / comment / suggestion / confidence`。
+- `raw_response` 保留模型原始输出，方便排查模型偶发不按 JSON 返回的情况。
+- `input_tokens / output_tokens / total_tokens` 来自 DeepSeek 返回的 usage，用于成本统计。
+- `llm_duration_ms` 是单次 LLM 调用耗时。
+
 PR 审查评论末尾会附带任务标识，例如：
 
 ```text
@@ -210,6 +257,6 @@ Task ID: 1 | commit 291ac5a
 - MySQL 任务、结果、审计存储
 - Tool Calling 框架
 - tree-sitter 上下文裁剪
-- 结构化审查输出和评测集
+- 评测集和误报率统计
 
 开发节奏见 [docs/roadmap.md](docs/roadmap.md)。

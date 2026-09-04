@@ -14,6 +14,30 @@
 
 ## 3. 整体架构
 
+当前实现还没有引入 RabbitMQ、Redis 和 Tool Calling。下图是阶段二完成后的目标架构；当前实际链路是：
+
+```text
+GitHub PR Event
+   |
+   v
+Webhook Receiver (Gin)
+   |  签名校验 / action 过滤 / delivery_id 幂等
+   v
+Review Service (goroutine + graceful shutdown)
+   |
+   v
+GitHub API: PR meta + files + file context
+   |
+   v
+DeepSeek LLM (结构化 JSON 输出)
+   |
+   v
+MySQL review_task + review_result
+   |
+   v
+GitHub PR Review API
+```
+
 ```text
 GitHub PR Event
    |
@@ -160,25 +184,36 @@ go test ./... 会编译失败。
 ```json
 {
   "summary": "整体评价",
-  "reviews": [
+  "findings": [
     {
       "category": "bug|performance|style|security",
       "file": "path",
       "line": 12,
       "severity": "high|medium|low",
       "comment": "具体问题",
-      "suggestion": "修改建议"
+      "suggestion": "修改建议",
+      "confidence": "confirmed|needs_verification"
     }
   ]
 }
 ```
-回写策略：按文件分组，生成一条总结评论 + 多条行内评论；无问题时可发一条通过评论。
+
+当前实现：
+
+- DeepSeek 被要求只返回上述 JSON。
+- `review.Service` 解析 JSON，先写入 `review_result`，再回写 PR Review。
+- `payload_json` 保存 findings，`raw_response` 保存模型原文。
+- `model / input_tokens / output_tokens / total_tokens / llm_duration_ms` 同时落库。
+- 如果模型偶发不按 JSON 返回，则降级为：summary 使用原文、findings 为空，避免整条任务失败。
+- 回写策略当前是一条总结评论，包含结构化 findings；行内评论放到后续增强。
+
+查询接口：`GET /tasks/:id/result`，返回任务状态和完整结构化结果。
 
 ### 4.9 存储设计
 
 MySQL 表：
 - `review_task`：id, repo, pr_number, commit_sha, status, created_at, updated_at, error。
-- `review_result`：id, task_id, summary, payload_json, created_at。
+- `review_result`：id, task_id, summary, payload_json, raw_response, model, input_tokens, output_tokens, total_tokens, llm_duration_ms, created_at；`task_id` 唯一并外键关联 `review_task(id)`。
 - `tool_call_log`：id, task_id, tool_name, input_json, output_json, tokens, duration_ms, created_at。
 - `audit_log`：id, task_id, action, actor, detail_json, created_at。
 
