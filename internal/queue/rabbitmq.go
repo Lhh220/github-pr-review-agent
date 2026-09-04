@@ -7,15 +7,23 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
+const maxReconnectDelay = 30 * time.Second
+
 type RabbitBroker struct {
+	url      string
+	queue    string
+	prefetch int
+
+	mu         sync.RWMutex
 	connection *amqp.Connection
 	publisher  *amqp.Channel
 	consumer   *amqp.Channel
-	queue      string
+	closed     bool
 
 	publishMu sync.Mutex
 }
@@ -31,18 +39,65 @@ func OpenRabbit(url, queue string, prefetch int) (*RabbitBroker, error) {
 		prefetch = 1
 	}
 
-	conn, err := amqp.Dial(url)
+	broker := &RabbitBroker{
+		url:      url,
+		queue:    queue,
+		prefetch: prefetch,
+	}
+	if err := broker.connect(); err != nil {
+		return nil, err
+	}
+	return broker, nil
+}
+
+func (b *RabbitBroker) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.closed = true
+	b.closeLocked()
+	return nil
+}
+
+func (b *RabbitBroker) connect() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return errors.New("rabbitmq broker is closed")
+	}
+	return b.connectLocked()
+}
+
+func (b *RabbitBroker) reconnect() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return errors.New("rabbitmq broker is closed")
+	}
+	if b.healthyLocked() {
+		return nil
+	}
+	if err := b.connectLocked(); err != nil {
+		return err
+	}
+	log.Printf("rabbitmq connection re-established: queue=%s", b.queue)
+	return nil
+}
+
+func (b *RabbitBroker) connectLocked() error {
+	b.closeLocked()
+
+	conn, err := amqp.Dial(b.url)
 	if err != nil {
-		return nil, fmt.Errorf("connect rabbitmq: %w", err)
+		return fmt.Errorf("connect rabbitmq: %w", err)
 	}
 
 	declareCh, err := conn.Channel()
 	if err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("open rabbitmq declare channel: %w", err)
+		return fmt.Errorf("open rabbitmq declare channel: %w", err)
 	}
 	if _, err := declareCh.QueueDeclare(
-		queue,
+		b.queue,
 		true,
 		false,
 		false,
@@ -51,61 +106,77 @@ func OpenRabbit(url, queue string, prefetch int) (*RabbitBroker, error) {
 	); err != nil {
 		declareCh.Close()
 		conn.Close()
-		return nil, fmt.Errorf("declare rabbitmq queue: %w", err)
+		return fmt.Errorf("declare rabbitmq queue: %w", err)
 	}
 	if err := declareCh.Close(); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("close rabbitmq declare channel: %w", err)
+		return fmt.Errorf("close rabbitmq declare channel: %w", err)
 	}
 
 	publisher, err := conn.Channel()
 	if err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("open rabbitmq publisher channel: %w", err)
+		return fmt.Errorf("open rabbitmq publisher channel: %w", err)
 	}
 	if err := publisher.Confirm(false); err != nil {
 		publisher.Close()
 		conn.Close()
-		return nil, fmt.Errorf("enable rabbitmq publisher confirms: %w", err)
+		return fmt.Errorf("enable rabbitmq publisher confirms: %w", err)
 	}
 
 	consumer, err := conn.Channel()
 	if err != nil {
 		publisher.Close()
 		conn.Close()
-		return nil, fmt.Errorf("open rabbitmq consumer channel: %w", err)
+		return fmt.Errorf("open rabbitmq consumer channel: %w", err)
 	}
-	if err := consumer.Qos(prefetch, 0, false); err != nil {
+	if err := consumer.Qos(b.prefetch, 0, false); err != nil {
 		consumer.Close()
 		publisher.Close()
 		conn.Close()
-		return nil, fmt.Errorf("set rabbitmq prefetch: %w", err)
+		return fmt.Errorf("set rabbitmq prefetch: %w", err)
 	}
 
-	return &RabbitBroker{
-		connection: conn,
-		publisher:  publisher,
-		consumer:   consumer,
-		queue:      queue,
-	}, nil
+	b.connection = conn
+	b.publisher = publisher
+	b.consumer = consumer
+	return nil
 }
 
-func (b *RabbitBroker) Close() error {
-	b.publishMu.Lock()
-	publisher := b.publisher
-	b.publisher = nil
-	b.publishMu.Unlock()
+func (b *RabbitBroker) healthyLocked() bool {
+	return b.connection != nil &&
+		!b.connection.IsClosed() &&
+		b.publisher != nil &&
+		!b.publisher.IsClosed() &&
+		b.consumer != nil &&
+		!b.consumer.IsClosed()
+}
 
-	if publisher != nil {
-		_ = publisher.Close()
-	}
+func (b *RabbitBroker) closeLocked() {
 	if b.consumer != nil {
 		_ = b.consumer.Close()
+		b.consumer = nil
+	}
+	if b.publisher != nil {
+		_ = b.publisher.Close()
+		b.publisher = nil
 	}
 	if b.connection != nil {
-		return b.connection.Close()
+		_ = b.connection.Close()
+		b.connection = nil
 	}
-	return nil
+}
+
+func (b *RabbitBroker) currentPublisher() (*amqp.Channel, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.closed {
+		return nil, errors.New("rabbitmq broker is closed")
+	}
+	if b.publisher == nil {
+		return nil, errors.New("rabbitmq publisher is unavailable")
+	}
+	return b.publisher, nil
 }
 
 func (b *RabbitBroker) Publish(ctx context.Context, taskID uint64) error {
@@ -116,11 +187,16 @@ func (b *RabbitBroker) Publish(ctx context.Context, taskID uint64) error {
 
 	b.publishMu.Lock()
 	defer b.publishMu.Unlock()
-	if b.publisher == nil {
-		return errors.New("rabbitmq publisher is closed")
+
+	publisher, err := b.currentPublisher()
+	if err != nil {
+		if reconnectErr := b.reconnect(); reconnectErr != nil {
+			log.Printf("reconnect rabbitmq publisher failed: error=%v", reconnectErr)
+		}
+		return fmt.Errorf("get rabbitmq publisher: %w", err)
 	}
 
-	confirmation, err := b.publisher.PublishWithDeferredConfirmWithContext(
+	confirmation, err := publisher.PublishWithDeferredConfirmWithContext(
 		ctx,
 		"",
 		b.queue,
@@ -133,6 +209,9 @@ func (b *RabbitBroker) Publish(ctx context.Context, taskID uint64) error {
 		},
 	)
 	if err != nil {
+		if reconnectErr := b.reconnect(); reconnectErr != nil {
+			log.Printf("reconnect rabbitmq publisher failed: error=%v", reconnectErr)
+		}
 		return fmt.Errorf("publish review task: %w", err)
 	}
 	if confirmation == nil {
@@ -150,30 +229,89 @@ func (b *RabbitBroker) Publish(ctx context.Context, taskID uint64) error {
 }
 
 func (b *RabbitBroker) Consume(ctx context.Context, handler Handler) error {
-	deliveries, err := b.consumer.ConsumeWithContext(
-		ctx,
-		b.queue,
-		"github-pr-review-agent",
-		false,
-		false,
-		false,
-		false,
-		nil,
-	)
-	if err != nil {
-		return fmt.Errorf("consume rabbitmq queue: %w", err)
-	}
-
+	attempt := 0
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case delivery, ok := <-deliveries:
-			if !ok {
-				return errors.New("rabbitmq delivery channel closed")
-			}
-			b.handleDelivery(ctx, delivery, handler)
+		b.mu.RLock()
+		consumer := b.consumer
+		closed := b.closed
+		b.mu.RUnlock()
+		if closed {
+			return errors.New("rabbitmq broker is closed")
 		}
+		if consumer == nil {
+			if err := b.reconnect(); err != nil {
+				log.Printf("reconnect rabbitmq consumer failed: error=%v", err)
+				if !waitRetry(ctx, attempt) {
+					return ctx.Err()
+				}
+				attempt++
+			}
+			continue
+		}
+
+		deliveries, err := consumer.ConsumeWithContext(
+			ctx,
+			b.queue,
+			"github-pr-review-agent",
+			false,
+			false,
+			false,
+			false,
+			nil,
+		)
+		if err != nil {
+			log.Printf("consume rabbitmq queue failed: error=%v", err)
+			if reconnectErr := b.reconnect(); reconnectErr != nil {
+				log.Printf("reconnect rabbitmq consumer failed: error=%v", reconnectErr)
+			}
+			if !waitRetry(ctx, attempt) {
+				return ctx.Err()
+			}
+			attempt++
+			continue
+		}
+		attempt = 0
+
+		channelClosed := false
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case delivery, ok := <-deliveries:
+				if !ok {
+					log.Printf("rabbitmq delivery channel closed, reconnecting")
+					channelClosed = true
+				}
+				if ok {
+					b.handleDelivery(ctx, delivery, handler)
+				}
+			}
+			if channelClosed {
+				if err := b.reconnect(); err != nil {
+					log.Printf("reconnect rabbitmq consumer failed: error=%v", err)
+					if !waitRetry(ctx, attempt) {
+						return ctx.Err()
+					}
+					attempt++
+				}
+				break
+			}
+		}
+	}
+}
+
+func waitRetry(ctx context.Context, attempt int) bool {
+	delay := 2 * time.Second * time.Duration(attempt+1)
+	if delay > maxReconnectDelay {
+		delay = maxReconnectDelay
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 

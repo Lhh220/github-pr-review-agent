@@ -99,6 +99,7 @@ MySQL (任务/结果/审计) + Redis (锁/去重/限流)
 - 消息体只放 `task_id`，具体数据从 MySQL 取，避免消息体过大。
 - 消息使用 persistent delivery，Publisher 开启 confirm，确保 broker 已接收。
 - Consumer 使用 manual ack；业务失败先标记 `failed` 并 ack，避免未加 retry 控制时无限重投。
+- 连接或 channel 被服务端关闭后自动重建 RabbitMQ 连接，重连间隔按 2s 递增，最长 30s；进程退出仍然走优雅停机。
 - 后续增强：指数退避重试，达到最大次数后进死信队列。
 
 ### 4.3 Worker Pool

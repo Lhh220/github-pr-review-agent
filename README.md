@@ -19,6 +19,7 @@ MVP 已经跑通并部署到 Railway：
 - 通过 `delivery_id` 唯一约束实现 Webhook 幂等，重复投递不会重复审查
 - Webhook 创建任务后投递 RabbitMQ，快速返回 202
 - RabbitMQ 使用 durable queue、persistent message、publisher confirm 和 manual ack
+- RabbitMQ 连接断开后自动重连，broker 短暂重启时 Go 服务保持在线
 - Worker Pool 固定并发消费任务，支持优雅停机
 - 任务状态覆盖 `received -> queued -> running -> done/failed`
 - 提供 `/tasks`、`/tasks/:id` 查询任务状态，以及 `/tasks/:id/result` 查询结构化审查结果
