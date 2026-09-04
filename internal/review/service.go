@@ -48,6 +48,17 @@ func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int, 
 	if err != nil {
 		return fmt.Errorf("get pull request files: %w", err)
 	}
+	if len(files) == 0 {
+		comment := buildReviewComment(
+			"This pull request has no changed files relative to its base branch; review skipped.",
+			taskID,
+			pr.Head.SHA,
+		)
+		if err := s.GitHub.CreatePullRequestReview(ctx, owner, repo, number, comment); err != nil {
+			return fmt.Errorf("create no-diff review: %w", err)
+		}
+		return nil
+	}
 	diff := buildDiff(files, s.MaxDiffLines)
 	if strings.TrimSpace(diff) == "" {
 		diff = "No textual diff was returned by GitHub."

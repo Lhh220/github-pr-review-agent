@@ -38,14 +38,40 @@ type fakeLLMClient struct {
 	diff        string
 	fileContext string
 	response    string
+	called      bool
 }
 
 func (f *fakeLLMClient) ReviewCode(ctx context.Context, title, body, diff, fileContext string) (string, error) {
+	f.called = true
 	f.title = title
 	f.body = body
 	f.diff = diff
 	f.fileContext = fileContext
 	return f.response, nil
+}
+
+func TestReviewPRSkipsLLMWhenNoChangedFiles(t *testing.T) {
+	gh := &fakeGitHubClient{
+		pr: &github.PullRequest{
+			Title: "No-op",
+			Body:  "No changes.",
+			Head:  github.Ref{SHA: "291ac5aedc5fd96c5030a6c18e91923140677591"},
+		},
+		files: []github.PullRequestFile{},
+	}
+	llm := &fakeLLMClient{response: "should not be called"}
+	service := New(gh, llm, 100, 10, 100)
+
+	if err := service.ReviewPR(context.Background(), "owner", "repo", 12, 1); err != nil {
+		t.Fatalf("ReviewPR() error = %v", err)
+	}
+	if llm.called {
+		t.Fatal("LLM was called even though the pull request had no changed files")
+	}
+	if !strings.Contains(gh.reviewBody, "no changed files relative to its base branch") ||
+		!strings.Contains(gh.reviewBody, "Task ID: 1 | commit 291ac5a") {
+		t.Fatalf("unexpected no-diff review comment: %s", gh.reviewBody)
+	}
 }
 
 func TestReviewPR(t *testing.T) {

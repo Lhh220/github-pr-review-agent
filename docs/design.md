@@ -115,6 +115,7 @@ type Tool interface {
 
 当前 MVP 是 **diff + changed-file-context reviewer**：
 
+- PR 无变更文件时短路处理，直接回固定评论，不调用 LLM。
 - 把 PR diff 交给 LLM。
 - 额外读取部分变更文件的完整内容，并按行数裁剪后一起送给 LLM。
 - 看不到改动文件之外的关联代码。

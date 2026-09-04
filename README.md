@@ -11,6 +11,7 @@ MVP 已经跑通并部署到 Railway：
 - 只接受 `pull_request` 事件，并过滤有效 action
 - 使用 GitHub App installation token 访问 GitHub API
 - 读取 PR 信息、diff 和变更文件内容，PR 文件列表支持分页
+- PR 没有变更文件时直接回固定评论，不再调用 LLM
 - 调用 DeepSeek 生成审查意见
 - 通过 PR Review API 回写 `COMMENT` 类型审查
 - MySQL `review_task` 表记录任务状态
