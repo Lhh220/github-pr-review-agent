@@ -69,10 +69,21 @@ WHERE table_schema = DATABASE()
 		t.Fatalf("unexpected duplicate result: duplicate=%v existing=%d original=%d", duplicate, existing.ID, task.ID)
 	}
 
+	if err := s.UpdateTaskStatus(ctx, task.ID, "queued", ""); err != nil {
+		t.Fatalf("update queued: %v", err)
+	}
+	got, err := s.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("get queued task: %v", err)
+	}
+	if got.Status != "queued" {
+		t.Fatalf("expected queued, got %s", got.Status)
+	}
+
 	if err := s.UpdateTaskStatus(ctx, task.ID, "running", ""); err != nil {
 		t.Fatalf("update running: %v", err)
 	}
-	got, err := s.GetTask(ctx, task.ID)
+	got, err = s.GetTask(ctx, task.ID)
 	if err != nil {
 		t.Fatalf("get task: %v", err)
 	}

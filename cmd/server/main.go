@@ -16,10 +16,12 @@ import (
 	"github.com/liaohonghui/github-pr-review-agent/internal/config"
 	"github.com/liaohonghui/github-pr-review-agent/internal/github"
 	"github.com/liaohonghui/github-pr-review-agent/internal/llm"
+	"github.com/liaohonghui/github-pr-review-agent/internal/queue"
 	"github.com/liaohonghui/github-pr-review-agent/internal/review"
 	"github.com/liaohonghui/github-pr-review-agent/internal/store"
 	"github.com/liaohonghui/github-pr-review-agent/internal/taskapi"
 	"github.com/liaohonghui/github-pr-review-agent/internal/webhook"
+	"github.com/liaohonghui/github-pr-review-agent/internal/worker"
 )
 
 func main() {
@@ -33,6 +35,9 @@ func main() {
 		}
 		if cfg.AdminToken == "" {
 			log.Fatal("ADMIN_TOKEN is required in production")
+		}
+		if cfg.RabbitMQURL == "" {
+			log.Fatal("RABBITMQ_URL is required in production")
 		}
 	}
 	if cfg.MySQLDSN == "" {
@@ -71,17 +76,32 @@ func appAuth(cfg *config.Config) github.AppAuth {
 }
 
 func startServer(ctx context.Context, cfg *config.Config, gh *github.Client, taskStore *store.Store) error {
+	rabbitURL := cfg.RabbitMQURL
+	if rabbitURL == "" {
+		rabbitURL = "amqp://guest:guest@127.0.0.1:5672/"
+	}
+	broker, err := queue.OpenRabbit(rabbitURL, cfg.ReviewQueue, cfg.ReviewWorkers)
+	if err != nil {
+		return fmt.Errorf("open rabbitmq broker: %w", err)
+	}
+	defer broker.Close()
+
 	l := llm.New(cfg.DeepSeekAPIKey, cfg.DeepSeekBaseURL, cfg.DeepSeekModel)
 	reviewer := review.New(gh, l, taskStore, cfg.MaxDiffLines, cfg.MaxFileContexts, cfg.MaxFileContextLines)
-	handler := webhook.New(cfg.GitHubWebhookSecret, reviewer, taskStore)
+	handler := webhook.New(cfg.GitHubWebhookSecret, broker, taskStore)
+	reviewWorker := worker.New(taskStore, reviewer, broker, cfg.ReviewWorkers)
 
-	defer func() {
-		waitCtx, cancelWait := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancelWait()
-		if err := handler.WaitContext(waitCtx); err != nil {
-			log.Printf("wait for in-flight reviews timed out: %v", err)
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	workerDone := make(chan struct{})
+	workerErrors := make(chan error, 1)
+	go func() {
+		defer close(workerDone)
+		if err := reviewWorker.Start(runCtx); err != nil && !errors.Is(err, context.Canceled) {
+			workerErrors <- err
 		}
 	}()
+	log.Printf("review worker started: queue=%s workers=%d", cfg.ReviewQueue, cfg.ReviewWorkers)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -105,17 +125,29 @@ func startServer(ctx context.Context, cfg *config.Config, gh *github.Client, tas
 		}
 	}()
 
+	var stopError error
 	select {
 	case err := <-serverErrors:
-		return fmt.Errorf("server exited: %w", err)
+		stopError = fmt.Errorf("server exited: %w", err)
+	case err := <-workerErrors:
+		stopError = fmt.Errorf("review worker exited: %w", err)
 	case <-ctx.Done():
 		log.Printf("shutdown signal received, draining in-flight requests and reviews")
-		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancelShutdown()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("shutdown server: %w", err)
-		}
-		log.Printf("server stopped gracefully")
-		return nil
 	}
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelShutdown()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("shutdown server failed: %v", err)
+	}
+	cancelRun()
+
+	select {
+	case <-workerDone:
+		log.Printf("review worker stopped")
+	case <-time.After(30 * time.Second):
+		log.Printf("wait for review worker timed out")
+	}
+	log.Printf("server stopped gracefully")
+	return stopError
 }

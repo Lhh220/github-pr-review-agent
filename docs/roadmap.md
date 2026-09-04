@@ -34,13 +34,10 @@
 
 任务：
 - [x] Day 1：结构化审查输出，`review_result` 落库，token / 耗时统计，`/tasks/:id/result` 查询
-- RabbitMQ 接入，Webhook 后异步投递
-- Worker 池消费
-- Redis 分布式锁，同一 PR 幂等
-- MySQL 任务/结果/审计表完善
-- 状态机 + 失败重试 + 死信队列
-- token 成本统计
-- 限流
+- [x] Day 2：RabbitMQ 异步队列，publisher confirm，manual ack，Worker Pool，`queued` 状态
+- [ ] Day 3：失败重试、死信队列、完整状态机
+- [ ] Day 4：Redis 分布式锁、限流、同一 PR 并发控制
+- [ ] Day 5：审计表、观测统计、部署和文档收尾
 
 验收：重复发同一 PR 事件不重复审查；失败可重试；审计日志可查。
 

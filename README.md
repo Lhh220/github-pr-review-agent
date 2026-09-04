@@ -1,6 +1,6 @@
 # GitHub PR 智能代码审查 Agent
 
-一个基于 Go 的 GitHub PR 自动审查 Agent。收到 GitHub PR 事件后，自动读取 PR 上下文和 diff，调用 DeepSeek 生成审查意见，并以 GitHub App bot 身份回写 PR Review。
+一个基于 Go 的 GitHub PR 自动审查 Agent。收到 GitHub PR 事件后，任务进入 RabbitMQ 异步队列，由 Worker 读取 PR 上下文和 diff，调用 DeepSeek 生成结构化审查意见，并以 GitHub App bot 身份回写 PR Review。
 
 ## 当前进度
 
@@ -17,7 +17,10 @@ MVP 已经跑通并部署到 Railway：
 - 通过 PR Review API 回写 `COMMENT` 类型审查
 - MySQL `review_task` 表记录任务状态，`review_result` 表保存完整审查结果
 - 通过 `delivery_id` 唯一约束实现 Webhook 幂等，重复投递不会重复审查
-- 支持优雅停机，退出前等待正在执行的审查任务
+- Webhook 创建任务后投递 RabbitMQ，快速返回 202
+- RabbitMQ 使用 durable queue、persistent message、publisher confirm 和 manual ack
+- Worker Pool 固定并发消费任务，支持优雅停机
+- 任务状态覆盖 `received -> queued -> running -> done/failed`
 - 提供 `/tasks`、`/tasks/:id` 查询任务状态，以及 `/tasks/:id/result` 查询结构化审查结果
 
 当前线上示例：
@@ -72,6 +75,9 @@ MAX_FILE_CONTEXTS=10
 MAX_FILE_CONTEXT_LINES=200
 MYSQL_DSN=root:<password>@tcp(127.0.0.1:3306)/github_pr_review_agent?charset=utf8mb4&parseTime=true&loc=Local
 ADMIN_TOKEN=...
+RABBITMQ_URL=amqp://guest:guest@127.0.0.1:5672/
+REVIEW_QUEUE=pr.review.queue
+REVIEW_WORKERS=4
 ```
 
 说明：
@@ -85,6 +91,11 @@ ADMIN_TOKEN=...
 - `MAX_FILE_CONTEXT_LINES`：每个文件最多送多少行内容给 LLM。
 - `MYSQL_DSN`：MySQL 连接串。不要把真实密码提交进 Git。
 - `ADMIN_TOKEN`：查询任务接口的 Bearer Token；为空时接口不鉴权，生产环境建议配置。
+- `RABBITMQ_URL`：生产环境必填。本地未配置时默认使用 `amqp://guest:guest@127.0.0.1:5672/`。
+- `REVIEW_QUEUE`：RabbitMQ durable 队列名，默认 `pr.review.queue`。
+- `REVIEW_WORKERS`：Worker 并发数，默认 4；RabbitMQ consumer prefetch 会使用同一配置。
+
+注意：阶段二接入 RabbitMQ 后，Railway 部署必须提供可达的 `RABBITMQ_URL`，否则服务启动会失败。
 
 注意：Railway 容器无法通过 `127.0.0.1` 访问你本机的 MySQL。线上要在 Railway 里创建 MySQL 服务，或使用其他公网可达的 MySQL，并把对应的 `MYSQL_DSN` 配到 Railway 变量里。
 
@@ -98,7 +109,21 @@ GITHUB_TOKEN=...
 
 ## 本地运行
 
-1. 准备环境变量：
+1. 启动本地 RabbitMQ：
+
+   ```powershell
+   docker compose up -d rabbitmq
+   ```
+
+   管理界面：
+
+   ```text
+   http://127.0.0.1:15672
+   ```
+
+   默认账号密码是 `guest / guest`，仅本地可用。
+
+2. 准备环境变量：
 
    ```powershell
    $env:GITHUB_WEBHOOK_SECRET="你的 webhook secret"
@@ -108,15 +133,18 @@ GITHUB_TOKEN=...
 $env:DEEPSEEK_API_KEY="你的 DeepSeek API key"
 $env:MYSQL_DSN="root:<password>@tcp(127.0.0.1:3306)/github_pr_review_agent?charset=utf8mb4&parseTime=true&loc=Local"
 $env:ADMIN_TOKEN="本地调试 token，可不配"
+$env:RABBITMQ_URL="amqp://guest:guest@127.0.0.1:5672/"
+$env:REVIEW_QUEUE="pr.review.queue"
+$env:REVIEW_WORKERS="4"
 ```
 
-2. 启动服务：
+3. 启动服务：
 
    ```powershell
    go run ./cmd/server
    ```
 
-3. 如需本地接收 GitHub Webhook，再用 ngrok 临时暴露端口：
+4. 如需本地接收 GitHub Webhook，再用 ngrok 临时暴露端口：
 
    ```powershell
    ngrok http 8080
@@ -142,10 +170,10 @@ go vet ./...
 服务启动后会自动创建 `review_task` 表。任务状态流转：
 
 ```text
-received -> running -> done
-                 |
-                 v
-               failed
+received -> queued -> running -> done
+                        |
+                        v
+                      failed
 ```
 
 查询任务列表：
@@ -234,7 +262,7 @@ Task ID: 1 | commit 291ac5a
 
 ## 当前能力边界
 
-当前 MVP 是 **diff + changed-file-context reviewer**：
+当前审查能力是 **diff + changed-file-context reviewer**：
 
 - 会把 PR diff 和变更文件内容交给 LLM
 - 还看不到改动文件之外的关联代码
@@ -252,9 +280,9 @@ Task ID: 1 | commit 291ac5a
 
 ## 后续计划
 
-- RabbitMQ 异步队列
 - Redis 分布式锁和限流
-- MySQL 任务、结果、审计存储
+- 失败重试和死信队列
+- 审计日志
 - Tool Calling 框架
 - tree-sitter 上下文裁剪
 - 评测集和误报率统计

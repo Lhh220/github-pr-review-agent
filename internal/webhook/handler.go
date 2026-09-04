@@ -3,52 +3,26 @@ package webhook
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/liaohonghui/github-pr-review-agent/internal/github"
+	"github.com/liaohonghui/github-pr-review-agent/internal/queue"
 	"github.com/liaohonghui/github-pr-review-agent/internal/store"
 )
 
 type Handler struct {
-	Secret string
-	Store  TaskStore
-
-	// Reviewer is an interface so the webhook handler can be tested without a
-	// real GitHub client or LLM provider.
-	Reviewer Reviewer
-
-	workers sync.WaitGroup
+	Secret    string
+	Store     TaskStore
+	Publisher queue.Publisher
 }
 
-type Reviewer interface {
-	ReviewPR(ctx context.Context, owner, repo string, number int, taskID uint64) error
-}
-
-func New(secret string, reviewer Reviewer, taskStore TaskStore) *Handler {
-	return &Handler{Secret: secret, Reviewer: reviewer, Store: taskStore}
-}
-
-// WaitContext waits for in-flight reviews. A timeout prevents a stuck worker
-// from blocking process shutdown indefinitely.
-func (h *Handler) WaitContext(ctx context.Context) error {
-	done := make(chan struct{})
-	go func() {
-		h.workers.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+func New(secret string, publisher queue.Publisher, taskStore TaskStore) *Handler {
+	return &Handler{Secret: secret, Store: taskStore, Publisher: publisher}
 }
 
 type TaskStore interface {
@@ -120,51 +94,26 @@ func (h *Handler) Handle(c *gin.Context) {
 		return
 	}
 
-	h.workers.Add(1)
-	go func() {
-		defer h.workers.Done()
-		h.runReview(task.ID, owner, repo, p.PullRequest.Number)
-	}()
-	c.JSON(http.StatusAccepted, gin.H{"status": "accepted", "task_id": task.ID})
-}
-
-func (h *Handler) runReview(taskID uint64, owner, repo string, number int) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			message := fmt.Sprintf("review panicked: %v", recovered)
-			log.Printf("%s task_id=%d", message, taskID)
-			statusCtx, cancelStatus := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancelStatus()
-			if err := h.Store.UpdateTaskStatus(statusCtx, taskID, "failed", message); err != nil {
-				log.Printf("mark panicked review task failed failed: task_id=%d error=%v", taskID, err)
-			}
-		}
-	}()
-
-	statusCtx, cancelStatus := context.WithTimeout(context.Background(), 5*time.Second)
-	if err := h.Store.UpdateTaskStatus(statusCtx, taskID, "running", ""); err != nil {
-		log.Printf("mark review task running failed: task_id=%d error=%v", taskID, err)
-	}
-	cancelStatus()
-
-	if err := h.Reviewer.ReviewPR(ctx, owner, repo, number, taskID); err != nil {
-		errMessage := err.Error()
-		log.Printf("review pr failed: owner=%s repo=%s number=%d task_id=%d error=%v", owner, repo, number, taskID, err)
+	publishCtx, cancelPublish := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelPublish()
+	if err := h.Publisher.Publish(publishCtx, task.ID); err != nil {
+		log.Printf("publish review task failed: task_id=%d error=%v", task.ID, err)
 		failedCtx, cancelFailed := context.WithTimeout(context.Background(), 5*time.Second)
-		updateErr := h.Store.UpdateTaskStatus(failedCtx, taskID, "failed", errMessage)
-		cancelFailed()
-		if updateErr != nil {
-			log.Printf("mark review task failed failed: task_id=%d error=%v", taskID, updateErr)
+		if updateErr := h.Store.UpdateTaskStatus(failedCtx, task.ID, "failed", err.Error()); updateErr != nil {
+			log.Printf("mark unpublished review task failed failed: task_id=%d error=%v", task.ID, updateErr)
 		}
+		cancelFailed()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "publish review task"})
 		return
 	}
-	doneCtx, cancelDone := context.WithTimeout(context.Background(), 5*time.Second)
-	err := h.Store.UpdateTaskStatus(doneCtx, taskID, "done", "")
-	cancelDone()
-	if err != nil {
-		log.Printf("mark review task done failed: task_id=%d error=%v", taskID, err)
+
+	queuedCtx, cancelQueued := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := h.Store.UpdateTaskStatus(queuedCtx, task.ID, "queued", ""); err != nil {
+		log.Printf("mark review task queued failed: task_id=%d error=%v", task.ID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "mark review task queued"})
+		cancelQueued()
+		return
 	}
+	cancelQueued()
+	c.JSON(http.StatusAccepted, gin.H{"status": "queued", "task_id": task.ID})
 }

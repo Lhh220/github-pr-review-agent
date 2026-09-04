@@ -14,7 +14,7 @@
 
 ## 3. 整体架构
 
-当前实现还没有引入 RabbitMQ、Redis 和 Tool Calling。下图是阶段二完成后的目标架构；当前实际链路是：
+当前实现已接入 RabbitMQ 和 Worker Pool，还没有引入 Redis、Tool Calling、tree-sitter 和静态检查沙箱。当前实际链路是：
 
 ```text
 GitHub PR Event
@@ -23,7 +23,10 @@ GitHub PR Event
 Webhook Receiver (Gin)
    |  签名校验 / action 过滤 / delivery_id 幂等
    v
-Review Service (goroutine + graceful shutdown)
+RabbitMQ pr.review.queue
+   |
+   v
+Worker Pool (Go)
    |
    v
 GitHub API: PR meta + files + file context
@@ -37,6 +40,8 @@ MySQL review_task + review_result
    v
 GitHub PR Review API
 ```
+
+下图是阶段二完成后的目标架构，Redis 锁、重试和死信队列还未实现：
 
 ```text
 GitHub PR Event
@@ -84,22 +89,23 @@ MySQL (任务/结果/审计) + Redis (锁/去重/限流)
 - 校验 `X-GitHub-Event` 必须是 `pull_request`，拒绝无关事件进入任务链路。
 - 解析 PR 事件，只处理 `opened / synchronize / reopened`。
 - 生成 taskId，幂等写入 MySQL（delivery_id 唯一），避免重复投递。
-- 服务收到退出信号后先停止接收新请求，再等待正在执行的审查 goroutine，避免任务被硬中断。
-- 投递到 RabbitMQ 后立即返回 202。
+- 发布 `task_id` 到 RabbitMQ，确认 broker 收到后把任务标记为 `queued`，并立即返回 202。
+- 服务收到退出信号后先停止 HTTP Server，再停止 Worker 并等待正在执行的任务，避免任务被硬中断。
 - 限流：基于 Redis 按仓库维度限流，防止 webhook 洪水。
 
 ### 4.2 任务队列
 
-- 队列：`pr.review.queue`，配合死信队列。
-- 消息体只放 taskId，具体数据从 MySQL 取，避免消息体过大。
-- 消费失败重试：指数退避，达到最大次数后进死信队列。
+- 当前队列：`pr.review.queue`，durable queue。
+- 消息体只放 `task_id`，具体数据从 MySQL 取，避免消息体过大。
+- 消息使用 persistent delivery，Publisher 开启 confirm，确保 broker 已接收。
+- Consumer 使用 manual ack；业务失败先标记 `failed` 并 ack，避免未加 retry 控制时无限重投。
+- 后续增强：指数退避重试，达到最大次数后进死信队列。
 
 ### 4.3 Worker Pool
 
-- 固定大小 goroutine 池消费队列。
-- 消费前用 Redis 分布式锁：`lock:pr:{repo}:{number}`，TTL 可配置。
-- 拿不到锁说明同一 PR 正在审查，跳过或等待。
-- 任务结束后释放锁，更新任务状态。
+- 当前实现使用固定容量 slot 控制 Worker 并发，RabbitMQ prefetch 与 Worker 数一致。
+- Worker 根据 `task_id` 从 MySQL 读取任务，状态置为 `running`，调用 Review Service，再更新为 `done / failed`。
+- 后续增强：消费前用 Redis 分布式锁 `lock:pr:{repo}:{number}`，避免同一个 PR 并发审查。
 
 ### 4.4 Agent Loop
 
@@ -225,12 +231,13 @@ Redis Key：
 ### 4.10 状态机
 
 ```text
-received -> queued -> running -> formatting -> commenting -> done
-                         |          |            |
-                         v          v            v
-                       failed    failed       failed
+received -> queued -> running -> done
+                        |
+                        v
+                      failed
 ```
-任何阶段失败都记 error 并更新状态；支持从 failed 重试，最多 N 次。
+
+当前失败会记录 error 并更新为 `failed`。后续会加入 `retrying` 和 `dead_letter`，支持指数退避和最大重试次数。
 
 ## 5. 技术选型
 
@@ -258,13 +265,15 @@ type Provider interface {
 一个 PR 从接收到回写评论：
 
 1. GitHub 发 webhook 到 `/webhook/github`。
-2. Receiver 校验签名、解析事件、去重，写 `review_task(received)`，投递 RabbitMQ。
-3. Worker 消费消息，加 Redis 锁，状态置 `running`。
-4. Agent 调工具读取 PR meta、diff、文件上下文、历史提交。
-5. Context Builder 用 tree-sitter 裁剪上下文，控制在 token 预算内。
-6. LLM 生成结构化审查意见，记录每次 tool_call 到日志表。
-7. 状态置 `formatting` -> `commenting`，回写 GitHub PR 评论。
-8. 状态置 `done`，释放锁，记录审计。
+2. Receiver 校验签名、解析事件、去重，写 `review_task(received)`，发布 `task_id` 到 RabbitMQ。
+3. Webhook 等待 publisher confirm，任务标记为 `queued`，返回 202。
+4. Worker 消费消息，状态置 `running`。
+5. Review Service 读取 PR meta、diff 和变更文件上下文。
+6. DeepSeek 生成结构化 JSON，结果写入 `review_result`。
+7. Review Service 回写 GitHub PR Review。
+8. Worker 将任务标记为 `done` 并 ack 消息；失败则标记 `failed`。
+
+后续引入 Redis、Tool Calling 和静态检查后，再扩展为锁、多步工具调用、重试和审计链路。
 
 ## 7. 安全与成本
 

@@ -12,31 +12,30 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/liaohonghui/github-pr-review-agent/internal/store"
 )
 
 type fakeTaskStore struct {
-	task    *store.Task
-	created bool
-	err     error
+	mu sync.Mutex
 
+	task          *store.Task
+	created       bool
+	err           error
+	createCalls   int
 	statuses      []string
 	statusUpdates chan string
-	mu            sync.Mutex
-	createCalls   int
 }
 
 func (f *fakeTaskStore) CreateTask(ctx context.Context, input store.NewTask) (*store.Task, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return nil, false, f.err
 	}
-	f.mu.Lock()
 	created := f.created && f.createCalls == 0
 	f.createCalls++
-	f.mu.Unlock()
 	return f.task, created, nil
 }
 
@@ -50,18 +49,27 @@ func (f *fakeTaskStore) UpdateTaskStatus(ctx context.Context, id uint64, status,
 	return nil
 }
 
-type fakeReviewer struct {
-	calls chan struct{}
-	err   error
-	panic bool
+type fakePublisher struct {
+	mu sync.Mutex
+
+	err     error
+	taskIDs []uint64
 }
 
-func (f *fakeReviewer) ReviewPR(ctx context.Context, owner, repo string, number int, taskID uint64) error {
-	f.calls <- struct{}{}
-	if f.panic {
-		panic("review exploded")
+func (f *fakePublisher) Publish(ctx context.Context, taskID uint64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
 	}
-	return f.err
+	f.taskIDs = append(f.taskIDs, taskID)
+	return nil
+}
+
+func (f *fakePublisher) published() []uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]uint64(nil), f.taskIDs...)
 }
 
 func webhookPayload(action string) []byte {
@@ -90,14 +98,22 @@ func signedRequest(method, target string, body []byte, event, secret string) *ht
 	return req
 }
 
+func newWebhookTestTask() *store.Task {
+	return &store.Task{
+		ID:       1,
+		Repo:     "owner/repo",
+		PRNumber: 12,
+		Status:   "received",
+	}
+}
+
 func TestHandleRejectsUnexpectedEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	body := webhookPayload("opened")
-	router.POST("/webhook/github", New("secret", &fakeReviewer{}, &fakeTaskStore{}).Handle)
+	router.POST("/webhook/github", New("secret", &fakePublisher{}, &fakeTaskStore{}).Handle)
 
 	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, signedRequest(http.MethodPost, "/webhook/github", body, "issues", "secret"))
+	router.ServeHTTP(recorder, signedRequest(http.MethodPost, "/webhook/github", webhookPayload("opened"), "issues", "secret"))
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d, body = %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
@@ -107,11 +123,10 @@ func TestHandleRejectsUnexpectedEvent(t *testing.T) {
 func TestHandleRejectsInvalidSignature(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	body := webhookPayload("opened")
-	router.POST("/webhook/github", New("secret", &fakeReviewer{}, &fakeTaskStore{}).Handle)
+	router.POST("/webhook/github", New("secret", &fakePublisher{}, &fakeTaskStore{}).Handle)
 
 	recorder := httptest.NewRecorder()
-	req := signedRequest(http.MethodPost, "/webhook/github", body, "pull_request", "")
+	req := signedRequest(http.MethodPost, "/webhook/github", webhookPayload("opened"), "pull_request", "")
 	req.Header.Set("X-Hub-Signature-256", "sha256=bad-signature")
 	router.ServeHTTP(recorder, req)
 
@@ -123,97 +138,66 @@ func TestHandleRejectsInvalidSignature(t *testing.T) {
 func TestHandleIgnoresUnsupportedAction(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	body := webhookPayload("closed")
-	router.POST("/webhook/github", New("secret", &fakeReviewer{}, &fakeTaskStore{}).Handle)
+	publisher := &fakePublisher{}
+	router.POST("/webhook/github", New("secret", publisher, &fakeTaskStore{}).Handle)
 
 	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, signedRequest(http.MethodPost, "/webhook/github", body, "pull_request", "secret"))
+	router.ServeHTTP(recorder, signedRequest(http.MethodPost, "/webhook/github", webhookPayload("closed"), "pull_request", "secret"))
 
 	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d, body = %s", recorder.Code, http.StatusOK, recorder.Body.String())
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if got := publisher.published(); len(got) != 0 {
+		t.Fatalf("unsupported action published tasks: %v", got)
 	}
 }
 
-func TestHandleAcceptsPullRequestAndRunsReview(t *testing.T) {
+func TestHandleQueuesPullRequestTask(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	body := webhookPayload("opened")
-	reviewer := &fakeReviewer{calls: make(chan struct{}, 1)}
+	publisher := &fakePublisher{}
 	taskStore := &fakeTaskStore{
-		task:          &store.Task{ID: 1, Repo: "owner/repo", PRNumber: 12, Status: "received"},
+		task:          newWebhookTestTask(),
 		created:       true,
-		statusUpdates: make(chan string, 2),
+		statusUpdates: make(chan string, 1),
 	}
-	router.POST("/webhook/github", New("secret", reviewer, taskStore).Handle)
+	router.POST("/webhook/github", New("secret", publisher, taskStore).Handle)
 
 	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, signedRequest(http.MethodPost, "/webhook/github", body, "pull_request", "secret"))
+	router.ServeHTTP(recorder, signedRequest(http.MethodPost, "/webhook/github", webhookPayload("opened"), "pull_request", "secret"))
 
 	if recorder.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d, body = %s", recorder.Code, http.StatusAccepted, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"status":"queued"`) {
+		t.Fatalf("unexpected response body: %s", recorder.Body.String())
+	}
+	if got := publisher.published(); len(got) != 1 || got[0] != 1 {
+		t.Fatalf("published task ids = %v, want [1]", got)
 	}
 	select {
-	case <-reviewer.calls:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for review")
-	}
-	for _, expected := range []string{"running", "done"} {
-		select {
-		case status := <-taskStore.statusUpdates:
-			if status != expected {
-				t.Fatalf("unexpected task status: got %s, want %s", status, expected)
-			}
-		case <-time.After(time.Second):
-			t.Fatalf("timed out waiting for task status %s", expected)
+	case status := <-taskStore.statusUpdates:
+		if status != "queued" {
+			t.Fatalf("task status = %s, want queued", status)
 		}
+	default:
+		t.Fatal("task was not marked queued")
 	}
 }
 
-func TestHandleMarksTaskFailedWhenReviewerPanics(t *testing.T) {
+func TestHandleDuplicateDeliveryPublishesOnce(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	body := webhookPayload("opened")
-	reviewer := &fakeReviewer{calls: make(chan struct{}, 1), panic: true}
+	publisher := &fakePublisher{}
 	taskStore := &fakeTaskStore{
-		task:          &store.Task{ID: 1, Repo: "owner/repo", PRNumber: 12, Status: "received"},
-		created:       true,
-		statusUpdates: make(chan string, 2),
+		task:    newWebhookTestTask(),
+		created: true,
 	}
-	router.POST("/webhook/github", New("secret", reviewer, taskStore).Handle)
+	router.POST("/webhook/github", New("secret", publisher, taskStore).Handle)
 
-	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, signedRequest(http.MethodPost, "/webhook/github", body, "pull_request", "secret"))
-
-	if recorder.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want %d, body = %s", recorder.Code, http.StatusAccepted, recorder.Body.String())
-	}
-	for _, expected := range []string{"running", "failed"} {
-		select {
-		case status := <-taskStore.statusUpdates:
-			if status != expected {
-				t.Fatalf("unexpected task status: got %s, want %s", status, expected)
-			}
-		case <-time.After(time.Second):
-			t.Fatalf("timed out waiting for task status %s", expected)
-		}
-	}
-}
-
-func TestHandleDuplicateDeliveryRunsReviewOnce(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	router := gin.New()
-	body := webhookPayload("opened")
-	reviewer := &fakeReviewer{calls: make(chan struct{}, 2)}
-	taskStore := &fakeTaskStore{
-		task:          &store.Task{ID: 1, Repo: "owner/repo", PRNumber: 12, Status: "received"},
-		created:       true,
-		statusUpdates: make(chan string, 2),
-	}
-	router.POST("/webhook/github", New("secret", reviewer, taskStore).Handle)
-
-	for i, expectedStatus := range []string{"accepted", "duplicate"} {
+	for i, expectedStatus := range []string{"queued", "duplicate"} {
 		recorder := httptest.NewRecorder()
-		router.ServeHTTP(recorder, signedRequest(http.MethodPost, "/webhook/github", body, "pull_request", "secret"))
+		router.ServeHTTP(recorder, signedRequest(http.MethodPost, "/webhook/github", webhookPayload("opened"), "pull_request", "secret"))
 		if recorder.Code != http.StatusAccepted {
 			t.Fatalf("request %d status = %d, want %d, body = %s", i+1, recorder.Code, http.StatusAccepted, recorder.Body.String())
 		}
@@ -221,58 +205,34 @@ func TestHandleDuplicateDeliveryRunsReviewOnce(t *testing.T) {
 			t.Fatalf("request %d body = %s, want status %s", i+1, recorder.Body.String(), expectedStatus)
 		}
 	}
-
-	select {
-	case <-reviewer.calls:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for first review")
-	}
-	select {
-	case <-reviewer.calls:
-		t.Fatal("duplicate delivery triggered a second review")
-	case <-time.After(100 * time.Millisecond):
-	}
-	for _, expected := range []string{"running", "done"} {
-		select {
-		case status := <-taskStore.statusUpdates:
-			if status != expected {
-				t.Fatalf("unexpected task status: got %s, want %s", status, expected)
-			}
-		case <-time.After(time.Second):
-			t.Fatalf("timed out waiting for task status %s", expected)
-		}
+	if got := publisher.published(); len(got) != 1 {
+		t.Fatalf("duplicate delivery published %d times, want 1", len(got))
 	}
 }
 
-func TestWaitContextWaitsForInFlightWork(t *testing.T) {
-	handler := New("", &fakeReviewer{}, &fakeTaskStore{})
-	release := make(chan struct{})
-	handler.workers.Add(1)
-	go func() {
-		defer handler.workers.Done()
-		<-release
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	result := make(chan error, 1)
-	go func() {
-		result <- handler.WaitContext(ctx)
-	}()
-
-	select {
-	case err := <-result:
-		t.Fatalf("WaitContext returned before work finished: %v", err)
-	case <-time.After(20 * time.Millisecond):
+func TestHandleMarksTaskFailedWhenPublishFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	publisher := &fakePublisher{err: context.DeadlineExceeded}
+	taskStore := &fakeTaskStore{
+		task:          newWebhookTestTask(),
+		created:       true,
+		statusUpdates: make(chan string, 1),
 	}
+	router.POST("/webhook/github", New("secret", publisher, taskStore).Handle)
 
-	close(release)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, signedRequest(http.MethodPost, "/webhook/github", webhookPayload("opened"), "pull_request", "secret"))
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d, body = %s", recorder.Code, http.StatusInternalServerError, recorder.Body.String())
+	}
 	select {
-	case err := <-result:
-		if err != nil {
-			t.Fatalf("WaitContext() error = %v", err)
+	case status := <-taskStore.statusUpdates:
+		if status != "failed" {
+			t.Fatalf("task status = %s, want failed", status)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for WaitContext")
+	default:
+		t.Fatal("failed publish did not mark task failed")
 	}
 }

@@ -22,6 +22,9 @@ type Config struct {
 	MaxFileContextLines     int
 	MySQLDSN                string
 	AdminToken              string
+	RabbitMQURL             string
+	ReviewQueue             string
+	ReviewWorkers           int
 }
 
 func Load() *Config {
@@ -42,6 +45,9 @@ func Load() *Config {
 		MaxFileContextLines:     getEnvInt("MAX_FILE_CONTEXT_LINES", 200),
 		MySQLDSN:                getEnv("MYSQL_DSN", ""),
 		AdminToken:              getEnv("ADMIN_TOKEN", ""),
+		RabbitMQURL:             os.Getenv("RABBITMQ_URL"),
+		ReviewQueue:             getEnv("REVIEW_QUEUE", "pr.review.queue"),
+		ReviewWorkers:           getEnvInt("REVIEW_WORKERS", 4),
 	}
 }
 
