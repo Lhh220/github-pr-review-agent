@@ -33,7 +33,7 @@ MVP 已经跑通并部署到 Railway：
 - 提供 `/dead-letters` 查询死信任务，`/dead-letters/:id/requeue` 手动重新入队
 - MySQL 结构通过版本化 migration 管理，服务启动自动执行，也提供 `cmd/migrate` CLI
 
-Day 4 的 Redis 锁和限流代码已完成并通过单元测试；需要在 Railway 增加 Redis 服务并配置 `REDIS_URL` 后完成线上验收。
+Day 4 的 Redis PR 级分布式锁和外部 API 限流已完成本地与线上验收。
 
 当前线上示例：
 

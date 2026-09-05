@@ -37,7 +37,7 @@
 - [x] Day 2：RabbitMQ 异步队列，publisher confirm，manual ack，Worker Pool，`queued` 状态，连接断开自动重连
 - [x] Day 3：失败重试、死信队列、完整状态机（本地和线上 RabbitMQ 验收完成）
 - [x] Day 3 收尾：queued 超时兜底恢复、死信查询与 Requeue、重试抖动、MySQL migration
-- [ ] Day 4：Redis 分布式锁、限流、同一 PR 并发控制（代码和单测完成，待线上验收）
+- [x] Day 4：Redis 分布式锁、限流、同一 PR 并发控制（本地和线上验收完成）
 - [ ] Day 5：审计表、观测统计、部署和文档收尾
 
 验收：重复发同一 PR 事件不重复审查；失败可重试；审计日志可查。
