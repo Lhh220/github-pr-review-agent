@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/liaohonghui/github-pr-review-agent/internal/queue"
 	"github.com/liaohonghui/github-pr-review-agent/internal/store"
 )
 
@@ -17,10 +18,12 @@ type Store interface {
 	GetTask(ctx context.Context, id uint64) (*store.Task, error)
 	ListTasks(ctx context.Context, filter store.ListFilter) ([]store.Task, error)
 	GetReviewResultByTaskID(ctx context.Context, taskID uint64) (*store.ReviewResult, error)
+	RequeueTask(ctx context.Context, id uint64) error
 }
 
 type Handler struct {
 	store      Store
+	publisher  queue.Publisher
 	adminToken string
 }
 
@@ -55,8 +58,8 @@ type ReviewResultResponse struct {
 	CreatedAt     time.Time       `json:"created_at"`
 }
 
-func New(store Store, adminToken string) *Handler {
-	return &Handler{store: store, adminToken: adminToken}
+func New(store Store, publisher queue.Publisher, adminToken string) *Handler {
+	return &Handler{store: store, publisher: publisher, adminToken: adminToken}
 }
 
 func (h *Handler) Register(r *gin.Engine) {
@@ -64,6 +67,10 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.GET("", h.list)
 	group.GET("/:id", h.get)
 	group.GET("/:id/result", h.result)
+
+	deadLetters := r.Group("/dead-letters", h.authorize)
+	deadLetters.GET("", h.deadLetters)
+	deadLetters.POST("/:id/requeue", h.requeue)
 }
 
 func (h *Handler) authorize(c *gin.Context) {
@@ -77,6 +84,14 @@ func (h *Handler) authorize(c *gin.Context) {
 }
 
 func (h *Handler) list(c *gin.Context) {
+	h.listTasks(c, "", "tasks")
+}
+
+func (h *Handler) deadLetters(c *gin.Context) {
+	h.listTasks(c, "dead_letter", "dead_letters")
+}
+
+func (h *Handler) listTasks(c *gin.Context, status, responseKey string) {
 	prNumber, err := parsePositiveInt(c.Query("pr"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid pr"})
@@ -87,9 +102,12 @@ func (h *Handler) list(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit"})
 		return
 	}
+	if status == "" {
+		status = c.Query("status")
+	}
 	tasks, err := h.store.ListTasks(c.Request.Context(), store.ListFilter{
 		Repo:     c.Query("repo"),
-		Status:   c.Query("status"),
+		Status:   status,
 		PRNumber: prNumber,
 		Limit:    limit,
 	})
@@ -101,7 +119,7 @@ func (h *Handler) list(c *gin.Context) {
 	for _, task := range tasks {
 		responses = append(responses, newTaskResponse(task))
 	}
-	c.JSON(http.StatusOK, gin.H{"tasks": responses})
+	c.JSON(http.StatusOK, gin.H{responseKey: responses})
 }
 
 func (h *Handler) get(c *gin.Context) {
@@ -150,6 +168,36 @@ func (h *Handler) result(c *gin.Context) {
 		"task":   newTaskResponse(*task),
 		"result": newReviewResultResponse(*result),
 	})
+}
+
+func (h *Handler) requeue(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || id == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid task id"})
+		return
+	}
+	if err := h.store.RequeueTask(c.Request.Context(), id); err != nil {
+		switch {
+		case errors.Is(err, store.ErrTaskNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		case errors.Is(err, store.ErrTaskTransitionFailed):
+			c.JSON(http.StatusConflict, gin.H{"error": "task is not dead letter"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "requeue task"})
+		}
+		return
+	}
+
+	if err := h.publisher.Publish(c.Request.Context(), id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "publish requeued task",
+			"task_id": id,
+			"status":  "queued",
+			"message": "task is queued and will be recovered by the stale queued scanner",
+		})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"task_id": id, "status": "queued"})
 }
 
 func newTaskResponse(task store.Task) TaskResponse {

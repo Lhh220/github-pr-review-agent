@@ -96,9 +96,9 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("ping mysql: %w", err)
 	}
-	if err := ensureSchema(ctx, db); err != nil {
+	if err := Migrate(ctx, db); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("ensure mysql schema: %w", err)
+		return nil, fmt.Errorf("migrate mysql schema: %w", err)
 	}
 	return &Store{db: db}, nil
 }
@@ -107,58 +107,22 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-func ensureSchema(ctx context.Context, db *sql.DB) error {
-	query := `
-CREATE TABLE IF NOT EXISTS review_task (
-    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    repo VARCHAR(255) NOT NULL,
-    pr_number INT UNSIGNED NOT NULL,
-    commit_sha VARCHAR(40) NOT NULL,
-    action VARCHAR(32) NOT NULL,
-    delivery_id VARCHAR(64) NOT NULL,
-    status VARCHAR(32) NOT NULL,
-    error TEXT NULL,
-    attempt_count INT UNSIGNED NOT NULL DEFAULT 0,
-    max_attempts INT UNSIGNED NOT NULL DEFAULT 3,
-    next_retry_at TIMESTAMP(3) NULL,
-    created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-    updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
-    UNIQUE KEY uq_review_task_delivery (delivery_id),
-    KEY idx_review_task_repo_pr (repo, pr_number),
-    KEY idx_review_task_status (status),
-    KEY idx_review_task_retry (status, next_retry_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
-	if _, err := db.ExecContext(ctx, query); err != nil {
-		return err
+func upgradeLegacySchema(ctx context.Context, db *sql.DB) error {
+	var tableCount int
+	if err := db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM information_schema.tables
+WHERE table_schema = DATABASE()
+  AND table_name = 'review_task'`).Scan(&tableCount); err != nil {
+		return fmt.Errorf("check legacy review_task table: %w", err)
+	}
+	if tableCount == 0 {
+		return nil
 	}
 	if err := ensureRetryColumns(ctx, db); err != nil {
 		return err
 	}
-	if err := ensureTimestampPrecision(ctx, db); err != nil {
-		return err
-	}
-	resultQuery := `
-CREATE TABLE IF NOT EXISTS review_result (
-    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    task_id BIGINT UNSIGNED NOT NULL,
-    summary VARCHAR(2048) NOT NULL,
-    payload_json JSON NOT NULL,
-    raw_response MEDIUMTEXT NOT NULL,
-    model VARCHAR(128) NOT NULL,
-    input_tokens INT UNSIGNED NOT NULL DEFAULT 0,
-    output_tokens INT UNSIGNED NOT NULL DEFAULT 0,
-    total_tokens INT UNSIGNED NOT NULL DEFAULT 0,
-    llm_duration_ms BIGINT UNSIGNED NOT NULL DEFAULT 0,
-    created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-    UNIQUE KEY uq_review_result_task (task_id),
-    CONSTRAINT fk_review_result_task
-        FOREIGN KEY (task_id) REFERENCES review_task (id)
-        ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
-	if _, err := db.ExecContext(ctx, resultQuery); err != nil {
-		return err
-	}
-	return nil
+	return ensureTimestampPrecision(ctx, db)
 }
 
 func ensureRetryColumns(ctx context.Context, db *sql.DB) error {
@@ -384,6 +348,52 @@ WHERE id = ? AND status = 'running'`,
 	return nil
 }
 
+func (s *Store) RequeueTask(ctx context.Context, id uint64) error {
+	result, err := s.db.ExecContext(ctx, `
+UPDATE review_task
+SET status = 'queued',
+    attempt_count = 0,
+    next_retry_at = NULL
+WHERE id = ? AND status = 'dead_letter'`,
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("requeue dead letter task: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("get requeue rows affected: %w", err)
+	}
+	if affected == 0 {
+		if _, err := s.GetTask(ctx, id); err != nil {
+			return err
+		}
+		return ErrTaskTransitionFailed
+	}
+	return nil
+}
+
+func (s *Store) TouchQueuedTask(ctx context.Context, id uint64, updatedAt time.Time) error {
+	result, err := s.db.ExecContext(ctx, `
+UPDATE review_task
+SET updated_at = ?
+WHERE id = ? AND status = 'queued'`,
+		updatedAt,
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("touch queued review task: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("get queued touch rows affected: %w", err)
+	}
+	if affected == 0 {
+		return ErrTaskTransitionFailed
+	}
+	return nil
+}
+
 func (s *Store) GetTask(ctx context.Context, id uint64) (*Task, error) {
 	row := s.db.QueryRowContext(ctx, `
 SELECT id, repo, pr_number, commit_sha, action, delivery_id, status,
@@ -465,6 +475,36 @@ LIMIT ?`, staleBefore, limit)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate recoverable review tasks: %w", err)
+	}
+	return tasks, nil
+}
+
+func (s *Store) ListStaleQueuedTasks(ctx context.Context, staleBefore time.Time, limit int) ([]Task, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, repo, pr_number, commit_sha, action, delivery_id, status,
+       COALESCE(error, ''), attempt_count, max_attempts, next_retry_at, created_at, updated_at
+FROM review_task
+WHERE status = 'queued' AND updated_at < ?
+ORDER BY updated_at ASC
+LIMIT ?`, staleBefore, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list stale queued review tasks: %w", err)
+	}
+	defer rows.Close()
+
+	tasks := make([]Task, 0)
+	for rows.Next() {
+		task, err := scanTask(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, *task)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate stale queued review tasks: %w", err)
 	}
 	return tasks, nil
 }

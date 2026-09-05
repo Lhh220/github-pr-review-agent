@@ -98,6 +98,7 @@ func startServer(ctx context.Context, cfg *config.Config, gh *github.Client, tas
 		MaxAttempts:    cfg.ReviewMaxAttempts,
 		RetryBaseDelay: cfg.ReviewRetryBaseDelay,
 		RetryMaxDelay:  cfg.ReviewRetryMaxDelay,
+		RetryJitter:    cfg.ReviewRetryJitter,
 	})
 
 	runCtx, cancelRun := context.WithCancel(ctx)
@@ -119,7 +120,7 @@ func startServer(ctx context.Context, cfg *config.Config, gh *github.Client, tas
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
 	r.POST("/webhook/github", handler.Handle)
-	taskapi.New(taskStore, cfg.AdminToken).Register(r)
+	taskapi.New(taskStore, broker, cfg.AdminToken).Register(r)
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})

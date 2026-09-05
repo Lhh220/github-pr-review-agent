@@ -3,8 +3,10 @@ package taskapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +24,8 @@ type fakeStore struct {
 	filter       store.ListFilter
 	resultTaskID uint64
 	resultErr    error
+	requeueErr   error
+	requeueID    uint64
 }
 
 func (f *fakeStore) GetTask(ctx context.Context, id uint64) (*store.Task, error) {
@@ -48,6 +52,24 @@ func (f *fakeStore) GetReviewResultByTaskID(ctx context.Context, taskID uint64) 
 	return f.result, nil
 }
 
+func (f *fakeStore) RequeueTask(ctx context.Context, id uint64) error {
+	f.requeueID = id
+	return f.requeueErr
+}
+
+type fakePublisher struct {
+	publishedIDs []uint64
+	err          error
+}
+
+func (f *fakePublisher) Publish(ctx context.Context, taskID uint64) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.publishedIDs = append(f.publishedIDs, taskID)
+	return nil
+}
+
 func newTestTask() *store.Task {
 	now := time.Now()
 	return &store.Task{
@@ -66,7 +88,7 @@ func newTestTask() *store.Task {
 func setupRouter(store Store, adminToken string) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	New(store, adminToken).Register(router)
+	New(store, &fakePublisher{}, adminToken).Register(router)
 	return router
 }
 
@@ -190,6 +212,76 @@ func TestListTasksPassesFiltersToStore(t *testing.T) {
 	}
 	if fake.filter != (store.ListFilter{Repo: "owner/repo", Status: "done", PRNumber: 12, Limit: 20}) {
 		t.Fatalf("unexpected filter: %+v", fake.filter)
+	}
+}
+
+func TestDeadLettersListUsesDeadLetterFilter(t *testing.T) {
+	fake := &fakeStore{tasks: []store.Task{*newTestTask()}}
+	router := setupRouter(fake, "")
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/dead-letters?repo=owner/repo&pr=12&limit=20", nil)
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", recorder.Code, recorder.Body.String())
+	}
+	if fake.filter != (store.ListFilter{Repo: "owner/repo", Status: "dead_letter", PRNumber: 12, Limit: 20}) {
+		t.Fatalf("unexpected filter: %+v", fake.filter)
+	}
+	if !strings.Contains(recorder.Body.String(), `"dead_letters"`) {
+		t.Fatalf("unexpected response body: %s", recorder.Body.String())
+	}
+}
+
+func TestRequeueDeadLetter(t *testing.T) {
+	fake := &fakeStore{}
+	publisher := &fakePublisher{}
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	New(fake, publisher, "").Register(router)
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/dead-letters/7/requeue", nil)
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusAccepted || fake.requeueID != 7 {
+		t.Fatalf("status = %d requeueID = %d body = %s", recorder.Code, fake.requeueID, recorder.Body.String())
+	}
+	if len(publisher.publishedIDs) != 1 || publisher.publishedIDs[0] != 7 {
+		t.Fatalf("unexpected published ids: %v", publisher.publishedIDs)
+	}
+}
+
+func TestRequeueRejectsNonDeadLetterTask(t *testing.T) {
+	fake := &fakeStore{requeueErr: store.ErrTaskTransitionFailed}
+	router := setupRouter(fake, "")
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/dead-letters/7/requeue", nil)
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRequeueHandlesPublishFailure(t *testing.T) {
+	fake := &fakeStore{}
+	publisher := &fakePublisher{err: errors.New("rabbit unavailable")}
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	New(fake, publisher, "").Register(router)
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/dead-letters/7/requeue", nil)
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d body = %s", recorder.Code, recorder.Body.String())
+	}
+	if fake.requeueID != 7 {
+		t.Fatalf("requeueID = %d, want 7", fake.requeueID)
 	}
 }
 

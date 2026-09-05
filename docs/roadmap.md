@@ -35,7 +35,8 @@
 任务：
 - [x] Day 1：结构化审查输出，`review_result` 落库，token / 耗时统计，`/tasks/:id/result` 查询
 - [x] Day 2：RabbitMQ 异步队列，publisher confirm，manual ack，Worker Pool，`queued` 状态，连接断开自动重连
-- [x] Day 3：失败重试、死信队列、完整状态机（代码和本地 MySQL 验证完成，待线上 RabbitMQ 验收）
+- [x] Day 3：失败重试、死信队列、完整状态机（本地和线上 RabbitMQ 验收完成）
+- [x] Day 3 收尾：queued 超时兜底恢复、死信查询与 Requeue、重试抖动、MySQL migration
 - [ ] Day 4：Redis 分布式锁、限流、同一 PR 并发控制
 - [ ] Day 5：审计表、观测统计、部署和文档收尾
 

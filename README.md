@@ -21,11 +21,15 @@ MVP 已经跑通并部署到 Railway：
 - RabbitMQ 使用 durable queue、persistent message、publisher confirm 和 manual ack
 - RabbitMQ 连接断开后自动重连，broker 短暂重启时 Go 服务保持在线
 - 业务失败进入延迟重试队列，按指数退避回到主队列
+- 重试延迟附加随机 jitter，避免失败任务同时重试
 - 超过最大重试次数后进入死信队列，任务状态标记为 `dead_letter`
 - 定期扫描超时仍处于 `running` 的任务，自动恢复到重试链路
+- 定期扫描超时仍处于 `queued` 的任务，自动重新投递，避免进程崩溃导致任务滞留
 - Worker Pool 固定并发消费任务，支持优雅停机
 - 任务状态覆盖 `received -> queued -> running -> done/failed/retrying/dead_letter`
 - 提供 `/tasks`、`/tasks/:id` 查询任务状态，以及 `/tasks/:id/result` 查询结构化审查结果
+- 提供 `/dead-letters` 查询死信任务，`/dead-letters/:id/requeue` 手动重新入队
+- MySQL 结构通过版本化 migration 管理，服务启动自动执行，也提供 `cmd/migrate` CLI
 
 当前线上示例：
 
@@ -87,6 +91,7 @@ REVIEW_WORKERS=4
 REVIEW_MAX_ATTEMPTS=3
 REVIEW_RETRY_BASE_DELAY=30s
 REVIEW_RETRY_MAX_DELAY=10m
+REVIEW_RETRY_JITTER=5s
 ```
 
 说明：
@@ -108,6 +113,7 @@ REVIEW_RETRY_MAX_DELAY=10m
 - `REVIEW_MAX_ATTEMPTS`：最大执行次数，默认 3。前两次失败重试，第 3 次失败进入死信。
 - `REVIEW_RETRY_BASE_DELAY`：第一次重试延迟，默认 30s。
 - `REVIEW_RETRY_MAX_DELAY`：单次重试延迟上限，默认 10m。
+- `REVIEW_RETRY_JITTER`：每次重试附加的随机延迟上限，默认 5s；设置为 `0s` 可关闭。
 
 注意：阶段二接入 RabbitMQ 后，Railway 部署必须提供可达的 `RABBITMQ_URL`，否则服务启动会失败。
 
@@ -137,7 +143,17 @@ GITHUB_TOKEN=...
 
    默认账号密码是 `guest / guest`，仅本地可用。
 
-2. 准备环境变量：
+2. 查看数据库 migration 状态：
+
+   ```powershell
+   $env:MYSQL_DSN="root:<password>@tcp(127.0.0.1:3306)/github_pr_review_agent?charset=utf8mb4&parseTime=true&loc=Local"
+   go run ./cmd/migrate status
+   go run ./cmd/migrate up
+   ```
+
+   服务启动时也会自动执行 migration。
+
+3. 准备环境变量：
 
    ```powershell
    $env:GITHUB_WEBHOOK_SECRET="你的 webhook secret"
@@ -157,13 +173,13 @@ $env:REVIEW_RETRY_BASE_DELAY="30s"
 $env:REVIEW_RETRY_MAX_DELAY="10m"
 ```
 
-3. 启动服务：
+4. 启动服务：
 
    ```powershell
    go run ./cmd/server
    ```
 
-4. 如需本地接收 GitHub Webhook，再用 ngrok 临时暴露端口：
+5. 如需本地接收 GitHub Webhook，再用 ngrok 临时暴露端口：
 
    ```powershell
    ngrok http 8080
@@ -205,9 +221,10 @@ running -> failed   # 队列发布失败等不可重试的基础设施错误
 - `attempt_count` 记录已执行次数。
 - `max_attempts` 是最大执行次数，默认 3。
 - `next_retry_at` 是下次允许执行的时间。
-- 第 1 次失败延迟 30s，第 2 次失败延迟 60s，第 3 次失败进入死信队列。
+- 第 1 次失败延迟 30s + jitter，第 2 次失败延迟 60s + jitter，第 3 次失败进入死信队列。
 - 延迟由消息 TTL 实现：`pr.review.retry.queue` 中的消息过期后，通过 DLX 自动回到 `pr.review.queue`。
 - Worker 每 30 秒扫描一次超过 6 分钟仍是 `running` 的任务，避免进程崩溃后任务卡死。
+- Worker 每 30 秒扫描一次超过 60 秒仍是 `queued` 的任务，自动重新投递；重复消息由原子 claim 和状态机兜底。
 
 查询任务列表：
 
@@ -292,6 +309,22 @@ PR 审查评论末尾会附带任务标识，例如：
 ```text
 Task ID: 1 | commit 291ac5a
 ```
+
+查询死信任务：
+
+```text
+GET /dead-letters?repo=Lhh220/github-pr-review-agent&limit=20
+Authorization: Bearer <ADMIN_TOKEN>
+```
+
+手动把死信任务重新入队：
+
+```text
+POST /dead-letters/<task_id>/requeue
+Authorization: Bearer <ADMIN_TOKEN>
+```
+
+Requeue 会把任务从 `dead_letter` 改回 `queued`，重置 `attempt_count`，并投递到主队列。即使投递 RabbitMQ 失败，任务也会由 queued 超时兜底恢复机制重新投递。
 
 可以通过这个任务 ID 到 `/tasks/:id` 查询完整状态。
 

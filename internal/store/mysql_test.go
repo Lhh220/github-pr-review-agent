@@ -22,6 +22,14 @@ func TestMySQLTaskStore(t *testing.T) {
 	}
 	defer s.Close()
 
+	migrationStatuses, err := MigrationStatuses(ctx, s.db)
+	if err != nil {
+		t.Fatalf("get migration status: %v", err)
+	}
+	if len(migrationStatuses) == 0 || !migrationStatuses[0].Applied {
+		t.Fatalf("unexpected migration status: %+v", migrationStatuses)
+	}
+
 	var createdPrecision, updatedPrecision int
 	err = s.db.QueryRowContext(ctx, `
 SELECT
@@ -146,6 +154,42 @@ WHERE table_schema = DATABASE()
 	if got.Status != "dead_letter" || got.AttemptCount != 3 || got.MaxAttempts != 3 ||
 		got.NextRetryAt != nil || got.Error != "permanent failure" {
 		t.Fatalf("unexpected dead letter task: %+v", got)
+	}
+
+	if err := s.RequeueTask(ctx, task.ID); err != nil {
+		t.Fatalf("requeue dead letter task: %v", err)
+	}
+	got, err = s.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("get requeued task: %v", err)
+	}
+	if got.Status != "queued" || got.AttemptCount != 0 || got.NextRetryAt != nil {
+		t.Fatalf("unexpected requeued task: %+v", got)
+	}
+
+	if _, err := s.db.ExecContext(ctx, `
+UPDATE review_task SET updated_at = ? WHERE id = ?`,
+		time.Now().Add(-2*time.Minute), task.ID,
+	); err != nil {
+		t.Fatalf("make queued task stale: %v", err)
+	}
+	staleQueued, err := s.ListStaleQueuedTasks(ctx, time.Now().Add(-time.Minute), 10)
+	if err != nil {
+		t.Fatalf("list stale queued tasks: %v", err)
+	}
+	if len(staleQueued) != 1 || staleQueued[0].ID != task.ID {
+		t.Fatalf("unexpected stale queued tasks: %+v", staleQueued)
+	}
+
+	if err := s.TouchQueuedTask(ctx, task.ID, time.Now()); err != nil {
+		t.Fatalf("touch queued task: %v", err)
+	}
+	staleQueued, err = s.ListStaleQueuedTasks(ctx, time.Now().Add(-time.Minute), 10)
+	if err != nil {
+		t.Fatalf("list touched queued tasks: %v", err)
+	}
+	if len(staleQueued) != 0 {
+		t.Fatalf("touched task is still stale: %+v", staleQueued)
 	}
 
 	tasks, err := s.ListTasks(ctx, ListFilter{Repo: "Lhh220/github-pr-review-agent-test", Limit: 10})

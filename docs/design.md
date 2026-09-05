@@ -89,7 +89,7 @@ MySQL (任务/结果/审计) + Redis (锁/去重/限流)
 - 校验 `X-GitHub-Event` 必须是 `pull_request`，拒绝无关事件进入任务链路。
 - 解析 PR 事件，只处理 `opened / synchronize / reopened`。
 - 生成 taskId，幂等写入 MySQL（delivery_id 唯一），避免重复投递。
-- 发布 `task_id` 到 RabbitMQ，确认 broker 收到后把任务标记为 `queued`，并立即返回 202。
+- 先把任务标记为 `queued`，再发布 `task_id` 到 RabbitMQ 并等待 publisher confirm，避免 Worker 在任务仍为 `received` 时提前消费并 ack；发布失败则标记为 `failed`。
 - 服务收到退出信号后先停止 HTTP Server，再停止 Worker 并等待正在执行的任务，避免任务被硬中断。
 - 限流：基于 Redis 按仓库维度限流，防止 webhook 洪水。
 
@@ -103,7 +103,7 @@ MySQL (任务/结果/审计) + Redis (锁/去重/限流)
 - 消息使用 persistent delivery，Publisher 开启 confirm，确保 broker 已接收。
 - Consumer 使用 manual ack；业务失败会发布到延迟重试队列后 ack 原消息，超过 `max_attempts` 后发布到死信队列并 ack。
 - 连接或 channel 被服务端关闭后自动重建 RabbitMQ 连接，重连间隔按 2s 递增，最长 30s；进程退出仍然走优雅停机。
-- 重试延迟按指数退避：默认 30s、60s，上限 10m。
+- 重试延迟按指数退避：默认 30s、60s，上限 10m；每次延迟附加随机 jitter，默认最多 5s，`REVIEW_RETRY_JITTER=0s` 可关闭。
 - 主队列不携带 DLX 参数，避免线上已有队列因 queue argument 变化触发 PRECONDITION_FAILED。
 
 ### 4.3 Worker Pool
@@ -113,6 +113,7 @@ MySQL (任务/结果/审计) + Redis (锁/去重/限流)
 - 成功后更新为 `done`；可重试失败更新为 `retrying`；达到最大次数后更新为 `dead_letter`。
 - `next_retry_at` 未到期的重复消息直接 ack，避免提前执行。
 - 后台恢复循环每 30 秒扫描超过 6 分钟仍是 `running` 的任务，重新进入延迟重试链路，避免进程崩溃后任务卡死。
+- 后台恢复循环同时扫描超过 60 秒仍是 `queued` 的任务，重新投递到主队列；重复消息由原子 claim 和状态机兜底，不会重复审查。
 - 后续增强：消费前用 Redis 分布式锁 `lock:pr:{repo}:{number}`，避免同一个 PR 并发审查。
 
 ### 4.4 Agent Loop
@@ -228,8 +229,15 @@ go test ./... 会编译失败。
 MySQL 表：
 - `review_task`：id, repo, pr_number, commit_sha, status, attempt_count, max_attempts, next_retry_at, created_at, updated_at, error。
 - `review_result`：id, task_id, summary, payload_json, raw_response, model, input_tokens, output_tokens, total_tokens, llm_duration_ms, created_at；`task_id` 唯一并外键关联 `review_task(id)`。
+- `schema_migrations`：version, name, applied_at，记录已执行的数据库 migration。
 - `tool_call_log`：id, task_id, tool_name, input_json, output_json, tokens, duration_ms, created_at。
 - `audit_log`：id, task_id, action, actor, detail_json, created_at。
+
+数据库结构通过 `internal/store/migrations/*.up.sql` 管理，服务启动时自动执行；也可以通过 `go run ./cmd/migrate status` 和 `go run ./cmd/migrate up` 手动查看和执行。
+
+死信管理接口：
+- `GET /dead-letters`：按仓库、PR、limit 查询死信任务。
+- `POST /dead-letters/:id/requeue`：把死信任务改回 `queued`，重置 `attempt_count`，并重新投递主队列。
 
 Redis Key：
 - `lock:pr:{repo}:{number}`：分布式锁。
@@ -258,7 +266,7 @@ running -> failed
 | HTTP | Gin | 已有栈，中间件鉴权/限流方便 |
 | 队列 | RabbitMQ | 面试常问，支持死信、重试 |
 | 缓存/锁 | Redis | 分布式锁、去重、限流 |
-| 数据库 | MySQL + GORM | 任务/结果/审计持久化 |
+| 数据库 | MySQL + database/sql + embedded SQL migration | 任务/结果/审计持久化，依赖少且部署简单 |
 | 代码解析 | tree-sitter | 多语言 AST，函数级上下文裁剪 |
 | LLM | DeepSeek-V3 默认 / OpenAI gpt-4o-mini 备选 | 便宜、代码强；需要稳定 Tool Calling 时切 OpenAI |
 | 部署 | Docker Compose | 本地依赖一键起 |
@@ -276,8 +284,8 @@ type Provider interface {
 一个 PR 从接收到回写评论：
 
 1. GitHub 发 webhook 到 `/webhook/github`。
-2. Receiver 校验签名、解析事件、去重，写 `review_task(received)`，发布 `task_id` 到 RabbitMQ。
-3. Webhook 等待 publisher confirm，任务标记为 `queued`，返回 202。
+2. Receiver 校验签名、解析事件、去重，写 `review_task(received)`。
+3. Webhook 先把任务标记为 `queued`，发布 `task_id` 到 RabbitMQ 并等待 publisher confirm，然后返回 202。
 4. Worker 消费消息，状态置 `running`。
 5. Review Service 读取 PR meta、diff 和变更文件上下文。
 6. DeepSeek 生成结构化 JSON，结果写入 `review_result`。

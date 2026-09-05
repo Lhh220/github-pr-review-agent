@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 const reviewTimeout = 5 * time.Minute
 const recoveryScanInterval = 30 * time.Second
 const runningTaskStaleAfter = reviewTimeout + time.Minute
+const queuedTaskStaleAfter = time.Minute
 
 type Reviewer interface {
 	ReviewPR(ctx context.Context, owner, repo string, number int, taskID uint64) error
@@ -27,9 +29,12 @@ type TaskStore interface {
 	MarkTaskRetry(ctx context.Context, id uint64, attempt, maxAttempts int, taskError string, nextRetryAt time.Time) error
 	MarkTaskDeadLetter(ctx context.Context, id uint64, attempt, maxAttempts int, taskError string) error
 	ListRecoverableTasks(ctx context.Context, staleBefore time.Time, limit int) ([]store.Task, error)
+	ListStaleQueuedTasks(ctx context.Context, staleBefore time.Time, limit int) ([]store.Task, error)
+	TouchQueuedTask(ctx context.Context, id uint64, updatedAt time.Time) error
 }
 
 type QueueClient interface {
+	queue.Publisher
 	queue.Consumer
 	queue.RetryPublisher
 }
@@ -38,6 +43,7 @@ type Options struct {
 	MaxAttempts    int
 	RetryBaseDelay time.Duration
 	RetryMaxDelay  time.Duration
+	RetryJitter    time.Duration
 }
 
 type Worker struct {
@@ -48,6 +54,8 @@ type Worker struct {
 	maxAttempts    int
 	retryBaseDelay time.Duration
 	retryMaxDelay  time.Duration
+	retryJitter    time.Duration
+	jitter         func(max time.Duration) time.Duration
 }
 
 func New(taskStore TaskStore, reviewer Reviewer, client QueueClient, workers int, options Options) *Worker {
@@ -63,6 +71,9 @@ func New(taskStore TaskStore, reviewer Reviewer, client QueueClient, workers int
 	if options.RetryMaxDelay < options.RetryBaseDelay {
 		options.RetryMaxDelay = 10 * time.Minute
 	}
+	if options.RetryJitter < 0 {
+		options.RetryJitter = 5 * time.Second
+	}
 	return &Worker{
 		store:          taskStore,
 		reviewer:       reviewer,
@@ -71,11 +82,13 @@ func New(taskStore TaskStore, reviewer Reviewer, client QueueClient, workers int
 		maxAttempts:    options.MaxAttempts,
 		retryBaseDelay: options.RetryBaseDelay,
 		retryMaxDelay:  options.RetryMaxDelay,
+		retryJitter:    options.RetryJitter,
+		jitter:         randomJitter,
 	}
 }
 
 func (w *Worker) Start(ctx context.Context) error {
-	go w.recoverStaleRunningTasks(ctx)
+	go w.recoverStaleTasks(ctx)
 
 	slots := make(chan struct{}, w.workers)
 	handler := func(ctx context.Context, msg queue.Message) queue.Action {
@@ -92,7 +105,7 @@ func (w *Worker) Start(ctx context.Context) error {
 	return w.client.Consume(ctx, handler)
 }
 
-func (w *Worker) recoverStaleRunningTasks(ctx context.Context) {
+func (w *Worker) recoverStaleTasks(ctx context.Context) {
 	ticker := time.NewTicker(recoveryScanInterval)
 	defer ticker.Stop()
 
@@ -101,12 +114,13 @@ func (w *Worker) recoverStaleRunningTasks(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			w.recoverOnce(ctx)
+			w.recoverStaleRunningOnce(ctx)
+			w.recoverStaleQueuedOnce(ctx)
 		}
 	}
 }
 
-func (w *Worker) recoverOnce(ctx context.Context) {
+func (w *Worker) recoverStaleRunningOnce(ctx context.Context) {
 	listCtx, cancelList := context.WithTimeout(ctx, 5*time.Second)
 	defer cancelList()
 	staleBefore := time.Now().Add(-runningTaskStaleAfter)
@@ -124,6 +138,34 @@ func (w *Worker) recoverOnce(ctx context.Context) {
 			continue
 		}
 		w.deadLetter(&task, msg, reviewError)
+	}
+}
+
+func (w *Worker) recoverStaleQueuedOnce(ctx context.Context) {
+	listCtx, cancelList := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelList()
+	staleBefore := time.Now().Add(-queuedTaskStaleAfter)
+	tasks, err := w.store.ListStaleQueuedTasks(listCtx, staleBefore, 100)
+	if err != nil {
+		log.Printf("list stale queued review tasks failed: error=%v", err)
+		return
+	}
+
+	for _, task := range tasks {
+		publishCtx, cancelPublish := context.WithTimeout(ctx, 10*time.Second)
+		if err := w.client.Publish(publishCtx, task.ID); err != nil {
+			log.Printf("publish queued recovery failed: task_id=%d error=%v", task.ID, err)
+			cancelPublish()
+			continue
+		}
+		cancelPublish()
+
+		touchCtx, cancelTouch := context.WithTimeout(ctx, 5*time.Second)
+		if err := w.store.TouchQueuedTask(touchCtx, task.ID, time.Now()); err != nil {
+			log.Printf("touch queued recovery failed: task_id=%d error=%v", task.ID, err)
+		}
+		cancelTouch()
+		log.Printf("requeued stale queued review task: task_id=%d", task.ID)
 	}
 }
 
@@ -297,13 +339,29 @@ func (w *Worker) retryDelay(attempt int) time.Duration {
 	for i := 1; i < attempt; i++ {
 		delay *= 2
 		if delay >= w.retryMaxDelay {
-			return w.retryMaxDelay
+			delay = w.retryMaxDelay
+			break
 		}
 	}
 	if delay > w.retryMaxDelay {
-		return w.retryMaxDelay
+		delay = w.retryMaxDelay
 	}
-	return delay
+	if w.retryJitter <= 0 {
+		return delay
+	}
+
+	jitterRoom := w.retryMaxDelay - delay
+	if w.retryJitter < jitterRoom {
+		jitterRoom = w.retryJitter
+	}
+	return delay + w.jitter(jitterRoom)
+}
+
+func randomJitter(max time.Duration) time.Duration {
+	if max <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int63n(int64(max)))
 }
 
 func splitRepo(repo string) (string, string, bool) {

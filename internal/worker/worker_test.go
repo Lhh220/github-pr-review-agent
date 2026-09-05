@@ -23,6 +23,8 @@ type fakeTaskGetter struct {
 	retries     []retryRecord
 	deadLetters []deadLetterRecord
 	recoverable []store.Task
+	staleQueued []store.Task
+	touched     []uint64
 }
 
 type retryRecord struct {
@@ -93,6 +95,19 @@ func (f *fakeTaskGetter) ListRecoverableTasks(ctx context.Context, staleBefore t
 	return append([]store.Task(nil), f.recoverable...), nil
 }
 
+func (f *fakeTaskGetter) ListStaleQueuedTasks(ctx context.Context, staleBefore time.Time, limit int) ([]store.Task, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]store.Task(nil), f.staleQueued...), nil
+}
+
+func (f *fakeTaskGetter) TouchQueuedTask(ctx context.Context, id uint64, updatedAt time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.touched = append(f.touched, id)
+	return nil
+}
+
 func (f *fakeTaskGetter) recordedStatuses() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -132,8 +147,10 @@ func (f *fakeReviewer) recordedCalls() []reviewCall {
 
 type captureConsumer struct {
 	handler     queue.Handler
+	publishes   []uint64
 	retries     []retryPublish
 	deadLetters []deadLetterPublish
+	publishErr  error
 }
 
 type retryPublish struct {
@@ -149,6 +166,14 @@ type deadLetterPublish struct {
 
 func (c *captureConsumer) Consume(ctx context.Context, handler queue.Handler) error {
 	c.handler = handler
+	return nil
+}
+
+func (c *captureConsumer) Publish(ctx context.Context, taskID uint64) error {
+	if c.publishErr != nil {
+		return c.publishErr
+	}
+	c.publishes = append(c.publishes, taskID)
 	return nil
 }
 
@@ -236,13 +261,65 @@ func TestRecoverOnceSchedulesStaleRunningTask(t *testing.T) {
 	client := &captureConsumer{}
 	w := New(taskStore, &fakeReviewer{}, client, 1, Options{})
 
-	w.recoverOnce(context.Background())
+	w.recoverStaleRunningOnce(context.Background())
 
 	if len(client.retries) != 1 || client.retries[0].TaskID != task.ID || client.retries[0].Attempt != 1 {
 		t.Fatalf("unexpected recovery retries: %+v", client.retries)
 	}
 	if got := taskStore.recordedStatuses(); len(got) != 1 || got[0] != "retrying" {
 		t.Fatalf("statuses = %v, want [retrying]", got)
+	}
+}
+
+func TestRecoverStaleQueuedOnceRepublishesTask(t *testing.T) {
+	task := newWorkerTestTask("queued")
+	task.ID = 2
+	task.UpdatedAt = time.Now().Add(-2 * time.Minute)
+	taskStore := &fakeTaskGetter{staleQueued: []store.Task{*task}}
+	client := &captureConsumer{}
+	w := New(taskStore, &fakeReviewer{}, client, 1, Options{})
+
+	w.recoverStaleQueuedOnce(context.Background())
+
+	if len(client.publishes) != 1 || client.publishes[0] != task.ID {
+		t.Fatalf("unexpected queued recovery publishes: %v", client.publishes)
+	}
+	if len(taskStore.touched) != 1 || taskStore.touched[0] != task.ID {
+		t.Fatalf("unexpected queued touches: %v", taskStore.touched)
+	}
+}
+
+func TestRetryDelayAddsJitterWithinLimit(t *testing.T) {
+	w := New(&fakeTaskGetter{}, &fakeReviewer{}, &captureConsumer{}, 1, Options{
+		RetryBaseDelay: 10 * time.Second,
+		RetryMaxDelay:  1 * time.Minute,
+		RetryJitter:    5 * time.Second,
+	})
+	w.jitter = func(max time.Duration) time.Duration {
+		if max != 5*time.Second {
+			t.Fatalf("jitter max = %s, want 5s", max)
+		}
+		return max
+	}
+
+	if got := w.retryDelay(1); got != 15*time.Second {
+		t.Fatalf("retry delay = %s, want 15s", got)
+	}
+}
+
+func TestRetryDelayCanDisableJitter(t *testing.T) {
+	w := New(&fakeTaskGetter{}, &fakeReviewer{}, &captureConsumer{}, 1, Options{
+		RetryBaseDelay: 10 * time.Second,
+		RetryMaxDelay:  1 * time.Minute,
+		RetryJitter:    0,
+	})
+	w.jitter = func(max time.Duration) time.Duration {
+		t.Fatalf("jitter should be disabled, got max=%s", max)
+		return 0
+	}
+
+	if got := w.retryDelay(1); got != 10*time.Second {
+		t.Fatalf("retry delay = %s, want 10s", got)
 	}
 }
 

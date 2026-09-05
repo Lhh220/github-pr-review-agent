@@ -31,6 +31,7 @@ type Config struct {
 	ReviewMaxAttempts       int
 	ReviewRetryBaseDelay    time.Duration
 	ReviewRetryMaxDelay     time.Duration
+	ReviewRetryJitter       time.Duration
 }
 
 func Load() *Config {
@@ -59,6 +60,7 @@ func Load() *Config {
 		ReviewMaxAttempts:       getEnvInt("REVIEW_MAX_ATTEMPTS", 3),
 		ReviewRetryBaseDelay:    getEnvDuration("REVIEW_RETRY_BASE_DELAY", 30*time.Second),
 		ReviewRetryMaxDelay:     getEnvDuration("REVIEW_RETRY_MAX_DELAY", 10*time.Minute),
+		ReviewRetryJitter:       getEnvDurationAllowZero("REVIEW_RETRY_JITTER", 5*time.Second),
 	}
 }
 
@@ -85,4 +87,16 @@ func getEnvDuration(key string, fallback time.Duration) time.Duration {
 		}
 	}
 	return fallback
+}
+
+func getEnvDurationAllowZero(key string, fallback time.Duration) time.Duration {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil || d < 0 {
+		return fallback
+	}
+	return d
 }
