@@ -52,8 +52,9 @@ func (f *fakeTaskStore) UpdateTaskStatus(ctx context.Context, id uint64, status,
 type fakePublisher struct {
 	mu sync.Mutex
 
-	err     error
-	taskIDs []uint64
+	err       error
+	taskIDs   []uint64
+	onPublish func()
 }
 
 func (f *fakePublisher) Publish(ctx context.Context, taskID uint64) error {
@@ -63,6 +64,9 @@ func (f *fakePublisher) Publish(ctx context.Context, taskID uint64) error {
 		return f.err
 	}
 	f.taskIDs = append(f.taskIDs, taskID)
+	if f.onPublish != nil {
+		f.onPublish()
+	}
 	return nil
 }
 
@@ -185,6 +189,39 @@ func TestHandleQueuesPullRequestTask(t *testing.T) {
 	}
 }
 
+func TestHandleMarksQueuedBeforePublish(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	taskStore := &fakeTaskStore{
+		task:          newWebhookTestTask(),
+		created:       true,
+		statusUpdates: make(chan string, 1),
+	}
+	publisher := &fakePublisher{
+		onPublish: func() {
+			select {
+			case status := <-taskStore.statusUpdates:
+				if status != "queued" {
+					t.Fatalf("publish observed task status = %s, want queued", status)
+				}
+			default:
+				t.Fatal("publish happened before task was marked queued")
+			}
+		},
+	}
+	router.POST("/webhook/github", New("secret", publisher, taskStore).Handle)
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, signedRequest(http.MethodPost, "/webhook/github", webhookPayload("opened"), "pull_request", "secret"))
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body = %s", recorder.Code, http.StatusAccepted, recorder.Body.String())
+	}
+	if got := publisher.published(); len(got) != 1 || got[0] != 1 {
+		t.Fatalf("published task ids = %v, want [1]", got)
+	}
+}
+
 func TestHandleDuplicateDeliveryPublishesOnce(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
@@ -217,7 +254,7 @@ func TestHandleMarksTaskFailedWhenPublishFails(t *testing.T) {
 	taskStore := &fakeTaskStore{
 		task:          newWebhookTestTask(),
 		created:       true,
-		statusUpdates: make(chan string, 1),
+		statusUpdates: make(chan string, 2),
 	}
 	router.POST("/webhook/github", New("secret", publisher, taskStore).Handle)
 
@@ -227,12 +264,14 @@ func TestHandleMarksTaskFailedWhenPublishFails(t *testing.T) {
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d, body = %s", recorder.Code, http.StatusInternalServerError, recorder.Body.String())
 	}
-	select {
-	case status := <-taskStore.statusUpdates:
-		if status != "failed" {
-			t.Fatalf("task status = %s, want failed", status)
+	for i, expectedStatus := range []string{"queued", "failed"} {
+		select {
+		case status := <-taskStore.statusUpdates:
+			if status != expectedStatus {
+				t.Fatalf("status update %d = %s, want %s", i+1, status, expectedStatus)
+			}
+		default:
+			t.Fatalf("missing status update %d, want %s", i+1, expectedStatus)
 		}
-	default:
-		t.Fatal("failed publish did not mark task failed")
 	}
 }

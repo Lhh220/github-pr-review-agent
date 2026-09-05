@@ -94,6 +94,15 @@ func (h *Handler) Handle(c *gin.Context) {
 		return
 	}
 
+	queuedCtx, cancelQueued := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := h.Store.UpdateTaskStatus(queuedCtx, task.ID, "queued", ""); err != nil {
+		log.Printf("mark review task queued failed: task_id=%d error=%v", task.ID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "mark review task queued"})
+		cancelQueued()
+		return
+	}
+	cancelQueued()
+
 	publishCtx, cancelPublish := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelPublish()
 	if err := h.Publisher.Publish(publishCtx, task.ID); err != nil {
@@ -107,13 +116,5 @@ func (h *Handler) Handle(c *gin.Context) {
 		return
 	}
 
-	queuedCtx, cancelQueued := context.WithTimeout(context.Background(), 5*time.Second)
-	if err := h.Store.UpdateTaskStatus(queuedCtx, task.ID, "queued", ""); err != nil {
-		log.Printf("mark review task queued failed: task_id=%d error=%v", task.ID, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "mark review task queued"})
-		cancelQueued()
-		return
-	}
-	cancelQueued()
 	c.JSON(http.StatusAccepted, gin.H{"status": "queued", "task_id": task.ID})
 }
