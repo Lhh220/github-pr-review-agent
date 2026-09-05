@@ -15,13 +15,16 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/liaohonghui/github-pr-review-agent/internal/config"
 	"github.com/liaohonghui/github-pr-review-agent/internal/github"
+	"github.com/liaohonghui/github-pr-review-agent/internal/limiter"
 	"github.com/liaohonghui/github-pr-review-agent/internal/llm"
+	"github.com/liaohonghui/github-pr-review-agent/internal/lock"
 	"github.com/liaohonghui/github-pr-review-agent/internal/queue"
 	"github.com/liaohonghui/github-pr-review-agent/internal/review"
 	"github.com/liaohonghui/github-pr-review-agent/internal/store"
 	"github.com/liaohonghui/github-pr-review-agent/internal/taskapi"
 	"github.com/liaohonghui/github-pr-review-agent/internal/webhook"
 	"github.com/liaohonghui/github-pr-review-agent/internal/worker"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -39,10 +42,31 @@ func main() {
 		if cfg.RabbitMQURL == "" {
 			log.Fatal("RABBITMQ_URL is required in production")
 		}
+		if cfg.RedisURL == "" {
+			log.Fatal("REDIS_URL is required in production")
+		}
 	}
 	if cfg.MySQLDSN == "" {
 		log.Fatal("MYSQL_DSN is required")
 	}
+	redisURL := cfg.RedisURL
+	if redisURL == "" {
+		redisURL = "redis://127.0.0.1:6379/0"
+	}
+	redisOptions, err := redis.ParseURL(redisURL)
+	if err != nil {
+		log.Fatalf("parse redis url: %v", err)
+	}
+	redisClient := redis.NewClient(redisOptions)
+	defer redisClient.Close()
+	pingCtx, cancelPing := context.WithTimeout(ctx, 5*time.Second)
+	if err := redisClient.Ping(pingCtx).Err(); err != nil {
+		cancelPing()
+		log.Fatalf("connect redis: %v", err)
+	}
+	cancelPing()
+	log.Printf("redis connected: addr=%s", redisOptions.Addr)
+
 	taskStore, err := store.Open(context.Background(), cfg.MySQLDSN)
 	if err != nil {
 		log.Fatalf("open mysql store: %v", err)
@@ -53,14 +77,14 @@ func main() {
 		token := cfg.GitHubToken
 		log.Printf("github auth mode: personal access token")
 		gh := github.NewClient(token)
-		if err := startServer(ctx, cfg, gh, taskStore); err != nil {
+		if err := startServer(ctx, cfg, gh, taskStore, redisClient); err != nil {
 			log.Fatal(err)
 		}
 	} else {
 		auth := appAuth(cfg)
 		gh := github.NewAppClient(auth)
 		log.Printf("github auth mode: GitHub App, app_id=%s, installation_id=%s", cfg.GitHubAppID, cfg.GitHubInstallationID)
-		if err := startServer(ctx, cfg, gh, taskStore); err != nil {
+		if err := startServer(ctx, cfg, gh, taskStore, redisClient); err != nil {
 			log.Fatal(err)
 		}
 	}
@@ -75,7 +99,13 @@ func appAuth(cfg *config.Config) github.AppAuth {
 	}
 }
 
-func startServer(ctx context.Context, cfg *config.Config, gh *github.Client, taskStore *store.Store) error {
+func startServer(
+	ctx context.Context,
+	cfg *config.Config,
+	gh *github.Client,
+	taskStore *store.Store,
+	redisClient *redis.Client,
+) error {
 	rabbitURL := cfg.RabbitMQURL
 	if rabbitURL == "" {
 		rabbitURL = "amqp://guest:guest@127.0.0.1:5672/"
@@ -92,6 +122,8 @@ func startServer(ctx context.Context, cfg *config.Config, gh *github.Client, tas
 	defer broker.Close()
 
 	l := llm.New(cfg.DeepSeekAPIKey, cfg.DeepSeekBaseURL, cfg.DeepSeekModel)
+	l.SetLimiter(limiter.NewRedisLimiter(redisClient, cfg.LLMRateLimit, cfg.LLMRateWindow))
+	gh.SetLimiter(limiter.NewRedisLimiter(redisClient, cfg.GitHubAPIRateLimit, cfg.GitHubAPIRateWindow))
 	reviewer := review.New(gh, l, taskStore, cfg.MaxDiffLines, cfg.MaxFileContexts, cfg.MaxFileContextLines)
 	handler := webhook.New(cfg.GitHubWebhookSecret, broker, taskStore)
 	reviewWorker := worker.New(taskStore, reviewer, broker, cfg.ReviewWorkers, worker.Options{
@@ -99,6 +131,9 @@ func startServer(ctx context.Context, cfg *config.Config, gh *github.Client, tas
 		RetryBaseDelay: cfg.ReviewRetryBaseDelay,
 		RetryMaxDelay:  cfg.ReviewRetryMaxDelay,
 		RetryJitter:    cfg.ReviewRetryJitter,
+		Locker:         lock.NewRedisLocker(redisClient),
+		LockTTL:        cfg.ReviewLockTTL,
+		LockRetryDelay: cfg.ReviewLockRetryDelay,
 	})
 
 	runCtx, cancelRun := context.WithCancel(ctx)

@@ -32,6 +32,13 @@ type Config struct {
 	ReviewRetryBaseDelay    time.Duration
 	ReviewRetryMaxDelay     time.Duration
 	ReviewRetryJitter       time.Duration
+	RedisURL                string
+	ReviewLockTTL           time.Duration
+	ReviewLockRetryDelay    time.Duration
+	GitHubAPIRateLimit      int
+	GitHubAPIRateWindow     time.Duration
+	LLMRateLimit            int
+	LLMRateWindow           time.Duration
 }
 
 func Load() *Config {
@@ -61,6 +68,13 @@ func Load() *Config {
 		ReviewRetryBaseDelay:    getEnvDuration("REVIEW_RETRY_BASE_DELAY", 30*time.Second),
 		ReviewRetryMaxDelay:     getEnvDuration("REVIEW_RETRY_MAX_DELAY", 10*time.Minute),
 		ReviewRetryJitter:       getEnvDurationAllowZero("REVIEW_RETRY_JITTER", 5*time.Second),
+		RedisURL:                os.Getenv("REDIS_URL"),
+		ReviewLockTTL:           getEnvDuration("REVIEW_LOCK_TTL", 7*time.Minute),
+		ReviewLockRetryDelay:    getEnvDuration("REVIEW_LOCK_RETRY_DELAY", 2*time.Second),
+		GitHubAPIRateLimit:      getEnvInt("GITHUB_API_RATE_LIMIT", 120),
+		GitHubAPIRateWindow:     getEnvDuration("GITHUB_API_RATE_WINDOW", time.Minute),
+		LLMRateLimit:            getEnvInt("LLM_RATE_LIMIT", 6),
+		LLMRateWindow:           getEnvDuration("LLM_RATE_WINDOW", time.Minute),
 	}
 }
 

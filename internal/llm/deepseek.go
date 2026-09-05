@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/liaohonghui/github-pr-review-agent/internal/limiter"
 )
 
 type Client struct {
@@ -16,6 +18,7 @@ type Client struct {
 	baseURL string
 	model   string
 	http    *http.Client
+	limiter limiter.Limiter
 }
 
 type Usage struct {
@@ -40,6 +43,13 @@ func New(apiKey, baseURL, model string) *Client {
 	}
 }
 
+func (c *Client) SetLimiter(l limiter.Limiter) {
+	if l == nil {
+		l = limiter.NoopLimiter{}
+	}
+	c.limiter = l
+}
+
 type message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
@@ -62,6 +72,13 @@ type chatResponse struct {
 }
 
 func (c *Client) ReviewCode(ctx context.Context, title, body, diff, fileContext string) (ReviewResponse, error) {
+	if c.limiter == nil {
+		c.limiter = limiter.NoopLimiter{}
+	}
+	if err := c.limiter.Wait(ctx, "llm:deepseek"); err != nil {
+		return ReviewResponse{}, fmt.Errorf("wait llm rate limit: %w", err)
+	}
+
 	system := `You are a senior code reviewer. Return only a valid JSON object matching this schema:
 {
   "summary": "short overall review summary",

@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"sync"
 	"time"
+
+	"github.com/liaohonghui/github-pr-review-agent/internal/limiter"
 )
 
 const apiBaseURL = "https://api.github.com"
@@ -23,6 +25,7 @@ type Client struct {
 	tokenSource func() (string, error)
 	http        *http.Client
 	baseURL     string
+	limiter     limiter.Limiter
 }
 
 func NewClient(token string) *Client {
@@ -63,6 +66,13 @@ func NewAppClient(auth AppAuth) *Client {
 	}
 }
 
+func (c *Client) SetLimiter(l limiter.Limiter) {
+	if l == nil {
+		l = limiter.NoopLimiter{}
+	}
+	c.limiter = l
+}
+
 type PullRequest struct {
 	Number int    `json:"number"`
 	Title  string `json:"title"`
@@ -96,6 +106,13 @@ type fileContentResponse struct {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) error {
+	if c.limiter == nil {
+		c.limiter = limiter.NoopLimiter{}
+	}
+	if err := c.limiter.Wait(ctx, "github:api"); err != nil {
+		return fmt.Errorf("wait github api rate limit: %w", err)
+	}
+
 	token := c.token
 	if c.tokenSource != nil {
 		var err error

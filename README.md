@@ -26,10 +26,14 @@ MVP 已经跑通并部署到 Railway：
 - 定期扫描超时仍处于 `running` 的任务，自动恢复到重试链路
 - 定期扫描超时仍处于 `queued` 的任务，自动重新投递，避免进程崩溃导致任务滞留
 - Worker Pool 固定并发消费任务，支持优雅停机
+- Redis PR 级分布式锁，避免同一个 PR 的不同任务被并发审查
+- Redis 固定窗口限流，分别保护 GitHub API 和 DeepSeek API
 - 任务状态覆盖 `received -> queued -> running -> done/failed/retrying/dead_letter`
 - 提供 `/tasks`、`/tasks/:id` 查询任务状态，以及 `/tasks/:id/result` 查询结构化审查结果
 - 提供 `/dead-letters` 查询死信任务，`/dead-letters/:id/requeue` 手动重新入队
 - MySQL 结构通过版本化 migration 管理，服务启动自动执行，也提供 `cmd/migrate` CLI
+
+Day 4 的 Redis 锁和限流代码已完成并通过单元测试；需要在 Railway 增加 Redis 服务并配置 `REDIS_URL` 后完成线上验收。
 
 当前线上示例：
 
@@ -92,6 +96,13 @@ REVIEW_MAX_ATTEMPTS=3
 REVIEW_RETRY_BASE_DELAY=30s
 REVIEW_RETRY_MAX_DELAY=10m
 REVIEW_RETRY_JITTER=5s
+REDIS_URL=redis://127.0.0.1:6379/0
+REVIEW_LOCK_TTL=7m
+REVIEW_LOCK_RETRY_DELAY=2s
+GITHUB_API_RATE_LIMIT=120
+GITHUB_API_RATE_WINDOW=1m
+LLM_RATE_LIMIT=6
+LLM_RATE_WINDOW=1m
 ```
 
 说明：
@@ -114,8 +125,15 @@ REVIEW_RETRY_JITTER=5s
 - `REVIEW_RETRY_BASE_DELAY`：第一次重试延迟，默认 30s。
 - `REVIEW_RETRY_MAX_DELAY`：单次重试延迟上限，默认 10m。
 - `REVIEW_RETRY_JITTER`：每次重试附加的随机延迟上限，默认 5s；设置为 `0s` 可关闭。
+- `REDIS_URL`：Redis 连接串。生产环境必填；本地未配置时默认使用 `redis://127.0.0.1:6379/0`。
+- `REVIEW_LOCK_TTL`：PR 级分布式锁 TTL，默认 7m，大于单次审查超时 5m，进程崩溃后锁会自动过期。
+- `REVIEW_LOCK_RETRY_DELAY`：同一个 PR 已有审查在执行时，后续任务重新入队等待的延迟，默认 2s。
+- `GITHUB_API_RATE_LIMIT / GITHUB_API_RATE_WINDOW`：GitHub API 限流，默认 120 次 / 1m。
+- `LLM_RATE_LIMIT / LLM_RATE_WINDOW`：DeepSeek 调用限流，默认 6 次 / 1m，用于控制成本和上游压力。
 
 注意：阶段二接入 RabbitMQ 后，Railway 部署必须提供可达的 `RABBITMQ_URL`，否则服务启动会失败。
+
+注意：Day 4 接入 Redis 后，Railway 部署必须提供可达的 `REDIS_URL`，否则服务启动会失败。
 
 注意：Railway 容器无法通过 `127.0.0.1` 访问你本机的 MySQL。线上要在 Railway 里创建 MySQL 服务，或使用其他公网可达的 MySQL，并把对应的 `MYSQL_DSN` 配到 Railway 变量里。
 
@@ -129,10 +147,10 @@ GITHUB_TOKEN=...
 
 ## 本地运行
 
-1. 启动本地 RabbitMQ：
+1. 启动本地 RabbitMQ 和 Redis：
 
    ```powershell
-   docker compose up -d rabbitmq
+   docker compose up -d rabbitmq redis
    ```
 
    管理界面：
@@ -171,6 +189,7 @@ $env:REVIEW_WORKERS="4"
 $env:REVIEW_MAX_ATTEMPTS="3"
 $env:REVIEW_RETRY_BASE_DELAY="30s"
 $env:REVIEW_RETRY_MAX_DELAY="10m"
+$env:REDIS_URL="redis://127.0.0.1:6379/0"
 ```
 
 4. 启动服务：

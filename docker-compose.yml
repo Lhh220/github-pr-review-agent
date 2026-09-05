@@ -1,4 +1,10 @@
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: github-pr-review-agent-redis
+    ports:
+      - "6379:6379"
+
   rabbitmq:
     image: rabbitmq:3.13-management
     container_name: github-pr-review-agent-rabbitmq

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/liaohonghui/github-pr-review-agent/internal/lock"
 	"github.com/liaohonghui/github-pr-review-agent/internal/queue"
 	"github.com/liaohonghui/github-pr-review-agent/internal/store"
 )
@@ -44,6 +45,9 @@ type Options struct {
 	RetryBaseDelay time.Duration
 	RetryMaxDelay  time.Duration
 	RetryJitter    time.Duration
+	Locker         lock.Locker
+	LockTTL        time.Duration
+	LockRetryDelay time.Duration
 }
 
 type Worker struct {
@@ -55,6 +59,9 @@ type Worker struct {
 	retryBaseDelay time.Duration
 	retryMaxDelay  time.Duration
 	retryJitter    time.Duration
+	locker         lock.Locker
+	lockTTL        time.Duration
+	lockRetryDelay time.Duration
 	jitter         func(max time.Duration) time.Duration
 }
 
@@ -74,6 +81,15 @@ func New(taskStore TaskStore, reviewer Reviewer, client QueueClient, workers int
 	if options.RetryJitter < 0 {
 		options.RetryJitter = 5 * time.Second
 	}
+	if options.Locker == nil {
+		options.Locker = lock.NewNoopLocker()
+	}
+	if options.LockTTL <= 0 {
+		options.LockTTL = 7 * time.Minute
+	}
+	if options.LockRetryDelay <= 0 {
+		options.LockRetryDelay = 2 * time.Second
+	}
 	return &Worker{
 		store:          taskStore,
 		reviewer:       reviewer,
@@ -83,6 +99,9 @@ func New(taskStore TaskStore, reviewer Reviewer, client QueueClient, workers int
 		retryBaseDelay: options.RetryBaseDelay,
 		retryMaxDelay:  options.RetryMaxDelay,
 		retryJitter:    options.RetryJitter,
+		locker:         options.Locker,
+		lockTTL:        options.LockTTL,
+		lockRetryDelay: options.LockRetryDelay,
 		jitter:         randomJitter,
 	}
 }
@@ -241,6 +260,35 @@ func (w *Worker) process(msg queue.Message) (action queue.Action) {
 		return queue.Ack
 	}
 
+	owner, repo, validRepo := splitRepo(task.Repo)
+	if !validRepo {
+		return w.deadLetter(task, msg, "invalid repository name")
+	}
+
+	lockCtx, cancelLock := context.WithTimeout(context.Background(), 5*time.Second)
+	prLock, acquired, err := w.locker.Acquire(lockCtx, prLockKey(task.Repo, task.PRNumber), w.lockTTL)
+	cancelLock()
+	if err != nil {
+		log.Printf(
+			"acquire pr review lock failed: task_id=%d repo=%s pr=%d error=%v",
+			taskID, task.Repo, task.PRNumber, err,
+		)
+		return queue.NackRequeue
+	}
+	if !acquired {
+		return w.deferTaskForActivePR(task, msg)
+	}
+	defer func() {
+		releaseCtx, cancelRelease := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelRelease()
+		if err := prLock.Release(releaseCtx); err != nil && !errors.Is(err, lock.ErrNotHeld) {
+			log.Printf(
+				"release pr review lock failed: task_id=%d repo=%s pr=%d error=%v",
+				taskID, task.Repo, task.PRNumber, err,
+			)
+		}
+	}()
+
 	claimCtx, cancelClaim := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelClaim()
 	claimed, err := w.store.ClaimTask(claimCtx, taskID, msg.Attempt, now)
@@ -250,11 +298,6 @@ func (w *Worker) process(msg queue.Message) (action queue.Action) {
 	}
 	if !claimed {
 		return queue.Ack
-	}
-
-	owner, repo, validRepo := splitRepo(task.Repo)
-	if !validRepo {
-		return w.deadLetter(task, msg, "invalid repository name")
 	}
 
 	reviewCtx, cancelReview := context.WithTimeout(context.Background(), reviewTimeout)
@@ -267,6 +310,23 @@ func (w *Worker) process(msg queue.Message) (action queue.Action) {
 	if err := w.updateStatus(taskID, "done", ""); err != nil {
 		log.Printf("mark review task done failed: task_id=%d error=%v", taskID, err)
 	}
+	return queue.Ack
+}
+
+func (w *Worker) deferTaskForActivePR(task *store.Task, msg queue.Message) queue.Action {
+	publishCtx, cancelPublish := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelPublish()
+	if err := w.client.PublishRetry(publishCtx, task.ID, msg.Attempt, w.lockRetryDelay); err != nil {
+		log.Printf(
+			"defer busy pr review task failed: task_id=%d repo=%s pr=%d error=%v",
+			task.ID, task.Repo, task.PRNumber, err,
+		)
+		return queue.NackRequeue
+	}
+	log.Printf(
+		"deferred review task because pr is active: task_id=%d repo=%s pr=%d retry_in=%s",
+		task.ID, task.Repo, task.PRNumber, w.lockRetryDelay,
+	)
 	return queue.Ack
 }
 
@@ -379,4 +439,8 @@ func splitRepo(repo string) (string, string, bool) {
 		return "", "", false
 	}
 	return parts[0], parts[1], true
+}
+
+func prLockKey(repo string, number int) string {
+	return fmt.Sprintf("review:pr:%s:%d", strings.ToLower(repo), number)
 }

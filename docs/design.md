@@ -14,7 +14,7 @@
 
 ## 3. 整体架构
 
-当前实现已接入 RabbitMQ 延迟重试、死信队列和 Worker Pool，还没有引入 Redis、Tool Calling、tree-sitter 和静态检查沙箱。当前实际链路是：
+当前实现已接入 RabbitMQ 延迟重试、死信队列、Worker Pool、Redis PR 级分布式锁和外部 API 限流；还没有接入 Tool Calling、tree-sitter 和静态检查沙箱。当前实际链路是：
 
 ```text
 GitHub PR Event
@@ -27,13 +27,16 @@ RabbitMQ pr.review.queue
    |
    v
 Worker Pool (Go)
+   |  Redis 分布式锁（按 PR 维度）
+   v
+MySQL 原子 claim
    |
    v
 GitHub API: PR meta + files + file context
-   |
+   |  Redis 固定窗口限流
    v
 DeepSeek LLM (结构化 JSON 输出)
-   |
+   |  Redis 固定窗口限流
    v
 MySQL review_task + review_result
    |
@@ -41,14 +44,14 @@ MySQL review_task + review_result
 GitHub PR Review API
 ```
 
-下图是后续目标架构，Redis 锁、限流、Tool Calling 和静态检查沙箱还未实现：
+下图是后续目标架构，Tool Calling 和静态检查沙箱还未实现：
 
 ```text
 GitHub PR Event
    |
    v
 Webhook Receiver (Gin)
-   |  去重 / 签名校验 / 限流
+   |  去重 / 签名校验
    v
 RabbitMQ Queue
    |
@@ -77,7 +80,7 @@ Review Formatter (bug/performance/style/security)
 GitHub Comment Writer
    |
    v
-MySQL (任务/结果/审计) + Redis (锁/去重/限流)
+MySQL (任务/结果/审计) + Redis (锁 / API 限流)
 ```
 
 ## 4. 模块设计
@@ -91,7 +94,7 @@ MySQL (任务/结果/审计) + Redis (锁/去重/限流)
 - 生成 taskId，幂等写入 MySQL（delivery_id 唯一），避免重复投递。
 - 先把任务标记为 `queued`，再发布 `task_id` 到 RabbitMQ 并等待 publisher confirm，避免 Worker 在任务仍为 `received` 时提前消费并 ack；发布失败则标记为 `failed`。
 - 服务收到退出信号后先停止 HTTP Server，再停止 Worker 并等待正在执行的任务，避免任务被硬中断。
-- 限流：基于 Redis 按仓库维度限流，防止 webhook 洪水。
+- Webhook 入口当前依赖签名校验、事件过滤和 MySQL `delivery_id` 幂等；按仓库维度的 webhook 限流仍是后续增强。
 
 ### 4.2 任务队列
 
@@ -114,7 +117,19 @@ MySQL (任务/结果/审计) + Redis (锁/去重/限流)
 - `next_retry_at` 未到期的重复消息直接 ack，避免提前执行。
 - 后台恢复循环每 30 秒扫描超过 6 分钟仍是 `running` 的任务，重新进入延迟重试链路，避免进程崩溃后任务卡死。
 - 后台恢复循环同时扫描超过 60 秒仍是 `queued` 的任务，重新投递到主队列；重复消息由原子 claim 和状态机兜底，不会重复审查。
-- 后续增强：消费前用 Redis 分布式锁 `lock:pr:{repo}:{number}`，避免同一个 PR 并发审查。
+- Worker 在原子 claim 之前先获取 Redis 分布式锁 `lock:review:pr:{repo}:{number}`，避免同一个 PR 的不同 task 被并发审查。
+- 锁使用 `SET NX EX` 和随机 token；释放时通过 Lua 比较 token 后删除，避免误删其他 Worker 的锁。
+- 锁默认 TTL 7 分钟，大于单次 review 超时 5 分钟；进程崩溃后锁自动过期，配合 running 超时恢复避免死锁。
+- 如果锁被其他 Worker 持有，当前消息会以原 attempt 投递到延迟重试队列并 ack，不更新状态、不消耗业务重试次数。
+- Redis 异常时消息 nack 回主队列，任务保持 `queued`，由队列重投和 queued 兜底恢复继续处理。
+
+#### Worker 并发与限流
+
+- PR 级互斥：`review:pr:{repo}:{number}`，大小写归一化，保证同一个 PR 同时只有一个 review。
+- GitHub API 限流：`ratelimit:github:api`，默认 120 次 / 分钟，覆盖所有 GitHub REST 调用。
+- DeepSeek 限流：`ratelimit:llm:deepseek`，默认 6 次 / 分钟，控制模型成本和上游压力。
+- 限流使用 Redis Lua 脚本实现固定窗口计数；超限时 Worker 在当前任务 context 内等待窗口释放，避免直接把上游限流当作业务失败。
+- 限流键跨进程共享，后续部署多副本时仍然生效。
 
 ### 4.4 Agent Loop
 
@@ -240,9 +255,10 @@ MySQL 表：
 - `POST /dead-letters/:id/requeue`：把死信任务改回 `queued`，重置 `attempt_count`，并重新投递主队列。
 
 Redis Key：
-- `lock:pr:{repo}:{number}`：分布式锁。
-- `dedup:pr:{repo}:{number}:{sha}`：事件去重。
-- `ratelimit:webhook:{repo}`：限流。
+- `lock:review:pr:{repo}:{number}`：PR 级分布式锁。
+- `ratelimit:github:api`：GitHub API 固定窗口限流。
+- `ratelimit:llm:deepseek`：DeepSeek 固定窗口限流。
+- 事件去重当前由 MySQL `delivery_id` 唯一约束实现，不依赖 Redis。
 
 ### 4.10 状态机
 
@@ -286,13 +302,13 @@ type Provider interface {
 1. GitHub 发 webhook 到 `/webhook/github`。
 2. Receiver 校验签名、解析事件、去重，写 `review_task(received)`。
 3. Webhook 先把任务标记为 `queued`，发布 `task_id` 到 RabbitMQ 并等待 publisher confirm，然后返回 202。
-4. Worker 消费消息，状态置 `running`。
-5. Review Service 读取 PR meta、diff 和变更文件上下文。
-6. DeepSeek 生成结构化 JSON，结果写入 `review_result`。
-7. Review Service 回写 GitHub PR Review。
+4. Worker 消费消息，先获取 PR 级 Redis 锁，再原子 claim 并把状态置 `running`。
+5. Review Service 在 Redis 限流下读取 PR meta、diff 和变更文件上下文。
+6. DeepSeek 在 Redis 限流下生成结构化 JSON，结果写入 `review_result`。
+7. Review Service 回写 GitHub PR Review，随后释放 PR 锁。
 8. Worker 将任务标记为 `done` 并 ack 消息；可重试失败进入 `retrying`，达到最大次数后进入 `dead_letter`。
 
-后续引入 Redis、Tool Calling 和静态检查后，再扩展为锁、多步工具调用、重试和审计链路。
+后续引入 Tool Calling 和静态检查后，再扩展为多步工具调用、审计链路和代码级验证。
 
 ## 7. 安全与成本
 
@@ -301,9 +317,10 @@ type Provider interface {
 - 任务查询接口使用 Bearer Token 鉴权。
 - Webhook 通过 `delivery_id` 唯一约束做幂等，GitHub 重发事件不会重复执行审查。
 - 工具调用只读，不执行写操作（除回写评论）。
-- Redis 限流，防止同仓库洪泛。
+- Redis 限流保护 GitHub API 和 DeepSeek API，避免异常流量放大到上游。
 - token 成本统计：每次 LLM 调用记录 input/output tokens，落库。
 - 超时控制：每个任务最大执行时间，防止卡死。
+- Redis 锁 TTL 大于任务超时，Worker 崩溃后锁自动释放，避免永久阻塞同一个 PR。
 
 ## 8. 评测
 

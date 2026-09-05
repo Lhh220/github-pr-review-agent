@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/liaohonghui/github-pr-review-agent/internal/lock"
 	"github.com/liaohonghui/github-pr-review-agent/internal/queue"
 	"github.com/liaohonghui/github-pr-review-agent/internal/store"
 )
@@ -154,6 +155,52 @@ type captureConsumer struct {
 	publishErr  error
 }
 
+type fakeLock struct {
+	locker *fakeLocker
+	key    string
+}
+
+func (l *fakeLock) Release(ctx context.Context) error {
+	l.locker.mu.Lock()
+	defer l.locker.mu.Unlock()
+	l.locker.released = append(l.locker.released, l.key)
+	return l.locker.releaseErr
+}
+
+type fakeLocker struct {
+	mu sync.Mutex
+
+	acquired   bool
+	acquireErr error
+	releaseErr error
+	keys       []string
+	ttls       []time.Duration
+	released   []string
+}
+
+func (f *fakeLocker) Acquire(ctx context.Context, key string, ttl time.Duration) (lock.Lock, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.keys = append(f.keys, key)
+	f.ttls = append(f.ttls, ttl)
+	if f.acquireErr != nil {
+		return nil, false, f.acquireErr
+	}
+	return &fakeLock{locker: f, key: key}, f.acquired, nil
+}
+
+func (f *fakeLocker) recordedKeys() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.keys...)
+}
+
+func (f *fakeLocker) recordedReleased() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.released...)
+}
+
 type retryPublish struct {
 	TaskID  uint64
 	Attempt int
@@ -213,6 +260,67 @@ func TestProcessRunsQueuedTask(t *testing.T) {
 	calls := reviewer.recordedCalls()
 	if len(calls) != 1 || calls[0].Owner != "owner" || calls[0].Repo != "repo" || calls[0].Number != 12 || calls[0].TaskID != 1 {
 		t.Fatalf("unexpected review calls: %+v", calls)
+	}
+}
+
+func TestProcessDefersTaskWhenPRLockIsBusy(t *testing.T) {
+	task := newWorkerTestTask("queued")
+	taskStore := &fakeTaskGetter{task: task, claimResult: true}
+	reviewer := &fakeReviewer{}
+	client := &captureConsumer{}
+	w := New(taskStore, reviewer, client, 1, Options{
+		Locker:         &fakeLocker{acquired: false},
+		LockRetryDelay: 2 * time.Second,
+	})
+
+	action := w.process(queue.Message{TaskID: task.ID, Attempt: 0})
+	if action != queue.Ack {
+		t.Fatalf("action = %d, want %d", action, queue.Ack)
+	}
+	if got := taskStore.recordedStatuses(); len(got) != 0 {
+		t.Fatalf("busy PR lock should not claim task: statuses=%v", got)
+	}
+	if calls := reviewer.recordedCalls(); len(calls) != 0 {
+		t.Fatalf("busy PR lock should not review task: %+v", calls)
+	}
+	if len(client.retries) != 1 || client.retries[0].TaskID != task.ID || client.retries[0].Attempt != 0 || client.retries[0].Delay != 2*time.Second {
+		t.Fatalf("unexpected deferred retry: %+v", client.retries)
+	}
+}
+
+func TestProcessRequeuesTaskWhenPRLockFails(t *testing.T) {
+	taskStore := &fakeTaskGetter{task: newWorkerTestTask("queued"), claimResult: true}
+	reviewer := &fakeReviewer{}
+	locker := &fakeLocker{acquireErr: errors.New("redis unavailable")}
+	w := New(taskStore, reviewer, &captureConsumer{}, 1, Options{Locker: locker})
+
+	action := w.process(queue.Message{TaskID: 1})
+	if action != queue.NackRequeue {
+		t.Fatalf("action = %d, want %d", action, queue.NackRequeue)
+	}
+	if got := taskStore.recordedStatuses(); len(got) != 0 {
+		t.Fatalf("lock failure should not claim task: statuses=%v", got)
+	}
+	if calls := reviewer.recordedCalls(); len(calls) != 0 {
+		t.Fatalf("lock failure should not review task: %+v", calls)
+	}
+	if keys := locker.recordedKeys(); len(keys) != 1 || keys[0] != "review:pr:owner/repo:12" {
+		t.Fatalf("unexpected lock keys: %v", keys)
+	}
+}
+
+func TestProcessReleasesPRLockAfterReview(t *testing.T) {
+	taskStore := &fakeTaskGetter{task: newWorkerTestTask("queued"), claimResult: true}
+	reviewer := &fakeReviewer{}
+	locker := &fakeLocker{acquired: true}
+	w := New(taskStore, reviewer, &captureConsumer{}, 1, Options{Locker: locker})
+
+	action := w.process(queue.Message{TaskID: 1})
+	if action != queue.Ack {
+		t.Fatalf("action = %d, want %d", action, queue.Ack)
+	}
+	if released := locker.recordedReleased(); len(released) != 1 || released[0] != "review:pr:owner/repo:12" {
+		t.Fatalf("unexpected lock releases: %v", released)
 	}
 }
 
