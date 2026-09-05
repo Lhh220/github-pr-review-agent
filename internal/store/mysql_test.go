@@ -29,6 +29,9 @@ func TestMySQLTaskStore(t *testing.T) {
 	if len(migrationStatuses) == 0 || !migrationStatuses[0].Applied {
 		t.Fatalf("unexpected migration status: %+v", migrationStatuses)
 	}
+	if len(migrationStatuses) != 2 || !migrationStatuses[1].Applied {
+		t.Fatalf("expected migrations version 1 and 2 to be applied: %+v", migrationStatuses)
+	}
 
 	var createdPrecision, updatedPrecision int
 	err = s.db.QueryRowContext(ctx, `
@@ -198,5 +201,69 @@ UPDATE review_task SET updated_at = ? WHERE id = ?`,
 	}
 	if len(tasks) == 0 {
 		t.Fatal("expected at least one task")
+	}
+
+	review, err := s.CreateReviewResult(ctx, NewReviewResult{
+		TaskID:  task.ID,
+		Summary: "No blocking issues.",
+		Findings: []Finding{
+			{
+				Category:   "bug",
+				File:       "internal/review/service.go",
+				Line:       12,
+				Severity:   "medium",
+				Comment:    "Example finding.",
+				Suggestion: "Example suggestion.",
+				Confidence: "confirmed",
+			},
+		},
+		RawResponse:   `{"summary":"No blocking issues.","findings":[{"category":"bug"}]}`,
+		Model:         "deepseek-chat",
+		InputTokens:   100,
+		OutputTokens:  20,
+		TotalTokens:   120,
+		LLMDurationMS: 1234,
+	})
+	if err != nil {
+		t.Fatalf("create review result: %v", err)
+	}
+	if review.TaskID != task.ID || len(review.Findings) != 1 || review.TotalTokens != 120 {
+		t.Fatalf("unexpected review result: %+v", review)
+	}
+
+	if err := s.UpdateTaskStatus(ctx, task.ID, "done", ""); err != nil {
+		t.Fatalf("update done: %v", err)
+	}
+
+	logs, err := s.ListAuditLogs(ctx, AuditFilter{TaskID: task.ID, Limit: 200})
+	if err != nil {
+		t.Fatalf("list audit logs: %v", err)
+	}
+	actionCounts := make(map[string]int)
+	statusTransitions := make(map[string]int)
+	for _, log := range logs {
+		actionCounts[log.Action]++
+		if log.Action == AuditActionTaskStatusChanged {
+			statusTransitions[log.OldStatus+" -> "+log.NewStatus]++
+		}
+	}
+	if actionCounts[AuditActionTaskCreated] != 1 ||
+		actionCounts[AuditActionReviewResultCreated] != 1 ||
+		actionCounts[AuditActionTaskStatusChanged] == 0 {
+		t.Fatalf("unexpected audit actions: %+v", actionCounts)
+	}
+	if statusTransitions["dead_letter -> queued"] != 1 || statusTransitions["queued -> done"] != 1 {
+		t.Fatalf("unexpected audit status transitions: %+v", statusTransitions)
+	}
+
+	stats, err := s.GetTaskStats(ctx, StatsFilter{Repo: "Lhh220/github-pr-review-agent-test"})
+	if err != nil {
+		t.Fatalf("get task stats: %v", err)
+	}
+	if stats.TotalTasks == 0 || stats.StatusCounts["done"] == 0 || stats.RetryEvents == 0 ||
+		stats.ReviewResults == 0 || stats.TotalFindings == 0 ||
+		stats.InputTokens < 100 || stats.OutputTokens < 20 || stats.TotalTokens < 120 ||
+		stats.AvgLLMDurationMS < 1234 {
+		t.Fatalf("unexpected task stats: %+v", stats)
 	}
 }

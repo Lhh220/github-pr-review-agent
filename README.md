@@ -31,9 +31,11 @@ MVP 已经跑通并部署到 Railway：
 - 任务状态覆盖 `received -> queued -> running -> done/failed/retrying/dead_letter`
 - 提供 `/tasks`、`/tasks/:id` 查询任务状态，以及 `/tasks/:id/result` 查询结构化审查结果
 - 提供 `/dead-letters` 查询死信任务，`/dead-letters/:id/requeue` 手动重新入队
+- 提供 `/audit-logs` 查询任务审计轨迹，`/stats` 查询任务成功率、重试次数、token 用量和平均耗时
+- 关键状态变更与审查结果创建会同步写入 `audit_log`，任务数据和审计数据保持同一事务
 - MySQL 结构通过版本化 migration 管理，服务启动自动执行，也提供 `cmd/migrate` CLI
 
-Day 4 的 Redis PR 级分布式锁和外部 API 限流已完成本地与线上验收。
+Day 5 的审计表和观测统计已完成代码与本地验收，待线上部署后验收。
 
 当前线上示例：
 
@@ -170,6 +172,14 @@ GITHUB_TOKEN=...
    ```
 
    服务启动时也会自动执行 migration。
+
+   当前包含两个 migration：version 1 `init` 和 version 2 `audit_log`。Railway 部署新版本后，启动日志应出现：
+
+   ```text
+   applied mysql migration: version=2 name=audit_log
+   ```
+
+   如果本地数据库已经执行过，则只会看到 `mysql migrations are up to date`。
 
 3. 准备环境变量：
 
@@ -347,6 +357,55 @@ Requeue 会把任务从 `dead_letter` 改回 `queued`，重置 `attempt_count`�
 
 可以通过这个任务 ID 到 `/tasks/:id` 查询完整状态。
 
+查询任务审计日志：
+
+```text
+GET /audit-logs?task_id=1&limit=20
+Authorization: Bearer <ADMIN_TOKEN>
+```
+
+支持的可选参数：
+
+- `task_id`：只看某个任务。
+- `action`：`task_created`、`task_status_changed`、`review_result_created`。
+- `limit`：默认 50，最大 200。
+
+返回示例：
+
+```json
+{
+  "audit_logs": [
+    {
+      "id": 12,
+      "task_id": 1,
+      "repo": "Lhh220/github-pr-review-agent",
+      "pr_number": 7,
+      "action": "task_status_changed",
+      "old_status": "running",
+      "new_status": "done",
+      "detail": {},
+      "created_at": "2026-09-05T12:00:00Z"
+    }
+  ]
+}
+```
+
+查询观测统计：
+
+```text
+GET /stats?repo=Lhh220/github-pr-review-agent
+Authorization: Bearer <ADMIN_TOKEN>
+```
+
+返回内容包括任务总数、各状态数量、成功率、重试事件数、平均任务耗时、审查结果数、findings 总数、token 用量和 LLM 平均耗时。当前实现直接从 MySQL 聚合，适合个人项目规模；数据量变大后再引入汇总表或 Prometheus。
+
+Day 5 线上验收步骤：
+
+1. push 代码到 `main`，等待 Railway 部署完成。
+2. 在 Railway 日志里确认 version 2 migration 已应用或已是 up to date。
+3. 请求 `/healthz`、`/audit-logs?limit=5`、`/stats`，三者都应返回 200。
+4. 提一个测试 PR，等 bot 评论后，用评论里的 Task ID 调 `/audit-logs?task_id=<id>`，应能看到 `task_created`、多次 `task_status_changed` 和 `review_result_created`。
+
 ## 当前能力边界
 
 当前审查能力是 **diff + changed-file-context reviewer**：
@@ -367,8 +426,6 @@ Requeue 会把任务从 `dead_letter` 改回 `queued`，重置 `attempt_count`�
 
 ## 后续计划
 
-- Redis 分布式锁和限流
-- 审计日志
 - Tool Calling 框架
 - tree-sitter 上下文裁剪
 - 评测集和误报率统计

@@ -19,6 +19,8 @@ type Store interface {
 	ListTasks(ctx context.Context, filter store.ListFilter) ([]store.Task, error)
 	GetReviewResultByTaskID(ctx context.Context, taskID uint64) (*store.ReviewResult, error)
 	RequeueTask(ctx context.Context, id uint64) error
+	ListAuditLogs(ctx context.Context, filter store.AuditFilter) ([]store.AuditLog, error)
+	GetTaskStats(ctx context.Context, filter store.StatsFilter) (*store.TaskStats, error)
 }
 
 type Handler struct {
@@ -71,6 +73,10 @@ func (h *Handler) Register(r *gin.Engine) {
 	deadLetters := r.Group("/dead-letters", h.authorize)
 	deadLetters.GET("", h.deadLetters)
 	deadLetters.POST("/:id/requeue", h.requeue)
+
+	auditLogs := r.Group("/audit-logs", h.authorize)
+	auditLogs.GET("", h.auditLogs)
+	r.GET("/stats", h.authorize, h.stats)
 }
 
 func (h *Handler) authorize(c *gin.Context) {
@@ -198,6 +204,44 @@ func (h *Handler) requeue(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{"task_id": id, "status": "queued"})
+}
+
+func (h *Handler) auditLogs(c *gin.Context) {
+	taskID, err := strconv.ParseUint(c.Query("task_id"), 10, 64)
+	if err != nil || taskID == 0 {
+		if strings.TrimSpace(c.Query("task_id")) != "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid task id"})
+			return
+		}
+		taskID = 0
+	}
+	limit, err := parsePositiveInt(c.Query("limit"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit"})
+		return
+	}
+
+	logs, err := h.store.ListAuditLogs(c.Request.Context(), store.AuditFilter{
+		TaskID: taskID,
+		Action: strings.TrimSpace(c.Query("action")),
+		Limit:  limit,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "list audit logs"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"audit_logs": logs})
+}
+
+func (h *Handler) stats(c *gin.Context) {
+	stats, err := h.store.GetTaskStats(c.Request.Context(), store.StatsFilter{
+		Repo: strings.TrimSpace(c.Query("repo")),
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "get stats"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"stats": stats})
 }
 
 func newTaskResponse(task store.Task) TaskResponse {

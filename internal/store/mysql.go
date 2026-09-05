@@ -212,7 +212,14 @@ func (s *Store) CreateTask(ctx context.Context, input NewTask) (*Task, bool, err
 	if input.DeliveryID == "" {
 		input.DeliveryID = randomID()
 	}
-	result, err := s.db.ExecContext(ctx, `
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, false, fmt.Errorf("begin create review task transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, `
 INSERT INTO review_task
     (repo, pr_number, commit_sha, action, delivery_id, status)
 VALUES (?, ?, ?, ?, ?, 'received')
@@ -234,11 +241,28 @@ ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`,
 	if err != nil {
 		return nil, false, fmt.Errorf("get review task rows affected: %w", err)
 	}
-	task, err := s.GetTask(ctx, uint64(id))
+
+	created := affected == 1
+	if created {
+		if err := insertAuditLog(ctx, tx, uint64(id), AuditActionTaskCreated, "", "received", map[string]any{
+			"repo":          input.Repo,
+			"pr_number":     input.PRNumber,
+			"commit_sha":    input.CommitSHA,
+			"github_action": input.Action,
+			"delivery_id":   input.DeliveryID,
+		}); err != nil {
+			return nil, false, err
+		}
+	}
+
+	task, err := getTaskInTx(ctx, tx, uint64(id))
 	if err != nil {
 		return nil, false, err
 	}
-	return task, affected == 1, nil
+	if err := tx.Commit(); err != nil {
+		return nil, false, fmt.Errorf("commit create review task transaction: %w", err)
+	}
+	return task, created, nil
 }
 
 func (s *Store) UpdateTaskStatus(ctx context.Context, id uint64, status, taskError string) error {
@@ -246,29 +270,64 @@ func (s *Store) UpdateTaskStatus(ctx context.Context, id uint64, status, taskErr
 	if strings.TrimSpace(taskError) != "" {
 		errorMessage = taskError
 	}
-	result, err := s.db.ExecContext(ctx, `
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin update review task transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var oldStatus string
+	err = tx.QueryRowContext(ctx, `SELECT status FROM review_task WHERE id = ? FOR UPDATE`, id).Scan(&oldStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrTaskNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("lock review task for update: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
 UPDATE review_task
 SET status = ?, error = ?
 WHERE id = ?`,
 		status,
 		errorMessage,
 		id,
-	)
-	if err != nil {
+	); err != nil {
 		return fmt.Errorf("update review task status: %w", err)
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("get update rows affected: %w", err)
+
+	detail := map[string]any{}
+	if strings.TrimSpace(taskError) != "" {
+		detail["error"] = taskError
 	}
-	if affected == 0 {
-		return ErrTaskNotFound
+	if err := insertAuditLog(ctx, tx, id, AuditActionTaskStatusChanged, oldStatus, status, detail); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit update review task transaction: %w", err)
 	}
 	return nil
 }
 
 func (s *Store) ClaimTask(ctx context.Context, id uint64, attempt int, now time.Time) (bool, error) {
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin claim review task transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var oldStatus string
+	err = tx.QueryRowContext(ctx, `SELECT status FROM review_task WHERE id = ? FOR UPDATE`, id).Scan(&oldStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("lock review task for claim: %w", err)
+	}
+
+	result, err := tx.ExecContext(ctx, `
 UPDATE review_task
 SET status = 'running',
     error = NULL,
@@ -290,11 +349,35 @@ WHERE id = ?
 	if err != nil {
 		return false, fmt.Errorf("get claim rows affected: %w", err)
 	}
-	return affected == 1, nil
+	if affected != 1 {
+		return false, nil
+	}
+
+	if err := insertAuditLog(ctx, tx, id, AuditActionTaskStatusChanged, oldStatus, "running", map[string]any{
+		"attempt": attempt,
+	}); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit claim review task transaction: %w", err)
+	}
+	return true, nil
 }
 
 func (s *Store) MarkTaskRetry(ctx context.Context, id uint64, attempt, maxAttempts int, taskError string, nextRetryAt time.Time) error {
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin mark review task retry transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var oldStatus string
+	err = tx.QueryRowContext(ctx, `SELECT status FROM review_task WHERE id = ? FOR UPDATE`, id).Scan(&oldStatus)
+	if err != nil {
+		return fmt.Errorf("lock review task for retry: %w", err)
+	}
+
+	result, err := tx.ExecContext(ctx, `
 UPDATE review_task
 SET status = 'retrying',
     attempt_count = ?,
@@ -318,11 +401,35 @@ WHERE id = ? AND status = 'running'`,
 	if affected == 0 {
 		return ErrTaskTransitionFailed
 	}
+
+	if err := insertAuditLog(ctx, tx, id, AuditActionTaskStatusChanged, oldStatus, "retrying", map[string]any{
+		"attempt":       attempt,
+		"max_attempts":  maxAttempts,
+		"error":         taskError,
+		"next_retry_at": nextRetryAt.Format(time.RFC3339Nano),
+	}); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit mark review task retry transaction: %w", err)
+	}
 	return nil
 }
 
 func (s *Store) MarkTaskDeadLetter(ctx context.Context, id uint64, attempt, maxAttempts int, taskError string) error {
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin mark review task dead letter transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var oldStatus string
+	err = tx.QueryRowContext(ctx, `SELECT status FROM review_task WHERE id = ? FOR UPDATE`, id).Scan(&oldStatus)
+	if err != nil {
+		return fmt.Errorf("lock review task for dead letter: %w", err)
+	}
+
+	result, err := tx.ExecContext(ctx, `
 UPDATE review_task
 SET status = 'dead_letter',
     attempt_count = ?,
@@ -345,11 +452,37 @@ WHERE id = ? AND status = 'running'`,
 	if affected == 0 {
 		return ErrTaskTransitionFailed
 	}
+
+	if err := insertAuditLog(ctx, tx, id, AuditActionTaskStatusChanged, oldStatus, "dead_letter", map[string]any{
+		"attempt":      attempt,
+		"max_attempts": maxAttempts,
+		"error":        taskError,
+	}); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit mark review task dead letter transaction: %w", err)
+	}
 	return nil
 }
 
 func (s *Store) RequeueTask(ctx context.Context, id uint64) error {
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin requeue review task transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var oldStatus string
+	err = tx.QueryRowContext(ctx, `SELECT status FROM review_task WHERE id = ? FOR UPDATE`, id).Scan(&oldStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrTaskNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("lock review task for requeue: %w", err)
+	}
+
+	result, err := tx.ExecContext(ctx, `
 UPDATE review_task
 SET status = 'queued',
     attempt_count = 0,
@@ -369,6 +502,15 @@ WHERE id = ? AND status = 'dead_letter'`,
 			return err
 		}
 		return ErrTaskTransitionFailed
+	}
+
+	if err := insertAuditLog(ctx, tx, id, AuditActionTaskStatusChanged, oldStatus, "queued", map[string]any{
+		"attempt_count_reset": true,
+	}); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit requeue review task transaction: %w", err)
 	}
 	return nil
 }
@@ -396,6 +538,15 @@ WHERE id = ? AND status = 'queued'`,
 
 func (s *Store) GetTask(ctx context.Context, id uint64) (*Task, error) {
 	row := s.db.QueryRowContext(ctx, `
+SELECT id, repo, pr_number, commit_sha, action, delivery_id, status,
+       COALESCE(error, ''), attempt_count, max_attempts, next_retry_at, created_at, updated_at
+FROM review_task
+WHERE id = ?`, id)
+	return scanTask(row.Scan)
+}
+
+func getTaskInTx(ctx context.Context, tx *sql.Tx, id uint64) (*Task, error) {
+	row := tx.QueryRowContext(ctx, `
 SELECT id, repo, pr_number, commit_sha, action, delivery_id, status,
        COALESCE(error, ''), attempt_count, max_attempts, next_retry_at, created_at, updated_at
 FROM review_task
@@ -514,7 +665,14 @@ func (s *Store) CreateReviewResult(ctx context.Context, input NewReviewResult) (
 	if err != nil {
 		return nil, fmt.Errorf("marshal review findings: %w", err)
 	}
-	result, err := s.db.ExecContext(ctx, `
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin create review result transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, `
 INSERT INTO review_result
     (task_id, summary, payload_json, raw_response, model,
      input_tokens, output_tokens, total_tokens, llm_duration_ms)
@@ -536,7 +694,27 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	if err != nil {
 		return nil, fmt.Errorf("get review result id: %w", err)
 	}
-	return s.GetReviewResult(ctx, uint64(id))
+
+	if err := insertAuditLog(ctx, tx, input.TaskID, AuditActionReviewResultCreated, "", "", map[string]any{
+		"review_result_id": id,
+		"model":            input.Model,
+		"finding_count":    len(input.Findings),
+		"input_tokens":     input.InputTokens,
+		"output_tokens":    input.OutputTokens,
+		"total_tokens":     input.TotalTokens,
+		"llm_duration_ms":  input.LLMDurationMS,
+	}); err != nil {
+		return nil, err
+	}
+
+	created, err := getReviewResultInTx(ctx, tx, uint64(id))
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit create review result transaction: %w", err)
+	}
+	return created, nil
 }
 
 func (s *Store) GetReviewResult(ctx context.Context, id uint64) (*ReviewResult, error) {
@@ -554,6 +732,15 @@ SELECT id, task_id, summary, payload_json, raw_response, model,
        input_tokens, output_tokens, total_tokens, llm_duration_ms, created_at
 FROM review_result
 WHERE task_id = ?`, taskID)
+	return scanReviewResult(row.Scan)
+}
+
+func getReviewResultInTx(ctx context.Context, tx *sql.Tx, id uint64) (*ReviewResult, error) {
+	row := tx.QueryRowContext(ctx, `
+SELECT id, task_id, summary, payload_json, raw_response, model,
+       input_tokens, output_tokens, total_tokens, llm_duration_ms, created_at
+FROM review_result
+WHERE id = ?`, id)
 	return scanReviewResult(row.Scan)
 }
 

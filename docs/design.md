@@ -246,13 +246,27 @@ MySQL 表：
 - `review_result`：id, task_id, summary, payload_json, raw_response, model, input_tokens, output_tokens, total_tokens, llm_duration_ms, created_at；`task_id` 唯一并外键关联 `review_task(id)`。
 - `schema_migrations`：version, name, applied_at，记录已执行的数据库 migration。
 - `tool_call_log`：id, task_id, tool_name, input_json, output_json, tokens, duration_ms, created_at。
-- `audit_log`：id, task_id, action, actor, detail_json, created_at。
+- `audit_log`：id, task_id, action, old_status, new_status, detail_json, created_at；`task_id` 外键关联 `review_task(id)`。
 
 数据库结构通过 `internal/store/migrations/*.up.sql` 管理，服务启动时自动执行；也可以通过 `go run ./cmd/migrate status` 和 `go run ./cmd/migrate up` 手动查看和执行。
+
+当前 migration：
+
+- `0001_init.up.sql`：`review_task`、`review_result`、基础索引和外键。
+- `0002_audit_log.up.sql`：`audit_log`、任务索引、action 索引和外键。
 
 死信管理接口：
 - `GET /dead-letters`：按仓库、PR、limit 查询死信任务。
 - `POST /dead-letters/:id/requeue`：把死信任务改回 `queued`，重置 `attempt_count`，并重新投递主队列。
+
+审计与观测接口：
+- `GET /audit-logs`：按 task_id、action、limit 查询任务审计轨迹。
+- `GET /stats`：按 repo 聚合任务状态、成功率、重试事件、耗时、findings 和 token 用量。
+
+审计 action：
+- `task_created`：Webhook 首次创建任务。
+- `task_status_changed`：任务状态流转，detail 记录 attempt、错误信息、下次重试时间等。
+- `review_result_created`：结构化审查结果落库，detail 记录模型、finding 数量、token 用量和 LLM 耗时。
 
 Redis Key：
 - `lock:review:pr:{repo}:{number}`：PR 级分布式锁。
@@ -300,13 +314,13 @@ type Provider interface {
 一个 PR 从接收到回写评论：
 
 1. GitHub 发 webhook 到 `/webhook/github`。
-2. Receiver 校验签名、解析事件、去重，写 `review_task(received)`。
+2. Receiver 校验签名、解析事件、去重，在同一个事务里写 `review_task(received)` 和 `audit_log(task_created)`。
 3. Webhook 先把任务标记为 `queued`，发布 `task_id` 到 RabbitMQ 并等待 publisher confirm，然后返回 202。
 4. Worker 消费消息，先获取 PR 级 Redis 锁，再原子 claim 并把状态置 `running`。
 5. Review Service 在 Redis 限流下读取 PR meta、diff 和变更文件上下文。
-6. DeepSeek 在 Redis 限流下生成结构化 JSON，结果写入 `review_result`。
+6. DeepSeek 在 Redis 限流下生成结构化 JSON，在同一个事务里写 `review_result` 和 `audit_log(review_result_created)`。
 7. Review Service 回写 GitHub PR Review，随后释放 PR 锁。
-8. Worker 将任务标记为 `done` 并 ack 消息；可重试失败进入 `retrying`，达到最大次数后进入 `dead_letter`。
+8. Worker 将任务标记为 `done` 并 ack 消息，同时写状态审计；可重试失败进入 `retrying`，达到最大次数后进入 `dead_letter`。
 
 后续引入 Tool Calling 和静态检查后，再扩展为多步工具调用、审计链路和代码级验证。
 
