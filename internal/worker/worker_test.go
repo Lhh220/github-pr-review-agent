@@ -25,6 +25,7 @@ type fakeTaskGetter struct {
 	recoverable []store.Task
 	staleQueued []store.Task
 	touched     []uint64
+	touchErr    error
 }
 
 type retryRecord struct {
@@ -105,7 +106,7 @@ func (f *fakeTaskGetter) TouchQueuedTask(ctx context.Context, id uint64, updated
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.touched = append(f.touched, id)
-	return nil
+	return f.touchErr
 }
 
 func (f *fakeTaskGetter) recordedStatuses() []string {
@@ -276,6 +277,27 @@ func TestRecoverStaleQueuedOnceRepublishesTask(t *testing.T) {
 	task.ID = 2
 	task.UpdatedAt = time.Now().Add(-2 * time.Minute)
 	taskStore := &fakeTaskGetter{staleQueued: []store.Task{*task}}
+	client := &captureConsumer{}
+	w := New(taskStore, &fakeReviewer{}, client, 1, Options{})
+
+	w.recoverStaleQueuedOnce(context.Background())
+
+	if len(client.publishes) != 1 || client.publishes[0] != task.ID {
+		t.Fatalf("unexpected queued recovery publishes: %v", client.publishes)
+	}
+	if len(taskStore.touched) != 1 || taskStore.touched[0] != task.ID {
+		t.Fatalf("unexpected queued touches: %v", taskStore.touched)
+	}
+}
+
+func TestRecoverStaleQueuedOnceTreatsTransitionFailureAsRace(t *testing.T) {
+	task := newWorkerTestTask("queued")
+	task.ID = 2
+	task.UpdatedAt = time.Now().Add(-2 * time.Minute)
+	taskStore := &fakeTaskGetter{
+		staleQueued: []store.Task{*task},
+		touchErr:    store.ErrTaskTransitionFailed,
+	}
 	client := &captureConsumer{}
 	w := New(taskStore, &fakeReviewer{}, client, 1, Options{})
 

@@ -162,7 +162,16 @@ func (w *Worker) recoverStaleQueuedOnce(ctx context.Context) {
 
 		touchCtx, cancelTouch := context.WithTimeout(ctx, 5*time.Second)
 		if err := w.store.TouchQueuedTask(touchCtx, task.ID, time.Now()); err != nil {
-			log.Printf("touch queued recovery failed: task_id=%d error=%v", task.ID, err)
+			if errors.Is(err, store.ErrTaskTransitionFailed) {
+				log.Printf(
+					"queued recovery raced with worker: task_id=%d duplicate message will be ignored",
+					task.ID,
+				)
+			} else {
+				log.Printf("touch queued recovery failed: task_id=%d error=%v", task.ID, err)
+			}
+			cancelTouch()
+			continue
 		}
 		cancelTouch()
 		log.Printf("requeued stale queued review task: task_id=%d", task.ID)
