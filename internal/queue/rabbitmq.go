@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"sync"
 	"time"
 
@@ -15,9 +16,11 @@ import (
 const maxReconnectDelay = 30 * time.Second
 
 type RabbitBroker struct {
-	url      string
-	queue    string
-	prefetch int
+	url             string
+	queue           string
+	retryQueue      string
+	deadLetterQueue string
+	prefetch        int
 
 	mu         sync.RWMutex
 	connection *amqp.Connection
@@ -28,21 +31,36 @@ type RabbitBroker struct {
 	publishMu sync.Mutex
 }
 
-func OpenRabbit(url, queue string, prefetch int) (*RabbitBroker, error) {
+type BrokerConfig struct {
+	Queue           string
+	RetryQueue      string
+	DeadLetterQueue string
+	Prefetch        int
+}
+
+func OpenRabbit(url string, cfg BrokerConfig) (*RabbitBroker, error) {
 	if url == "" {
 		return nil, errors.New("rabbitmq url is required")
 	}
-	if queue == "" {
+	if cfg.Queue == "" {
 		return nil, errors.New("rabbitmq queue name is required")
 	}
-	if prefetch <= 0 {
-		prefetch = 1
+	if cfg.RetryQueue == "" {
+		return nil, errors.New("rabbitmq retry queue name is required")
+	}
+	if cfg.DeadLetterQueue == "" {
+		return nil, errors.New("rabbitmq dead letter queue name is required")
+	}
+	if cfg.Prefetch <= 0 {
+		cfg.Prefetch = 1
 	}
 
 	broker := &RabbitBroker{
-		url:      url,
-		queue:    queue,
-		prefetch: prefetch,
+		url:             url,
+		queue:           cfg.Queue,
+		retryQueue:      cfg.RetryQueue,
+		deadLetterQueue: cfg.DeadLetterQueue,
+		prefetch:        cfg.Prefetch,
 	}
 	if err := broker.connect(); err != nil {
 		return nil, err
@@ -96,17 +114,29 @@ func (b *RabbitBroker) connectLocked() error {
 		conn.Close()
 		return fmt.Errorf("open rabbitmq declare channel: %w", err)
 	}
-	if _, err := declareCh.QueueDeclare(
-		b.queue,
-		true,
-		false,
-		false,
-		false,
-		nil,
-	); err != nil {
+	declare := func(queue string, args amqp.Table) error {
+		if _, err := declareCh.QueueDeclare(queue, true, false, false, false, args); err != nil {
+			return fmt.Errorf("declare rabbitmq queue %s: %w", queue, err)
+		}
+		return nil
+	}
+	if err := declare(b.queue, nil); err != nil {
 		declareCh.Close()
 		conn.Close()
-		return fmt.Errorf("declare rabbitmq queue: %w", err)
+		return err
+	}
+	if err := declare(b.retryQueue, amqp.Table{
+		"x-dead-letter-exchange":    "",
+		"x-dead-letter-routing-key": b.queue,
+	}); err != nil {
+		declareCh.Close()
+		conn.Close()
+		return err
+	}
+	if err := declare(b.deadLetterQueue, nil); err != nil {
+		declareCh.Close()
+		conn.Close()
+		return err
 	}
 	if err := declareCh.Close(); err != nil {
 		conn.Close()
@@ -180,9 +210,28 @@ func (b *RabbitBroker) currentPublisher() (*amqp.Channel, error) {
 }
 
 func (b *RabbitBroker) Publish(ctx context.Context, taskID uint64) error {
-	body, err := json.Marshal(Message{TaskID: taskID})
+	return b.publish(ctx, b.queue, Message{TaskID: taskID}, 0)
+}
+
+func (b *RabbitBroker) PublishRetry(ctx context.Context, taskID uint64, attempt int, delay time.Duration) error {
+	return b.publish(ctx, b.retryQueue, Message{TaskID: taskID, Attempt: attempt}, delay)
+}
+
+func (b *RabbitBroker) PublishDeadLetter(ctx context.Context, taskID uint64, attempt int) error {
+	return b.publish(ctx, b.deadLetterQueue, Message{TaskID: taskID, Attempt: attempt}, 0)
+}
+
+func (b *RabbitBroker) publish(ctx context.Context, queue string, msg Message, delay time.Duration) error {
+	if delay < 0 {
+		delay = 0
+	}
+	body, err := json.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("marshal review task message: %w", err)
+	}
+	expiration := ""
+	if delay > 0 {
+		expiration = strconv.FormatInt(delay.Milliseconds(), 10)
 	}
 
 	b.publishMu.Lock()
@@ -199,13 +248,14 @@ func (b *RabbitBroker) Publish(ctx context.Context, taskID uint64) error {
 	confirmation, err := publisher.PublishWithDeferredConfirmWithContext(
 		ctx,
 		"",
-		b.queue,
+		queue,
 		false,
 		false,
 		amqp.Publishing{
 			ContentType:  "application/json",
 			Body:         body,
 			DeliveryMode: amqp.Persistent,
+			Expiration:   expiration,
 		},
 	)
 	if err != nil {

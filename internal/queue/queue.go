@@ -1,9 +1,13 @@
 package queue
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 type Message struct {
-	TaskID uint64 `json:"task_id"`
+	TaskID  uint64 `json:"task_id"`
+	Attempt int    `json:"attempt,omitempty"`
 }
 
 type Action int
@@ -18,6 +22,11 @@ type Handler func(ctx context.Context, msg Message) Action
 
 type Publisher interface {
 	Publish(ctx context.Context, taskID uint64) error
+}
+
+type RetryPublisher interface {
+	PublishRetry(ctx context.Context, taskID uint64, attempt int, delay time.Duration) error
+	PublishDeadLetter(ctx context.Context, taskID uint64, attempt int) error
 }
 
 type Consumer interface {

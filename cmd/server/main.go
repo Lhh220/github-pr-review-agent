@@ -80,7 +80,12 @@ func startServer(ctx context.Context, cfg *config.Config, gh *github.Client, tas
 	if rabbitURL == "" {
 		rabbitURL = "amqp://guest:guest@127.0.0.1:5672/"
 	}
-	broker, err := queue.OpenRabbit(rabbitURL, cfg.ReviewQueue, cfg.ReviewWorkers)
+	broker, err := queue.OpenRabbit(rabbitURL, queue.BrokerConfig{
+		Queue:           cfg.ReviewQueue,
+		RetryQueue:      cfg.ReviewRetryQueue,
+		DeadLetterQueue: cfg.ReviewDeadLetterQueue,
+		Prefetch:        cfg.ReviewWorkers,
+	})
 	if err != nil {
 		return fmt.Errorf("open rabbitmq broker: %w", err)
 	}
@@ -89,7 +94,11 @@ func startServer(ctx context.Context, cfg *config.Config, gh *github.Client, tas
 	l := llm.New(cfg.DeepSeekAPIKey, cfg.DeepSeekBaseURL, cfg.DeepSeekModel)
 	reviewer := review.New(gh, l, taskStore, cfg.MaxDiffLines, cfg.MaxFileContexts, cfg.MaxFileContextLines)
 	handler := webhook.New(cfg.GitHubWebhookSecret, broker, taskStore)
-	reviewWorker := worker.New(taskStore, reviewer, broker, cfg.ReviewWorkers)
+	reviewWorker := worker.New(taskStore, reviewer, broker, cfg.ReviewWorkers, worker.Options{
+		MaxAttempts:    cfg.ReviewMaxAttempts,
+		RetryBaseDelay: cfg.ReviewRetryBaseDelay,
+		RetryMaxDelay:  cfg.ReviewRetryMaxDelay,
+	})
 
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
@@ -101,7 +110,10 @@ func startServer(ctx context.Context, cfg *config.Config, gh *github.Client, tas
 			workerErrors <- err
 		}
 	}()
-	log.Printf("review worker started: queue=%s workers=%d", cfg.ReviewQueue, cfg.ReviewWorkers)
+	log.Printf(
+		"review worker started: queue=%s retry_queue=%s dead_letter_queue=%s workers=%d max_attempts=%d",
+		cfg.ReviewQueue, cfg.ReviewRetryQueue, cfg.ReviewDeadLetterQueue, cfg.ReviewWorkers, cfg.ReviewMaxAttempts,
+	)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()

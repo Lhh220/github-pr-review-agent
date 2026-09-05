@@ -14,7 +14,7 @@
 
 ## 3. 整体架构
 
-当前实现已接入 RabbitMQ 和 Worker Pool，还没有引入 Redis、Tool Calling、tree-sitter 和静态检查沙箱。当前实际链路是：
+当前实现已接入 RabbitMQ 延迟重试、死信队列和 Worker Pool，还没有引入 Redis、Tool Calling、tree-sitter 和静态检查沙箱。当前实际链路是：
 
 ```text
 GitHub PR Event
@@ -41,7 +41,7 @@ MySQL review_task + review_result
 GitHub PR Review API
 ```
 
-下图是阶段二完成后的目标架构，Redis 锁、重试和死信队列还未实现：
+下图是后续目标架构，Redis 锁、限流、Tool Calling 和静态检查沙箱还未实现：
 
 ```text
 GitHub PR Event
@@ -96,16 +96,23 @@ MySQL (任务/结果/审计) + Redis (锁/去重/限流)
 ### 4.2 任务队列
 
 - 当前队列：`pr.review.queue`，durable queue。
+- 延迟重试队列：`pr.review.retry.queue`，durable queue；消息设置 per-message TTL，过期后通过 DLX 回到主队列。
+- 死信队列：`pr.review.dead_letter.queue`，durable queue，保存超过最大重试次数的任务消息。
 - 消息体只放 `task_id`，具体数据从 MySQL 取，避免消息体过大。
+- 重试消息额外携带 `attempt`，用于恢复数据库状态更新偶发失败时的执行次数。
 - 消息使用 persistent delivery，Publisher 开启 confirm，确保 broker 已接收。
-- Consumer 使用 manual ack；业务失败先标记 `failed` 并 ack，避免未加 retry 控制时无限重投。
+- Consumer 使用 manual ack；业务失败会发布到延迟重试队列后 ack 原消息，超过 `max_attempts` 后发布到死信队列并 ack。
 - 连接或 channel 被服务端关闭后自动重建 RabbitMQ 连接，重连间隔按 2s 递增，最长 30s；进程退出仍然走优雅停机。
-- 后续增强：指数退避重试，达到最大次数后进死信队列。
+- 重试延迟按指数退避：默认 30s、60s，上限 10m。
+- 主队列不携带 DLX 参数，避免线上已有队列因 queue argument 变化触发 PRECONDITION_FAILED。
 
 ### 4.3 Worker Pool
 
 - 当前实现使用固定容量 slot 控制 Worker 并发，RabbitMQ prefetch 与 Worker 数一致。
-- Worker 根据 `task_id` 从 MySQL 读取任务，状态置为 `running`，调用 Review Service，再更新为 `done / failed`。
+- Worker 根据 `task_id` 从 MySQL 读取任务，原子 claim 到 `running`，调用 Review Service。
+- 成功后更新为 `done`；可重试失败更新为 `retrying`；达到最大次数后更新为 `dead_letter`。
+- `next_retry_at` 未到期的重复消息直接 ack，避免提前执行。
+- 后台恢复循环每 30 秒扫描超过 6 分钟仍是 `running` 的任务，重新进入延迟重试链路，避免进程崩溃后任务卡死。
 - 后续增强：消费前用 Redis 分布式锁 `lock:pr:{repo}:{number}`，避免同一个 PR 并发审查。
 
 ### 4.4 Agent Loop
@@ -219,7 +226,7 @@ go test ./... 会编译失败。
 ### 4.9 存储设计
 
 MySQL 表：
-- `review_task`：id, repo, pr_number, commit_sha, status, created_at, updated_at, error。
+- `review_task`：id, repo, pr_number, commit_sha, status, attempt_count, max_attempts, next_retry_at, created_at, updated_at, error。
 - `review_result`：id, task_id, summary, payload_json, raw_response, model, input_tokens, output_tokens, total_tokens, llm_duration_ms, created_at；`task_id` 唯一并外键关联 `review_task(id)`。
 - `tool_call_log`：id, task_id, tool_name, input_json, output_json, tokens, duration_ms, created_at。
 - `audit_log`：id, task_id, action, actor, detail_json, created_at。
@@ -234,11 +241,14 @@ Redis Key：
 ```text
 received -> queued -> running -> done
                         |
-                        v
-                      failed
+                        +--> retrying -> running -> ...
+                        |
+                        +--> dead_letter
+
+running -> failed
 ```
 
-当前失败会记录 error 并更新为 `failed`。后续会加入 `retrying` 和 `dead_letter`，支持指数退避和最大重试次数。
+`failed` 保留给队列发布失败等不可重试的基础设施错误；业务审查失败优先走 `retrying`，达到最大次数后进入 `dead_letter`。
 
 ## 5. 技术选型
 
@@ -272,7 +282,7 @@ type Provider interface {
 5. Review Service 读取 PR meta、diff 和变更文件上下文。
 6. DeepSeek 生成结构化 JSON，结果写入 `review_result`。
 7. Review Service 回写 GitHub PR Review。
-8. Worker 将任务标记为 `done` 并 ack 消息；失败则标记 `failed`。
+8. Worker 将任务标记为 `done` 并 ack 消息；可重试失败进入 `retrying`，达到最大次数后进入 `dead_letter`。
 
 后续引入 Redis、Tool Calling 和静态检查后，再扩展为锁、多步工具调用、重试和审计链路。
 

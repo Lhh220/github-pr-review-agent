@@ -102,6 +102,52 @@ WHERE table_schema = DATABASE()
 		t.Fatalf("unexpected failed task: %+v", got)
 	}
 
+	if err := s.UpdateTaskStatus(ctx, task.ID, "running", ""); err != nil {
+		t.Fatalf("update running for retry: %v", err)
+	}
+	nextRetryAt := time.Now().Add(30 * time.Second)
+	if err := s.MarkTaskRetry(ctx, task.ID, 1, 3, "retryable failure", nextRetryAt); err != nil {
+		t.Fatalf("mark retry: %v", err)
+	}
+	got, err = s.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("get retrying task: %v", err)
+	}
+	if got.Status != "retrying" || got.AttemptCount != 1 || got.MaxAttempts != 3 ||
+		got.NextRetryAt == nil || got.NextRetryAt.Sub(nextRetryAt) > time.Second {
+		t.Fatalf("unexpected retrying task: %+v", got)
+	}
+
+	claimed, err := s.ClaimTask(ctx, task.ID, 1, time.Now())
+	if err != nil {
+		t.Fatalf("claim future retry task: %v", err)
+	}
+	if claimed {
+		t.Fatal("future retry task was claimed")
+	}
+	if _, err := s.db.ExecContext(ctx, "UPDATE review_task SET next_retry_at = ? WHERE id = ?", time.Now().Add(-time.Second), task.ID); err != nil {
+		t.Fatalf("make retry task due: %v", err)
+	}
+	claimed, err = s.ClaimTask(ctx, task.ID, 1, time.Now())
+	if err != nil {
+		t.Fatalf("claim due retry task: %v", err)
+	}
+	if !claimed {
+		t.Fatal("due retry task was not claimed")
+	}
+
+	if err := s.MarkTaskDeadLetter(ctx, task.ID, 3, 3, "permanent failure"); err != nil {
+		t.Fatalf("mark dead letter: %v", err)
+	}
+	got, err = s.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("get dead letter task: %v", err)
+	}
+	if got.Status != "dead_letter" || got.AttemptCount != 3 || got.MaxAttempts != 3 ||
+		got.NextRetryAt != nil || got.Error != "permanent failure" {
+		t.Fatalf("unexpected dead letter task: %+v", got)
+	}
+
 	tasks, err := s.ListTasks(ctx, ListFilter{Repo: "Lhh220/github-pr-review-agent-test", Limit: 10})
 	if err != nil {
 		t.Fatalf("list tasks: %v", err)

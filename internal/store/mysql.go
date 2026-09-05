@@ -15,16 +15,19 @@ import (
 )
 
 type Task struct {
-	ID         uint64    `json:"id"`
-	Repo       string    `json:"repo"`
-	PRNumber   int       `json:"pr_number"`
-	CommitSHA  string    `json:"commit_sha"`
-	Action     string    `json:"action"`
-	DeliveryID string    `json:"delivery_id"`
-	Status     string    `json:"status"`
-	Error      string    `json:"error,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID           uint64     `json:"id"`
+	Repo         string     `json:"repo"`
+	PRNumber     int        `json:"pr_number"`
+	CommitSHA    string     `json:"commit_sha"`
+	Action       string     `json:"action"`
+	DeliveryID   string     `json:"delivery_id"`
+	Status       string     `json:"status"`
+	Error        string     `json:"error,omitempty"`
+	AttemptCount int        `json:"attempt_count"`
+	MaxAttempts  int        `json:"max_attempts"`
+	NextRetryAt  *time.Time `json:"next_retry_at,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 type Finding struct {
@@ -115,13 +118,20 @@ CREATE TABLE IF NOT EXISTS review_task (
     delivery_id VARCHAR(64) NOT NULL,
     status VARCHAR(32) NOT NULL,
     error TEXT NULL,
+    attempt_count INT UNSIGNED NOT NULL DEFAULT 0,
+    max_attempts INT UNSIGNED NOT NULL DEFAULT 3,
+    next_retry_at TIMESTAMP(3) NULL,
     created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     UNIQUE KEY uq_review_task_delivery (delivery_id),
     KEY idx_review_task_repo_pr (repo, pr_number),
-    KEY idx_review_task_status (status)
+    KEY idx_review_task_status (status),
+    KEY idx_review_task_retry (status, next_retry_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
 	if _, err := db.ExecContext(ctx, query); err != nil {
+		return err
+	}
+	if err := ensureRetryColumns(ctx, db); err != nil {
 		return err
 	}
 	if err := ensureTimestampPrecision(ctx, db); err != nil {
@@ -147,6 +157,64 @@ CREATE TABLE IF NOT EXISTS review_result (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
 	if _, err := db.ExecContext(ctx, resultQuery); err != nil {
 		return err
+	}
+	return nil
+}
+
+func ensureRetryColumns(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, `
+SELECT column_name
+FROM information_schema.columns
+WHERE table_schema = DATABASE()
+  AND table_name = 'review_task'
+  AND column_name IN ('attempt_count', 'max_attempts', 'next_retry_at')`)
+	if err != nil {
+		return fmt.Errorf("check review_task retry columns: %w", err)
+	}
+	defer rows.Close()
+
+	existing := map[string]bool{}
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&column); err != nil {
+			return fmt.Errorf("scan review_task retry column: %w", err)
+		}
+		existing[column] = true
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate review_task retry columns: %w", err)
+	}
+
+	alters := make([]string, 0, 3)
+	if !existing["attempt_count"] {
+		alters = append(alters, "ADD COLUMN attempt_count INT UNSIGNED NOT NULL DEFAULT 0")
+	}
+	if !existing["max_attempts"] {
+		alters = append(alters, "ADD COLUMN max_attempts INT UNSIGNED NOT NULL DEFAULT 3")
+	}
+	if !existing["next_retry_at"] {
+		alters = append(alters, "ADD COLUMN next_retry_at TIMESTAMP(3) NULL")
+	}
+	if len(alters) > 0 {
+		if _, err := db.ExecContext(ctx, "ALTER TABLE review_task "+strings.Join(alters, ", ")); err != nil {
+			return fmt.Errorf("upgrade review_task retry columns: %w", err)
+		}
+	}
+
+	var retryIndex int
+	err = db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM information_schema.statistics
+WHERE table_schema = DATABASE()
+  AND table_name = 'review_task'
+  AND index_name = 'idx_review_task_retry'`).Scan(&retryIndex)
+	if err != nil {
+		return fmt.Errorf("check review_task retry index: %w", err)
+	}
+	if retryIndex == 0 {
+		if _, err := db.ExecContext(ctx, "CREATE INDEX idx_review_task_retry ON review_task (status, next_retry_at)"); err != nil {
+			return fmt.Errorf("create review_task retry index: %w", err)
+		}
 	}
 	return nil
 }
@@ -235,10 +303,91 @@ WHERE id = ?`,
 	return nil
 }
 
+func (s *Store) ClaimTask(ctx context.Context, id uint64, attempt int, now time.Time) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `
+UPDATE review_task
+SET status = 'running',
+    error = NULL,
+    attempt_count = GREATEST(attempt_count, ?)
+WHERE id = ?
+  AND (
+    (status IN ('queued', 'retrying') AND (next_retry_at IS NULL OR next_retry_at <= ?))
+    OR (status = 'running' AND ? > attempt_count)
+  )`,
+		attempt,
+		id,
+		now,
+		attempt,
+	)
+	if err != nil {
+		return false, fmt.Errorf("claim review task: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("get claim rows affected: %w", err)
+	}
+	return affected == 1, nil
+}
+
+func (s *Store) MarkTaskRetry(ctx context.Context, id uint64, attempt, maxAttempts int, taskError string, nextRetryAt time.Time) error {
+	result, err := s.db.ExecContext(ctx, `
+UPDATE review_task
+SET status = 'retrying',
+    attempt_count = ?,
+    max_attempts = ?,
+    error = ?,
+    next_retry_at = ?
+WHERE id = ? AND status = 'running'`,
+		attempt,
+		maxAttempts,
+		taskError,
+		nextRetryAt,
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("mark review task retrying: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("get retry rows affected: %w", err)
+	}
+	if affected == 0 {
+		return ErrTaskTransitionFailed
+	}
+	return nil
+}
+
+func (s *Store) MarkTaskDeadLetter(ctx context.Context, id uint64, attempt, maxAttempts int, taskError string) error {
+	result, err := s.db.ExecContext(ctx, `
+UPDATE review_task
+SET status = 'dead_letter',
+    attempt_count = ?,
+    max_attempts = ?,
+    error = ?,
+    next_retry_at = NULL
+WHERE id = ? AND status = 'running'`,
+		attempt,
+		maxAttempts,
+		taskError,
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("mark review task dead letter: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("get dead letter rows affected: %w", err)
+	}
+	if affected == 0 {
+		return ErrTaskTransitionFailed
+	}
+	return nil
+}
+
 func (s *Store) GetTask(ctx context.Context, id uint64) (*Task, error) {
 	row := s.db.QueryRowContext(ctx, `
 SELECT id, repo, pr_number, commit_sha, action, delivery_id, status,
-       COALESCE(error, ''), created_at, updated_at
+       COALESCE(error, ''), attempt_count, max_attempts, next_retry_at, created_at, updated_at
 FROM review_task
 WHERE id = ?`, id)
 	return scanTask(row.Scan)
@@ -266,7 +415,7 @@ func (s *Store) ListTasks(ctx context.Context, filter ListFilter) ([]Task, error
 
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, repo, pr_number, commit_sha, action, delivery_id, status,
-       COALESCE(error, ''), created_at, updated_at
+       COALESCE(error, ''), attempt_count, max_attempts, next_retry_at, created_at, updated_at
 FROM review_task
 WHERE `+strings.Join(where, " AND ")+`
 ORDER BY id DESC
@@ -286,6 +435,36 @@ LIMIT ?`, args...)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate review tasks: %w", err)
+	}
+	return tasks, nil
+}
+
+func (s *Store) ListRecoverableTasks(ctx context.Context, staleBefore time.Time, limit int) ([]Task, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, repo, pr_number, commit_sha, action, delivery_id, status,
+       COALESCE(error, ''), attempt_count, max_attempts, next_retry_at, created_at, updated_at
+FROM review_task
+WHERE status = 'running' AND updated_at < ?
+ORDER BY updated_at ASC
+LIMIT ?`, staleBefore, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list recoverable review tasks: %w", err)
+	}
+	defer rows.Close()
+
+	tasks := make([]Task, 0)
+	for rows.Next() {
+		task, err := scanTask(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, *task)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate recoverable review tasks: %w", err)
 	}
 	return tasks, nil
 }
@@ -371,10 +550,14 @@ func scanReviewResult(scan func(dest ...any) error) (*ReviewResult, error) {
 	return &result, nil
 }
 
-var ErrTaskNotFound = errors.New("review task not found")
+var (
+	ErrTaskNotFound         = errors.New("review task not found")
+	ErrTaskTransitionFailed = errors.New("review task transition failed")
+)
 
 func scanTask(scan func(dest ...any) error) (*Task, error) {
 	var task Task
+	var nextRetryAt sql.NullTime
 	err := scan(
 		&task.ID,
 		&task.Repo,
@@ -384,6 +567,9 @@ func scanTask(scan func(dest ...any) error) (*Task, error) {
 		&task.DeliveryID,
 		&task.Status,
 		&task.Error,
+		&task.AttemptCount,
+		&task.MaxAttempts,
+		&nextRetryAt,
 		&task.CreatedAt,
 		&task.UpdatedAt,
 	)
@@ -392,6 +578,10 @@ func scanTask(scan func(dest ...any) error) (*Task, error) {
 	}
 	if err != nil {
 		return nil, fmt.Errorf("scan review task: %w", err)
+	}
+	if nextRetryAt.Valid {
+		next := nextRetryAt.Time
+		task.NextRetryAt = &next
 	}
 	return &task, nil
 }

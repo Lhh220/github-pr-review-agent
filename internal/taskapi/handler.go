@@ -25,17 +25,20 @@ type Handler struct {
 }
 
 type TaskResponse struct {
-	ID         uint64    `json:"id"`
-	Repo       string    `json:"repo"`
-	PRNumber   int       `json:"pr_number"`
-	CommitSHA  string    `json:"commit_sha"`
-	Action     string    `json:"action"`
-	DeliveryID string    `json:"delivery_id"`
-	Status     string    `json:"status"`
-	Error      string    `json:"error,omitempty"`
-	DurationMS int64     `json:"duration_ms"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID           uint64     `json:"id"`
+	Repo         string     `json:"repo"`
+	PRNumber     int        `json:"pr_number"`
+	CommitSHA    string     `json:"commit_sha"`
+	Action       string     `json:"action"`
+	DeliveryID   string     `json:"delivery_id"`
+	Status       string     `json:"status"`
+	Error        string     `json:"error,omitempty"`
+	AttemptCount int        `json:"attempt_count"`
+	MaxAttempts  int        `json:"max_attempts"`
+	NextRetryAt  *time.Time `json:"next_retry_at,omitempty"`
+	DurationMS   int64      `json:"duration_ms"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 type ReviewResultResponse struct {
@@ -155,17 +158,20 @@ func newTaskResponse(task store.Task) TaskResponse {
 		durationMS = task.UpdatedAt.Sub(task.CreatedAt).Milliseconds()
 	}
 	return TaskResponse{
-		ID:         task.ID,
-		Repo:       task.Repo,
-		PRNumber:   task.PRNumber,
-		CommitSHA:  task.CommitSHA,
-		Action:     task.Action,
-		DeliveryID: task.DeliveryID,
-		Status:     task.Status,
-		Error:      task.Error,
-		DurationMS: durationMS,
-		CreatedAt:  task.CreatedAt,
-		UpdatedAt:  task.UpdatedAt,
+		ID:           task.ID,
+		Repo:         task.Repo,
+		PRNumber:     task.PRNumber,
+		CommitSHA:    task.CommitSHA,
+		Action:       task.Action,
+		DeliveryID:   task.DeliveryID,
+		Status:       task.Status,
+		Error:        task.Error,
+		AttemptCount: task.AttemptCount,
+		MaxAttempts:  task.MaxAttempts,
+		NextRetryAt:  task.NextRetryAt,
+		DurationMS:   durationMS,
+		CreatedAt:    task.CreatedAt,
+		UpdatedAt:    task.UpdatedAt,
 	}
 }
 

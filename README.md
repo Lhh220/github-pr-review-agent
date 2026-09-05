@@ -20,8 +20,11 @@ MVP 已经跑通并部署到 Railway：
 - Webhook 创建任务后投递 RabbitMQ，快速返回 202
 - RabbitMQ 使用 durable queue、persistent message、publisher confirm 和 manual ack
 - RabbitMQ 连接断开后自动重连，broker 短暂重启时 Go 服务保持在线
+- 业务失败进入延迟重试队列，按指数退避回到主队列
+- 超过最大重试次数后进入死信队列，任务状态标记为 `dead_letter`
+- 定期扫描超时仍处于 `running` 的任务，自动恢复到重试链路
 - Worker Pool 固定并发消费任务，支持优雅停机
-- 任务状态覆盖 `received -> queued -> running -> done/failed`
+- 任务状态覆盖 `received -> queued -> running -> done/failed/retrying/dead_letter`
 - 提供 `/tasks`、`/tasks/:id` 查询任务状态，以及 `/tasks/:id/result` 查询结构化审查结果
 
 当前线上示例：
@@ -78,7 +81,12 @@ MYSQL_DSN=root:<password>@tcp(127.0.0.1:3306)/github_pr_review_agent?charset=utf
 ADMIN_TOKEN=...
 RABBITMQ_URL=amqp://guest:guest@127.0.0.1:5672/
 REVIEW_QUEUE=pr.review.queue
+REVIEW_RETRY_QUEUE=pr.review.retry.queue
+REVIEW_DEAD_LETTER_QUEUE=pr.review.dead_letter.queue
 REVIEW_WORKERS=4
+REVIEW_MAX_ATTEMPTS=3
+REVIEW_RETRY_BASE_DELAY=30s
+REVIEW_RETRY_MAX_DELAY=10m
 ```
 
 说明：
@@ -94,7 +102,12 @@ REVIEW_WORKERS=4
 - `ADMIN_TOKEN`：查询任务接口的 Bearer Token；为空时接口不鉴权，生产环境建议配置。
 - `RABBITMQ_URL`：生产环境必填。本地未配置时默认使用 `amqp://guest:guest@127.0.0.1:5672/`。
 - `REVIEW_QUEUE`：RabbitMQ durable 队列名，默认 `pr.review.queue`。
+- `REVIEW_RETRY_QUEUE`：延迟重试队列，默认 `pr.review.retry.queue`。消息带 TTL，过期后通过 DLX 回到主队列。
+- `REVIEW_DEAD_LETTER_QUEUE`：死信队列，默认 `pr.review.dead_letter.queue`。
 - `REVIEW_WORKERS`：Worker 并发数，默认 4；RabbitMQ consumer prefetch 会使用同一配置。
+- `REVIEW_MAX_ATTEMPTS`：最大执行次数，默认 3。前两次失败重试，第 3 次失败进入死信。
+- `REVIEW_RETRY_BASE_DELAY`：第一次重试延迟，默认 30s。
+- `REVIEW_RETRY_MAX_DELAY`：单次重试延迟上限，默认 10m。
 
 注意：阶段二接入 RabbitMQ 后，Railway 部署必须提供可达的 `RABBITMQ_URL`，否则服务启动会失败。
 
@@ -136,7 +149,12 @@ $env:MYSQL_DSN="root:<password>@tcp(127.0.0.1:3306)/github_pr_review_agent?chars
 $env:ADMIN_TOKEN="本地调试 token，可不配"
 $env:RABBITMQ_URL="amqp://guest:guest@127.0.0.1:5672/"
 $env:REVIEW_QUEUE="pr.review.queue"
+$env:REVIEW_RETRY_QUEUE="pr.review.retry.queue"
+$env:REVIEW_DEAD_LETTER_QUEUE="pr.review.dead_letter.queue"
 $env:REVIEW_WORKERS="4"
+$env:REVIEW_MAX_ATTEMPTS="3"
+$env:REVIEW_RETRY_BASE_DELAY="30s"
+$env:REVIEW_RETRY_MAX_DELAY="10m"
 ```
 
 3. 启动服务：
@@ -174,8 +192,22 @@ go vet ./...
 received -> queued -> running -> done
                         |
                         v
-                      failed
+                    retrying -> running -> ...
+                        |
+                        v
+                   dead_letter
+
+running -> failed   # 队列发布失败等不可重试的基础设施错误
 ```
+
+重试语义：
+
+- `attempt_count` 记录已执行次数。
+- `max_attempts` 是最大执行次数，默认 3。
+- `next_retry_at` 是下次允许执行的时间。
+- 第 1 次失败延迟 30s，第 2 次失败延迟 60s，第 3 次失败进入死信队列。
+- 延迟由消息 TTL 实现：`pr.review.retry.queue` 中的消息过期后，通过 DLX 自动回到 `pr.review.queue`。
+- Worker 每 30 秒扫描一次超过 6 分钟仍是 `running` 的任务，避免进程崩溃后任务卡死。
 
 查询任务列表：
 
@@ -203,6 +235,8 @@ Authorization: Bearer <ADMIN_TOKEN>
   "commit_sha": "0123456789abcdef0123456789abcdef01234567",
   "action": "opened",
   "status": "done",
+  "attempt_count": 1,
+  "max_attempts": 3,
   "duration_ms": 3200
 }
 ```
@@ -282,7 +316,6 @@ Task ID: 1 | commit 291ac5a
 ## 后续计划
 
 - Redis 分布式锁和限流
-- 失败重试和死信队列
 - 审计日志
 - Tool Calling 框架
 - tree-sitter 上下文裁剪
