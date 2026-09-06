@@ -33,10 +33,11 @@ MVP 已经跑通并部署到 Railway：
 - 提供 `/dead-letters` 查询死信任务，`/dead-letters/:id/requeue` 手动重新入队
 - 提供 `/audit-logs` 查询任务审计轨迹，`/stats` 查询任务成功率、重试次数、token 用量和平均耗时
 - 阶段三 Day 1 已完成 Agent 基础框架：Tool 接口、工具注册表、Agent Loop、DeepSeek tool calls、`tool_call_log` 和 `/tasks/:id/tool-calls`
+- 阶段三 Day 2 已接入真实 GitHub 工具：`get_pr_meta`、`list_changed_files`、`read_diff`、`read_file_context`、`get_commit_history`
 - 关键状态变更与审查结果创建会同步写入 `audit_log`，任务数据和审计数据保持同一事务
 - MySQL 结构通过版本化 migration 管理，服务启动自动执行，也提供 `cmd/migrate` CLI
 
-Day 5 的审计表和观测统计已完成本地与线上验收，阶段二收官。阶段三 Day 1 的 Agent 框架已完成本地验收；真实 PR 工具和线上 Agent 审查链路从 Day 2 开始接入。
+Day 5 的审计表和观测统计已完成本地与线上验收，阶段二收官。阶段三 Day 1 的 Agent 框架与 Day 2 的 5 个 GitHub 工具已完成本地验收；线上默认仍是 `AGENT_MODE=legacy`，把 Railway 变量改成 `AGENT_MODE=tool_calling` 后即可启用 Agent 审查链路。
 
 当前线上示例：
 
@@ -109,6 +110,7 @@ LLM_RATE_WINDOW=1m
 AGENT_MODE=legacy
 AGENT_MAX_STEPS=8
 AGENT_TOOL_TIMEOUT=20s
+AGENT_MAX_COMMIT_HISTORY=20
 ```
 
 说明：
@@ -136,9 +138,10 @@ AGENT_TOOL_TIMEOUT=20s
 - `REVIEW_LOCK_RETRY_DELAY`：同一个 PR 已有审查在执行时，后续任务重新入队等待的延迟，默认 2s。
 - `GITHUB_API_RATE_LIMIT / GITHUB_API_RATE_WINDOW`：GitHub API 限流，默认 120 次 / 1m。
 - `LLM_RATE_LIMIT / LLM_RATE_WINDOW`：DeepSeek 调用限流，默认 6 次 / 1m，用于控制成本和上游压力。
-- `AGENT_MODE`：`legacy` 表示当前固定上下文审查链路；`tool_calling` 预留给阶段三接入真实工具后的 Agent 链路。
+- `AGENT_MODE`：`legacy` 表示固定上下文审查链路；`tool_calling` 表示启用 GitHub Tool Calling Agent 链路。默认 `legacy`，便于回滚。
 - `AGENT_MAX_STEPS`：Agent 最大工具调用轮次，默认 8。
 - `AGENT_TOOL_TIMEOUT`：单个工具执行超时，默认 20s。
+- `AGENT_MAX_COMMIT_HISTORY`：`get_commit_history` 最多返回多少个 commit，默认 20，工具内部最大会限制到 100。
 
 注意：阶段二接入 RabbitMQ 后，Railway 部署必须提供可达的 `RABBITMQ_URL`，否则服务启动会失败。
 
@@ -413,7 +416,16 @@ GET /tasks/<task_id>/tool-calls
 Authorization: Bearer <ADMIN_TOKEN>
 ```
 
-返回工具名、输入、输出、状态、错误和耗时。当前线上审查链路仍是 legacy 模式，所以新任务暂不会产生工具调用；Day 2 接入 GitHub 工具后可用这个接口追踪 Agent 的每一步。
+返回工具名、输入、输出、状态、错误和耗时。`AGENT_MODE=tool_calling` 的任务会记录每一步工具调用；`legacy` 任务不会产生工具调用记录。
+
+Day 2 Agent 模式线上验收步骤：
+
+1. push 代码到 `main`，等待 Railway 部署完成。
+2. 在 Railway 中把 `AGENT_MODE` 改成 `tool_calling`，保留 `AGENT_MAX_STEPS=8`、`AGENT_TOOL_TIMEOUT=20s`、`AGENT_MAX_COMMIT_HISTORY=20`。
+3. 提一个包含代码改动的测试 PR。
+4. 日志应出现 `agent review mode enabled`，bot 评论后记录评论里的 Task ID。
+5. 请求 `/tasks/<task_id>/tool-calls`，应能看到模型调用 GitHub 工具的输入、输出和耗时。
+6. 验收完成后可保留 `tool_calling`；如果质量不稳定，把 `AGENT_MODE` 改回 `legacy` 即可回滚。
 
 Day 5 线上验收步骤：
 
@@ -424,18 +436,17 @@ Day 5 线上验收步骤：
 
 ## 当前能力边界
 
-当前审查能力是 **diff + changed-file-context reviewer**：
+默认 `legacy` 审查能力是 **diff + changed-file-context reviewer**：
 
 - 会把 PR diff 和变更文件内容交给 LLM
 - 还看不到改动文件之外的关联代码
 - 无法确认被删除的字段、函数、类型是否仍被其他文件引用
 - 无法验证 PR 是否能通过编译、测试或静态检查
 
-代码库中已经具备 Tool Calling 基础框架和工具调用日志表，但它尚未替换线上 PR 审查链路。阶段三接下来会把 GitHub 工具注册进 Agent，再逐步启用 `AGENT_MODE=tool_calling`。
+代码库已经具备 Tool Calling 基础框架、5 个 GitHub 工具和工具调用日志；线上启用 `AGENT_MODE=tool_calling` 后，模型可以多轮读取 PR 信息、diff、指定文件上下文和提交历史。tree-sitter、跨文件引用检索和静态检查仍在后续阶段。
 
 下一阶段计划升级为 **code-aware agent**，增加：
 
-- `read_file_context`
 - `search_references`
 - `run_static_checks`
 - `confirmed / needs_verification` 结论分级

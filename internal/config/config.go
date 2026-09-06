@@ -42,6 +42,7 @@ type Config struct {
 	AgentMode               string
 	AgentMaxSteps           int
 	AgentToolTimeout        time.Duration
+	AgentMaxCommitHistory   int
 }
 
 func Load() *Config {
@@ -81,6 +82,7 @@ func Load() *Config {
 		AgentMode:               getEnv("AGENT_MODE", "legacy"),
 		AgentMaxSteps:           getEnvInt("AGENT_MAX_STEPS", 8),
 		AgentToolTimeout:        getEnvDuration("AGENT_TOOL_TIMEOUT", 20*time.Second),
+		AgentMaxCommitHistory:   getEnvInt("AGENT_MAX_COMMIT_HISTORY", 20),
 	}
 }
 

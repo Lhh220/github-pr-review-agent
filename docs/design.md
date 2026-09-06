@@ -14,7 +14,7 @@
 
 ## 3. 整体架构
 
-当前实现已接入 RabbitMQ 延迟重试、死信队列、Worker Pool、Redis PR 级分布式锁、外部 API 限流，以及阶段三 Day 1 的 Tool Calling 基础框架；线上 PR 审查链路仍使用 legacy 固定上下文模式，还没有接入真实 GitHub 工具、tree-sitter 和静态检查沙箱。当前实际链路是：
+当前实现已接入 RabbitMQ 延迟重试、死信队列、Worker Pool、Redis PR 级分布式锁、外部 API 限流、阶段三 Day 1 的 Tool Calling 基础框架，以及 Day 2 的 5 个真实 GitHub 工具。默认链路仍是 `AGENT_MODE=legacy` 固定上下文审查；设置 `AGENT_MODE=tool_calling` 后启用 Agent 链路。tree-sitter、跨文件引用检索和静态检查沙箱还未实现。
 
 ```text
 GitHub PR Event
@@ -44,7 +44,7 @@ MySQL review_task + review_result
 GitHub PR Review API
 ```
 
-下图是后续目标架构，Tool Calling 和静态检查沙箱还未实现：
+下图是 `AGENT_MODE=tool_calling` 的当前 Agent 架构；`search_references`、tree-sitter 和静态检查仍是后续增强：
 
 ```text
 GitHub PR Event
@@ -135,7 +135,7 @@ MySQL (任务/结果/审计) + Redis (锁 / API 限流)
 
 - Day 1 已实现基础 Agent Loop：构造 system/user 消息、发送工具定义、接收模型 `tool_calls`、调度注册表执行工具、把 tool result 回传模型、聚合 usage，并在工具预算耗尽后强制模型输出最终 JSON。
 - 每轮工具调用有独立超时；未知工具、参数错误和工具执行错误会作为 tool result 回传给模型，避免一次工具选择错误直接导致任务失败。
-- 输入：任务上下文（仓库、PR、commit）。Day 2 开始接入真实工具。
+- Day 2 已接入 5 个只读 GitHub 工具：`get_pr_meta`、`list_changed_files`、`read_diff`、`read_file_context`、`get_commit_history`。
 - Agent 执行多步推理：
   1. 调 `get_pr_meta` 了解 PR 标题、描述、改动文件列表。
   2. 调 `read_diff` 读取完整 diff。
@@ -159,6 +159,8 @@ type Tool interface {
 ```
 工具注册表 `Registry` 负责校验工具名、描述和 JSON Schema，避免重复注册，并输出稳定的工具定义列表。Agent 根据模型返回的 tool_call 调度。DeepSeek Provider 使用 OpenAI 兼容的 tools / tool_calls / tool 消息格式。
 
+Day 2 的 GitHub Toolkit 绑定当前任务的 owner / repo / PR number，模型不能指定其他仓库或 PR。PR meta 和 changed files 在同一次任务内缓存，避免模型多轮工具调用时重复请求 GitHub。所有工具输出都是 JSON，并受 diff 行数、文件行范围、commit 数量和输出字符数限制。`CreatePullRequestReview` 不注册为工具；写评论仍由服务端在 Agent 输出结构化结果后统一执行。
+
 ### 4.6 上下文裁剪
 
 - diff 可能很大，不能全塞给 LLM。
@@ -175,7 +177,7 @@ type Tool interface {
 - PR 无变更文件时短路处理，直接回固定评论，不调用 LLM。
 - 把 PR diff 交给 LLM。
 - 额外读取部分变更文件的完整内容，并按行数裁剪后一起送给 LLM。
-- 看不到改动文件之外的关联代码。
+- `AGENT_MODE=tool_calling` 已能按需读取当前仓库指定文件上下文，但还没有符号级引用检索。
 - 无法确认被删除的字段、函数、类型是否仍被其他文件引用。
 - 无法验证 PR 是否能通过编译、测试或静态检查。
 

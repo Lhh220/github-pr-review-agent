@@ -48,7 +48,7 @@
 
 任务：
 - [x] Day 1：Tool Calling 框架、工具注册、Agent Loop、DeepSeek tool calls、tool_call_log、`/tasks/:id/tool-calls`
-- [ ] Day 2：实现 get_pr_meta / list_changed_files / read_diff / read_file_context / get_commit_history
+- [x] Day 2：实现 get_pr_meta / list_changed_files / read_diff / read_file_context / get_commit_history（本地完成，待线上 tool_calling 验收）
 - [ ] Day 3：tree-sitter 函数级上下文裁剪
 - [ ] Day 4：search_references，检索被删除或改名符号的跨文件引用
 - [ ] Day 5：run_static_checks，执行 go test / go vet 并回传结果

@@ -44,6 +44,8 @@ type Result struct {
 	Content       string           `json:"content"`
 	ToolCalls     []ToolInvocation `json:"tool_calls"`
 	Usage         llm.Usage        `json:"usage"`
+	Model         string           `json:"model,omitempty"`
+	DurationMS    int64            `json:"duration_ms"`
 	ProviderCalls int              `json:"provider_calls"`
 }
 
@@ -109,6 +111,10 @@ func (a *Agent) Run(ctx context.Context, request Request) (Result, error) {
 		result.Usage.InputTokens += response.Usage.InputTokens
 		result.Usage.OutputTokens += response.Usage.OutputTokens
 		result.Usage.TotalTokens += response.Usage.TotalTokens
+		result.DurationMS += response.DurationMS
+		if result.Model == "" {
+			result.Model = response.Model
+		}
 
 		if len(response.ToolCalls) == 0 {
 			if response.Content == "" {
@@ -155,6 +161,10 @@ func (a *Agent) Run(ctx context.Context, request Request) (Result, error) {
 	result.Usage.InputTokens += response.Usage.InputTokens
 	result.Usage.OutputTokens += response.Usage.OutputTokens
 	result.Usage.TotalTokens += response.Usage.TotalTokens
+	result.DurationMS += response.DurationMS
+	if result.Model == "" {
+		result.Model = response.Model
+	}
 	if response.Content == "" {
 		return result, fmt.Errorf("agent final provider call returned empty content")
 	}

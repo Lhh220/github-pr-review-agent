@@ -124,7 +124,22 @@ func startServer(
 	l := llm.New(cfg.DeepSeekAPIKey, cfg.DeepSeekBaseURL, cfg.DeepSeekModel)
 	l.SetLimiter(limiter.NewRedisLimiter(redisClient, cfg.LLMRateLimit, cfg.LLMRateWindow))
 	gh.SetLimiter(limiter.NewRedisLimiter(redisClient, cfg.GitHubAPIRateLimit, cfg.GitHubAPIRateWindow))
-	reviewer := review.New(gh, l, taskStore, cfg.MaxDiffLines, cfg.MaxFileContexts, cfg.MaxFileContextLines)
+	var reviewer worker.Reviewer
+	switch strings.ToLower(cfg.AgentMode) {
+	case "legacy":
+		reviewer = review.New(gh, l, taskStore, cfg.MaxDiffLines, cfg.MaxFileContexts, cfg.MaxFileContextLines)
+	case "tool_calling":
+		reviewer = review.NewAgent(gh, l, taskStore, review.AgentOptions{
+			MaxSteps:            cfg.AgentMaxSteps,
+			ToolTimeout:         cfg.AgentToolTimeout,
+			MaxDiffLines:        cfg.MaxDiffLines,
+			MaxFileContextLines: cfg.MaxFileContextLines,
+			MaxCommitHistory:    cfg.AgentMaxCommitHistory,
+		})
+		log.Printf("agent review mode enabled: max_steps=%d tool_timeout=%s", cfg.AgentMaxSteps, cfg.AgentToolTimeout)
+	default:
+		return fmt.Errorf("unsupported AGENT_MODE %q: use legacy or tool_calling", cfg.AgentMode)
+	}
 	handler := webhook.New(cfg.GitHubWebhookSecret, broker, taskStore)
 	reviewWorker := worker.New(taskStore, reviewer, broker, cfg.ReviewWorkers, worker.Options{
 		MaxAttempts:    cfg.ReviewMaxAttempts,
