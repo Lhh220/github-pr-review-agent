@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/liaohonghui/github-pr-review-agent/internal/adminui"
 	"github.com/liaohonghui/github-pr-review-agent/internal/config"
 	"github.com/liaohonghui/github-pr-review-agent/internal/github"
 	"github.com/liaohonghui/github-pr-review-agent/internal/limiter"
@@ -171,6 +172,7 @@ func startServer(
 	r.Use(gin.Logger(), gin.Recovery())
 	r.POST("/webhook/github", handler.Handle)
 	taskapi.New(taskStore, broker, cfg.AdminToken).Register(r)
+	adminui.Register(r)
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})

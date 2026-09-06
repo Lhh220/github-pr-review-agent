@@ -116,7 +116,8 @@ MySQL (任务/结果/审计) + Redis (锁 / API 限流)
 - 成功后更新为 `done`；可重试失败更新为 `retrying`；达到最大次数后更新为 `dead_letter`。
 - `next_retry_at` 未到期的重复消息直接 ack，避免提前执行。
 - 后台恢复循环每 30 秒扫描超过 6 分钟仍是 `running` 的任务，重新进入延迟重试链路，避免进程崩溃后任务卡死。
-- 后台恢复循环同时扫描超过 60 秒仍是 `queued` 的任务，重新投递到主队列；重复消息由原子 claim 和状态机兜底，不会重复审查。
+- 后台恢复循环同时扫描超过 60 秒仍是 `received` 或 `queued` 的任务，重新投递到主队列；这能覆盖“任务已落库但状态更新/发布前进程退出”的窗口，重复消息由原子 claim 和状态机兜底，不会重复审查。
+- 如果 `retrying` 消息因时钟偏差等原因早于 `next_retry_at` 到达主队列，Worker 会按剩余等待时间重新写入延迟队列，而不是直接 Ack 丢掉队列载体。
 - Worker 在原子 claim 之前先获取 Redis 分布式锁 `lock:review:pr:{repo}:{number}`，避免同一个 PR 的不同 task 被并发审查。
 - 锁使用 `SET NX EX` 和随机 token；释放时通过 Lua 比较 token 后删除，避免误删其他 Worker 的锁。
 - 锁默认 TTL 7 分钟，大于单次 review 超时 5 分钟；进程崩溃后锁自动过期，配合 running 超时恢复避免死锁。
@@ -266,7 +267,7 @@ MySQL 表：
 - `POST /dead-letters/:id/requeue`：把死信任务改回 `queued`，重置 `attempt_count`，并重新投递主队列。
 
 审计与观测接口：
-- `GET /audit-logs`：按 task_id、action、limit 查询任务审计轨迹。
+- `GET /audit-logs`：按 task_id、repo、PR、action、limit 查询任务审计轨迹。
 - `GET /stats`：按 repo 聚合任务状态、成功率、重试事件、耗时、findings 和 token 用量。
 - `GET /tasks/:id/tool-calls`：按任务查询 Agent 工具调用轨迹、输入输出和耗时。
 
@@ -294,6 +295,34 @@ running -> failed
 ```
 
 `failed` 保留给队列发布失败等不可重试的基础设施错误；业务审查失败优先走 `retrying`，达到最大次数后进入 `dead_letter`。
+
+### 4.11 开发者后台
+
+`internal/adminui` 提供轻量 Admin Console，静态 HTML / CSS / JS 通过 `go:embed` 打进服务二进制，路由为 `/admin`。
+
+后台复用现有管理 API，不直接访问 MySQL：
+
+```text
+/stats
+/tasks
+/tasks/:id/result
+/tasks/:id/tool-calls
+/audit-logs
+/dead-letters
+/dead-letters/:id/requeue
+```
+
+页面在浏览器中保存 `ADMIN_TOKEN` 到当前标签页的 `sessionStorage`，每次请求带 Bearer Token。后台本身不保存 token，也不渲染任何秘钥。
+
+当前视图：
+
+- Overview：核心指标、状态分布和最近任务。
+- Tasks：任务筛选和详情。
+- Task Detail：任务信息、结构化审查结果、raw output、工具调用轨迹和审计轨迹。
+- Dead Letters：死信列表和 Requeue 操作。
+- Audit：按仓库、PR、action 和 limit 筛选审计日志。
+
+该后台定位是开发调试和项目演示，不是完整 APM；Prometheus / Grafana / 日志平台放后续生产化阶段。
 
 ## 5. 技术选型
 

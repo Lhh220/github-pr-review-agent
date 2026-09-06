@@ -29,9 +29,11 @@ type AuditLog struct {
 }
 
 type AuditFilter struct {
-	TaskID uint64
-	Action string
-	Limit  int
+	TaskID   uint64
+	Repo     string
+	PRNumber int
+	Action   string
+	Limit    int
 }
 
 type auditExecer interface {
@@ -88,6 +90,14 @@ func (s *Store) ListAuditLogs(ctx context.Context, filter AuditFilter) ([]AuditL
 	if filter.TaskID > 0 {
 		where = append(where, "a.task_id = ?")
 		args = append(args, filter.TaskID)
+	}
+	if filter.Repo != "" {
+		where = append(where, "t.repo = ?")
+		args = append(args, filter.Repo)
+	}
+	if filter.PRNumber > 0 {
+		where = append(where, "t.pr_number = ?")
+		args = append(args, filter.PRNumber)
 	}
 	if filter.Action != "" {
 		where = append(where, "a.action = ?")

@@ -266,6 +266,11 @@ func (h *Handler) auditLogs(c *gin.Context) {
 		}
 		taskID = 0
 	}
+	prNumber, err := parsePositiveInt(c.Query("pr"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid pr"})
+		return
+	}
 	limit, err := parsePositiveInt(c.Query("limit"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit"})
@@ -273,9 +278,11 @@ func (h *Handler) auditLogs(c *gin.Context) {
 	}
 
 	logs, err := h.store.ListAuditLogs(c.Request.Context(), store.AuditFilter{
-		TaskID: taskID,
-		Action: strings.TrimSpace(c.Query("action")),
-		Limit:  limit,
+		TaskID:   taskID,
+		Repo:     strings.TrimSpace(c.Query("repo")),
+		PRNumber: prNumber,
+		Action:   strings.TrimSpace(c.Query("action")),
+		Limit:    limit,
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "list audit logs"})

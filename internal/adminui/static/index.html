@@ -1,0 +1,1205 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PR Review Agent Console</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f8;
+      --surface: #ffffff;
+      --line: #d9e0e6;
+      --line-strong: #b9c4cd;
+      --text: #1e2833;
+      --muted: #5f6f7e;
+      --accent: #1668a7;
+      --accent-dark: #0f4d7a;
+      --ok: #197d51;
+      --warn: #a05f04;
+      --error: #b3372b;
+      --running: #2564a8;
+      --code-bg: #f0f3f5;
+      font-family: Inter, "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    button, input, select {
+      font: inherit;
+    }
+
+    button {
+      cursor: pointer;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid var(--line);
+      background: #ffffff;
+      box-shadow: 0 1px 3px rgba(21, 38, 51, .08);
+    }
+
+    .topbar-inner {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 10px 20px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      justify-content: space-between;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 230px;
+    }
+
+    .brand-mark {
+      width: 28px;
+      height: 28px;
+      border: 2px solid var(--accent);
+      border-radius: 6px;
+      display: grid;
+      place-items: center;
+      color: var(--accent);
+      font-weight: 700;
+      font-size: 12px;
+    }
+
+    .brand-text {
+      display: flex;
+      flex-direction: column;
+      line-height: 1.15;
+    }
+
+    .brand-title {
+      font-size: 15px;
+      font-weight: 700;
+    }
+
+    .brand-subtitle {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .connection {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .connection-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--error);
+    }
+
+    .connection-dot.ok { background: var(--ok); }
+    .connection-dot.loading { background: var(--warn); }
+
+    .auth-box {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .input, .select {
+      height: 32px;
+      border: 1px solid var(--line-strong);
+      border-radius: 4px;
+      background: #fff;
+      color: var(--text);
+      padding: 0 8px;
+    }
+
+    .input:focus, .select:focus, .button:focus {
+      outline: 2px solid rgba(22, 104, 167, .25);
+      outline-offset: 1px;
+    }
+
+    .input-wide { width: 260px; }
+
+    .button {
+      height: 32px;
+      min-width: 64px;
+      border: 1px solid var(--line-strong);
+      border-radius: 4px;
+      background: #fff;
+      color: var(--text);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      padding: 0 10px;
+    }
+
+    .button:hover { border-color: var(--accent); color: var(--accent); }
+
+    .button-primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .button-primary:hover {
+      border-color: var(--accent-dark);
+      background: var(--accent-dark);
+      color: #fff;
+    }
+
+    .button-small {
+      height: 26px;
+      min-width: 48px;
+      font-size: 12px;
+      padding: 0 8px;
+    }
+
+    .button-danger {
+      border-color: #d99a94;
+      color: var(--error);
+    }
+
+    .shell {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 16px 20px 40px;
+    }
+
+    .alert {
+      display: none;
+      margin-bottom: 12px;
+      padding: 9px 12px;
+      border: 1px solid #efc3bd;
+      border-radius: 4px;
+      background: #fdf1ef;
+      color: var(--error);
+      overflow-wrap: anywhere;
+    }
+
+    .alert.visible { display: block; }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: var(--surface);
+      flex-wrap: wrap;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 3px;
+      padding: 3px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: #edf1f4;
+    }
+
+    .tab {
+      height: 28px;
+      border: 0;
+      border-radius: 3px;
+      background: transparent;
+      color: var(--muted);
+      padding: 0 12px;
+      white-space: nowrap;
+    }
+
+    .tab.active {
+      background: #fff;
+      color: var(--accent);
+      font-weight: 650;
+      box-shadow: 0 1px 2px rgba(21, 38, 51, .12);
+    }
+
+    .filters {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .field {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .input-short { width: 90px; }
+    .input-medium { width: 130px; }
+
+    .auto-refresh {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 420px;
+      gap: 14px;
+      align-items: start;
+    }
+
+    .workspace > div {
+      min-width: 0;
+    }
+
+    .view { min-width: 0; }
+    .view.hidden { display: none; }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: var(--surface);
+      overflow: hidden;
+    }
+
+    .panel + .panel { margin-top: 14px; }
+
+    .panel-header {
+      min-height: 42px;
+      border-bottom: 1px solid var(--line);
+      padding: 8px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      background: #fbfcfd;
+    }
+
+    .panel-title {
+      margin: 0;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .panel-meta {
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(120px, 1fr));
+      gap: 10px;
+      padding: 12px;
+    }
+
+    .metric {
+      min-height: 76px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 10px;
+      background: #fff;
+    }
+
+    .metric-label {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .02em;
+    }
+
+    .metric-value {
+      margin-top: 7px;
+      font-size: 21px;
+      font-weight: 700;
+      line-height: 1.1;
+      overflow-wrap: anywhere;
+    }
+
+    .metric-foot {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .status-layout {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr);
+      gap: 0;
+    }
+
+    .status-row {
+      display: grid;
+      grid-template-columns: 86px minmax(80px, 1fr) 42px;
+      align-items: center;
+      gap: 8px;
+      min-height: 29px;
+      padding: 5px 12px;
+      border-bottom: 1px solid #edf1f4;
+    }
+
+    .status-row:last-child { border-bottom: 0; }
+    .status-label { color: var(--muted); font-size: 12px; }
+    .status-count { text-align: right; font-variant-numeric: tabular-nums; }
+
+    .meter {
+      height: 8px;
+      border-radius: 2px;
+      background: #e5eaee;
+      overflow: hidden;
+    }
+
+    .meter-fill {
+      height: 100%;
+      border-radius: 2px;
+      background: var(--accent);
+      min-width: 2px;
+    }
+
+    .table-wrap { overflow-x: auto; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    th, td {
+      border-bottom: 1px solid #edf1f4;
+      padding: 8px 10px;
+      text-align: left;
+      vertical-align: middle;
+      white-space: nowrap;
+    }
+
+    th {
+      color: var(--muted);
+      background: #fbfcfd;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .02em;
+    }
+
+    td.wrap { white-space: normal; overflow-wrap: anywhere; }
+    tr:last-child td { border-bottom: 0; }
+    tr.clickable:hover { background: #f5f9fc; }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      height: 21px;
+      border-radius: 999px;
+      padding: 0 8px;
+      font-size: 11px;
+      font-weight: 650;
+      background: #eef1f4;
+      color: var(--muted);
+    }
+
+    .pill-done { background: #e5f4ec; color: var(--ok); }
+    .pill-failed, .pill-dead_letter { background: #fceceb; color: var(--error); }
+    .pill-running { background: #e8f1fa; color: var(--running); }
+    .pill-retrying, .pill-queued { background: #fdf3e3; color: var(--warn); }
+    .pill-high { background: #fceceb; color: var(--error); }
+    .pill-medium { background: #fdf3e3; color: var(--warn); }
+    .pill-low { background: #e5f4ec; color: var(--ok); }
+    .pill-error { background: #fceceb; color: var(--error); }
+    .pill-success { background: #e5f4ec; color: var(--ok); }
+
+    .mono {
+      font-family: Consolas, "SFMono-Regular", Menlo, monospace;
+      font-size: 12px;
+    }
+
+    .empty {
+      padding: 24px 14px;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .detail {
+      position: sticky;
+      top: 91px;
+      min-width: 0;
+    }
+
+    .detail-body { padding: 12px; }
+    .detail-section + .detail-section { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+    .detail-title { margin: 0 0 7px; font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; }
+    .detail-list { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 5px 8px; margin: 0; }
+    .detail-key { color: var(--muted); }
+    .detail-value { overflow-wrap: anywhere; }
+    .summary { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+    .finding {
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 8px;
+      margin-bottom: 8px;
+    }
+
+    .finding-head {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      margin-bottom: 5px;
+      flex-wrap: wrap;
+    }
+
+    .finding-file { font-family: Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; }
+    .finding-comment { margin: 0; white-space: pre-wrap; }
+    .finding-suggestion { margin: 5px 0 0; color: var(--muted); white-space: pre-wrap; }
+
+    .tool-call {
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      margin-bottom: 9px;
+      overflow: hidden;
+    }
+
+    .tool-call-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+      padding: 7px 8px;
+      background: #fbfcfd;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .tool-name { font-family: Consolas, monospace; font-weight: 700; overflow-wrap: anywhere; }
+    .tool-duration { color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .tool-output { margin: 0; padding: 8px; max-height: 220px; overflow: auto; background: var(--code-bg); white-space: pre-wrap; overflow-wrap: anywhere; }
+    .tool-error { color: var(--error); padding: 6px 8px 0; }
+
+    details.raw {
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    details.raw summary {
+      padding: 7px 8px;
+      background: #fbfcfd;
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    details.raw pre {
+      margin: 0;
+      padding: 8px;
+      max-height: 260px;
+      overflow: auto;
+      background: var(--code-bg);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .skeleton {
+      color: var(--muted);
+      padding: 20px;
+      text-align: center;
+    }
+
+    .toast {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      z-index: 50;
+      display: none;
+      border-radius: 4px;
+      border: 1px solid var(--line-strong);
+      background: #fff;
+      box-shadow: 0 5px 18px rgba(21, 38, 51, .16);
+      padding: 9px 12px;
+      max-width: 360px;
+      overflow-wrap: anywhere;
+    }
+
+    .toast.visible { display: block; }
+
+    @media (max-width: 1180px) {
+      .workspace { grid-template-columns: 1fr; }
+      .detail { position: static; }
+      .metric-grid { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
+    }
+
+    @media (max-width: 760px) {
+      .topbar-inner { align-items: stretch; flex-direction: column; }
+      .auth-box { justify-content: flex-start; }
+      .shell { padding: 12px 10px 32px; }
+      .toolbar { align-items: stretch; flex-direction: column; }
+      .tabs { width: 100%; overflow-x: auto; }
+      .tab { flex: 1; min-width: 78px; padding: 0 8px; }
+      .filters { align-items: stretch; flex-direction: column; }
+      .field { justify-content: space-between; }
+      .input-short, .input-medium, .input-wide { width: min(220px, 100%); }
+      .metric-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+      .status-layout { grid-template-columns: 1fr; }
+      .status-row:nth-child(odd) { border-right: 0; }
+      th, td { padding: 7px; }
+      .hide-mobile { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <div class="brand-mark">PR</div>
+        <div class="brand-text">
+          <div class="brand-title">PR Review Agent Console</div>
+          <div class="brand-subtitle">Tasks, reviews, tool traces</div>
+        </div>
+      </div>
+      <div class="auth-box">
+        <div class="connection" id="connection">
+          <span class="connection-dot" id="connection-dot"></span>
+          <span id="connection-text">Not connected</span>
+        </div>
+        <input class="input input-wide" type="password" id="token" placeholder="Admin token" autocomplete="current-password">
+        <button class="button button-primary" id="save-token">Save</button>
+        <button class="button" id="clear-token">Clear</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="shell">
+    <div class="alert" id="error"></div>
+
+    <div class="toolbar">
+      <nav class="tabs" aria-label="Views">
+        <button class="tab active" data-view="overview">Overview</button>
+        <button class="tab" data-view="tasks">Tasks</button>
+        <button class="tab" data-view="dead">Dead letters</button>
+        <button class="tab" data-view="audit">Audit</button>
+      </nav>
+
+      <div class="filters">
+        <label class="field">Repo
+          <input class="input input-medium" id="filter-repo" placeholder="owner/repo">
+        </label>
+        <label class="field" id="status-field" hidden>Status
+          <select class="select" id="filter-status">
+            <option value="">All</option>
+            <option value="received">received</option>
+            <option value="queued">queued</option>
+            <option value="running">running</option>
+            <option value="done">done</option>
+            <option value="failed">failed</option>
+            <option value="retrying">retrying</option>
+            <option value="dead_letter">dead_letter</option>
+          </select>
+        </label>
+        <label class="field" id="action-field" hidden>Action
+          <select class="select" id="filter-action">
+            <option value="">All</option>
+            <option value="task_created">task_created</option>
+            <option value="task_status_changed">task_status_changed</option>
+            <option value="review_result_created">review_result_created</option>
+          </select>
+        </label>
+        <label class="field">PR
+          <input class="input input-short" id="filter-pr" inputmode="numeric" placeholder="ID">
+        </label>
+        <label class="field">Limit
+          <select class="select" id="filter-limit">
+            <option>20</option>
+            <option>50</option>
+            <option>100</option>
+            <option>200</option>
+          </select>
+        </label>
+        <button class="button" id="apply">Apply</button>
+        <button class="button button-primary" id="refresh">Refresh</button>
+        <label class="auto-refresh"><input type="checkbox" id="auto-refresh"> Auto</label>
+      </div>
+    </div>
+
+    <div class="workspace">
+      <div>
+        <section class="view" id="view-overview">
+          <section class="panel">
+            <div class="panel-header">
+              <h2 class="panel-title">Overview</h2>
+              <span class="panel-meta" id="stats-time"></span>
+            </div>
+            <div class="metric-grid" id="metrics"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header"><h2 class="panel-title">Status distribution</h2></div>
+            <div class="status-layout" id="status-distribution"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h2 class="panel-title">Recent tasks</h2>
+              <span class="panel-meta" id="recent-count"></span>
+            </div>
+            <div class="table-wrap" id="recent-table"></div>
+          </section>
+        </section>
+
+        <section class="view hidden" id="view-tasks">
+          <section class="panel">
+            <div class="panel-header">
+              <h2 class="panel-title">Tasks</h2>
+              <span class="panel-meta" id="tasks-count"></span>
+            </div>
+            <div class="table-wrap" id="tasks-table"></div>
+          </section>
+        </section>
+
+        <section class="view hidden" id="view-dead">
+          <section class="panel">
+            <div class="panel-header">
+              <h2 class="panel-title">Dead letters</h2>
+              <span class="panel-meta" id="dead-count"></span>
+            </div>
+            <div class="table-wrap" id="dead-table"></div>
+          </section>
+        </section>
+
+        <section class="view hidden" id="view-audit">
+          <section class="panel">
+            <div class="panel-header">
+              <h2 class="panel-title">Audit logs</h2>
+              <span class="panel-meta" id="audit-count"></span>
+            </div>
+            <div class="table-wrap" id="audit-table"></div>
+          </section>
+        </section>
+      </div>
+
+      <aside class="detail panel" id="detail-panel">
+        <div class="panel-header">
+          <h2 class="panel-title">Task detail</h2>
+          <span class="panel-meta" id="detail-meta"></span>
+        </div>
+        <div class="detail-body" id="detail-body">
+          <div class="skeleton">Select a task</div>
+        </div>
+      </aside>
+    </div>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const state = {
+      token: '',
+      view: 'overview',
+      stats: null,
+      tasks: [],
+      deadLetters: [],
+      auditLogs: [],
+      selectedTask: null,
+      selectedResult: null,
+      selectedToolCalls: [],
+      selectedAuditLogs: [],
+      loading: false,
+      autoTimer: null
+    };
+
+    const $ = id => document.getElementById(id);
+    const nodes = {
+      token: $('token'), saveToken: $('save-token'), clearToken: $('clear-token'),
+      connectionDot: $('connection-dot'), connectionText: $('connection-text'),
+      error: $('error'), refresh: $('refresh'), apply: $('apply'), autoRefresh: $('auto-refresh'),
+      repo: $('filter-repo'), status: $('filter-status'), statusField: $('status-field'),
+      action: $('filter-action'), actionField: $('action-field'), pr: $('filter-pr'), limit: $('filter-limit')
+    };
+
+    document.querySelectorAll('.tab').forEach(button => {
+      button.addEventListener('click', () => setView(button.dataset.view));
+    });
+    nodes.saveToken.addEventListener('click', saveToken);
+    nodes.clearToken.addEventListener('click', clearToken);
+    nodes.apply.addEventListener('click', () => loadCurrent({ showLoading: true }));
+    nodes.refresh.addEventListener('click', () => loadCurrent({ showLoading: true }));
+    nodes.autoRefresh.addEventListener('change', configureAutoRefresh);
+    nodes.token.addEventListener('keydown', event => {
+      if (event.key === 'Enter') saveToken();
+    });
+
+    init();
+
+    function init() {
+      state.token = sessionStorage.getItem('adminToken') || '';
+      if (state.token) nodes.token.value = state.token;
+      loadCurrent({ showLoading: true });
+    }
+
+    function saveToken() {
+      const token = nodes.token.value.trim();
+      state.token = token;
+      if (token) sessionStorage.setItem('adminToken', token);
+      else sessionStorage.removeItem('adminToken');
+      loadCurrent({ showLoading: true });
+    }
+
+    function clearToken() {
+      state.token = '';
+      nodes.token.value = '';
+      sessionStorage.removeItem('adminToken');
+      setConnection('idle', 'Not connected');
+    }
+
+    async function api(path, options = {}) {
+      const headers = { ...(options.headers || {}) };
+      if (state.token) headers.Authorization = `Bearer ${state.token}`;
+      const response = await fetch(path, { ...options, headers });
+      let body = null;
+      try { body = await response.json(); } catch (_) {}
+      if (!response.ok) {
+        const message = body && body.error ? body.error : `${response.status} ${response.statusText}`;
+        const error = new Error(message);
+        error.status = response.status;
+        throw error;
+      }
+      return body;
+    }
+
+    function filters({ status = true, action = false } = {}) {
+      const params = new URLSearchParams();
+      if (nodes.repo.value.trim()) params.set('repo', nodes.repo.value.trim());
+      if (status && nodes.status.value) params.set('status', nodes.status.value);
+      if (action && nodes.action.value) params.set('action', nodes.action.value);
+      const pr = Number(nodes.pr.value.trim());
+      if (Number.isInteger(pr) && pr > 0) params.set('pr', String(pr));
+      params.set('limit', nodes.limit.value);
+      return params;
+    }
+
+    function setView(view) {
+      state.view = view;
+      document.querySelectorAll('.tab').forEach(button => {
+        button.classList.toggle('active', button.dataset.view === view);
+      });
+      nodes.statusField.hidden = view !== 'tasks';
+      nodes.actionField.hidden = view !== 'audit';
+      ['overview', 'tasks', 'dead', 'audit'].forEach(name => {
+        $(`view-${name}`).classList.toggle('hidden', name !== view);
+      });
+      loadCurrent({ showLoading: true });
+    }
+
+    async function loadCurrent({ showLoading = false } = {}) {
+      if (state.loading) return;
+      state.loading = true;
+      if (showLoading) setConnection('loading', 'Loading');
+      try {
+        if (state.view === 'overview') {
+          const query = filters({ status: false }).toString();
+          const [statsData, tasksData] = await Promise.all([
+            api(`/stats?${new URLSearchParams({ repo: nodes.repo.value.trim() })}`),
+            api(`/tasks?${query}`)
+          ]);
+          state.stats = statsData.stats;
+          state.tasks = tasksData.tasks || [];
+          renderOverview();
+        } else if (state.view === 'tasks') {
+          const data = await api(`/tasks?${filters().toString()}`);
+          state.tasks = data.tasks || [];
+          renderTasks();
+        } else if (state.view === 'dead') {
+          const query = filters({ status: false }).toString();
+          const data = await api(`/dead-letters?${query}`);
+          state.deadLetters = data.dead_letters || [];
+          renderDeadLetters();
+        } else if (state.view === 'audit') {
+          const query = filters({ status: false, action: true }).toString();
+          const data = await api(`/audit-logs?${query}`);
+          state.auditLogs = data.audit_logs || [];
+          renderAuditLogs();
+        }
+        if (state.selectedTask) await loadTaskDetail(state.selectedTask.id, { silent: true });
+        setConnection('ok', 'Connected');
+        hideError();
+      } catch (error) {
+        setConnection('error', error.status === 401 ? 'Unauthorized' : 'Error');
+        showError(error);
+      } finally {
+        state.loading = false;
+      }
+    }
+
+    function configureAutoRefresh() {
+      if (state.autoTimer) {
+        clearInterval(state.autoTimer);
+        state.autoTimer = null;
+      }
+      if (nodes.autoRefresh.checked) {
+        state.autoTimer = setInterval(() => loadCurrent({ showLoading: false }), 10000);
+      }
+    }
+
+    function setConnection(kind, text) {
+      nodes.connectionDot.className = `connection-dot ${kind === 'ok' ? 'ok' : kind === 'loading' ? 'loading' : ''}`;
+      nodes.connectionText.textContent = text;
+    }
+
+    function showError(error) {
+      nodes.error.textContent = error.message || String(error);
+      nodes.error.classList.add('visible');
+    }
+
+    function hideError() {
+      nodes.error.classList.remove('visible');
+    }
+
+    function renderOverview() {
+      const stats = state.stats;
+      if (!stats) {
+        $('metrics').innerHTML = '<div class="empty">No stats</div>';
+        $('status-distribution').innerHTML = '<div class="empty">No status data</div>';
+        return;
+      }
+
+      const metrics = [
+        ['Tasks', number(stats.total_tasks), `${stats.done_tasks || 0} done`],
+        ['Success rate', percent(stats.success_rate), `${stats.completed_tasks || 0} completed`],
+        ['Review results', number(stats.review_results), `${stats.total_findings || 0} findings`],
+        ['Retry events', number(stats.retry_events), `${stats.dead_letter_tasks || 0} dead letters`],
+        ['Input tokens', number(stats.input_tokens), 'LLM input'],
+        ['Output tokens', number(stats.output_tokens), 'LLM output'],
+        ['Avg task time', duration(stats.avg_task_duration_ms), 'created to final'],
+        ['Avg LLM time', duration(stats.avg_llm_duration_ms), 'provider calls']
+      ];
+      $('metrics').innerHTML = metrics.map(([label, value, foot]) => `
+        <article class="metric">
+          <div class="metric-label">${escapeHtml(label)}</div>
+          <div class="metric-value">${escapeHtml(value)}</div>
+          <div class="metric-foot">${escapeHtml(foot)}</div>
+        </article>
+      `).join('');
+      $('stats-time').textContent = stats.generated_at ? `Updated ${formatDate(stats.generated_at)}` : '';
+
+      const statuses = ['received', 'queued', 'running', 'done', 'failed', 'retrying', 'dead_letter'];
+      const max = Math.max(1, ...statuses.map(name => stats.status_counts?.[name] || 0));
+      $('status-distribution').innerHTML = statuses.map(name => {
+        const count = stats.status_counts?.[name] || 0;
+        return `<div class="status-row">
+          <span class="status-label">${name}</span>
+          <span class="meter"><span class="meter-fill" style="width:${Math.max((count / max) * 100, count ? 2 : 0)}%"></span></span>
+          <span class="status-count mono">${count}</span>
+        </div>`;
+      }).join('');
+
+      renderTaskTable(state.tasks, 'recent-table', 'recent-count');
+    }
+
+    function renderTasks() {
+      renderTaskTable(state.tasks, 'tasks-table', 'tasks-count');
+    }
+
+    function renderTaskTable(tasks, tableID, countID) {
+      const count = $(countID);
+      count.textContent = `${tasks.length} shown`;
+      if (!tasks.length) {
+        $(tableID).innerHTML = '<div class="empty">No tasks</div>';
+        return;
+      }
+      $(tableID).innerHTML = `<table>
+        <thead><tr>
+          <th>ID</th><th>Status</th><th>Repo</th><th>PR</th><th>Commit</th>
+          <th>Attempts</th><th>Duration</th><th>Updated</th><th></th>
+        </tr></thead>
+        <tbody>${tasks.map(task => `
+          <tr class="clickable" data-task="${task.id}">
+            <td class="mono">#${task.id}</td>
+            <td><span class="pill pill-${task.status}">${task.status}</span></td>
+            <td class="wrap">${escapeHtml(task.repo)}</td>
+            <td class="mono">${task.pr_number}</td>
+            <td class="mono hide-mobile">${shortSha(task.commit_sha)}</td>
+            <td class="mono">${task.attempt_count}/${task.max_attempts}</td>
+            <td>${duration(task.duration_ms)}</td>
+            <td>${formatDate(task.updated_at)}</td>
+            <td><button class="button button-small" data-open="${task.id}">Open</button></td>
+          </tr>`).join('')}</tbody>
+      </table>`;
+      bindTaskRows(tableID);
+    }
+
+    function bindTaskRows(tableID) {
+      $(tableID).querySelectorAll('[data-open]').forEach(button => {
+        button.addEventListener('click', event => {
+          event.stopPropagation();
+          openTask(Number(button.dataset.open));
+        });
+      });
+      $(tableID).querySelectorAll('tr[data-task]').forEach(row => {
+        row.addEventListener('click', () => openTask(Number(row.dataset.task)));
+      });
+    }
+
+    function renderDeadLetters() {
+      $('dead-count').textContent = `${state.deadLetters.length} shown`;
+      if (!state.deadLetters.length) {
+        $('dead-table').innerHTML = '<div class="empty">No dead-letter tasks</div>';
+        return;
+      }
+      $('dead-table').innerHTML = `<table>
+        <thead><tr><th>ID</th><th>Repo</th><th>PR</th><th>Commit</th><th>Attempts</th><th>Error</th><th>Updated</th><th></th></tr></thead>
+        <tbody>${state.deadLetters.map(task => `
+          <tr>
+            <td class="mono">#${task.id}</td>
+            <td class="wrap">${escapeHtml(task.repo)}</td>
+            <td class="mono">${task.pr_number}</td>
+            <td class="mono">${shortSha(task.commit_sha)}</td>
+            <td class="mono">${task.attempt_count}/${task.max_attempts}</td>
+            <td class="wrap">${escapeHtml(task.error || '-')}</td>
+            <td>${formatDate(task.updated_at)}</td>
+            <td>
+              <button class="button button-small" data-open="${task.id}">Open</button>
+              <button class="button button-small button-danger" data-requeue="${task.id}">Requeue</button>
+            </td>
+          </tr>`).join('')}</tbody>
+      </table>`;
+      $('dead-table').querySelectorAll('[data-open]').forEach(button => {
+        button.addEventListener('click', () => openTask(Number(button.dataset.open)));
+      });
+      $('dead-table').querySelectorAll('[data-requeue]').forEach(button => {
+        button.addEventListener('click', () => requeueTask(Number(button.dataset.requeue)));
+      });
+    }
+
+    async function requeueTask(id) {
+      try {
+        await api(`/dead-letters/${id}/requeue`, { method: 'POST' });
+        showToast(`Task #${id} queued`);
+        await loadCurrent({ showLoading: true });
+      } catch (error) {
+        showError(error);
+      }
+    }
+
+    function renderAuditLogs() {
+      $('audit-count').textContent = `${state.auditLogs.length} shown`;
+      if (!state.auditLogs.length) {
+        $('audit-table').innerHTML = '<div class="empty">No audit logs</div>';
+        return;
+      }
+      $('audit-table').innerHTML = `<table>
+        <thead><tr><th>ID</th><th>Task</th><th>Repo</th><th>Action</th><th>Status</th><th>Detail</th><th>Time</th></tr></thead>
+        <tbody>${state.auditLogs.map(log => `
+          <tr>
+            <td class="mono">${log.id}</td>
+            <td><button class="button button-small" data-open="${log.task_id}">#${log.task_id}</button></td>
+            <td class="wrap">${escapeHtml(log.repo)}</td>
+            <td>${log.action}</td>
+            <td>${escapeHtml(statusTransition(log))}</td>
+            <td class="wrap mono">${escapeHtml(compactJSON(log.detail))}</td>
+            <td>${formatDate(log.created_at)}</td>
+          </tr>`).join('')}</tbody>
+      </table>`;
+      $('audit-table').querySelectorAll('[data-open]').forEach(button => {
+        button.addEventListener('click', () => openTask(Number(button.dataset.open)));
+      });
+    }
+
+    async function openTask(id) {
+      $('detail-body').innerHTML = '<div class="skeleton">Loading task</div>';
+      $('detail-meta').textContent = `#${id}`;
+      await loadTaskDetail(id, { silent: false });
+    }
+
+    async function loadTaskDetail(id, { silent = false } = {}) {
+      const [result, tools, audits] = await Promise.allSettled([
+        api(`/tasks/${id}/result`),
+        api(`/tasks/${id}/tool-calls`),
+        api(`/audit-logs?task_id=${id}&limit=100`)
+      ]);
+
+      state.selectedTask = null;
+      state.selectedResult = null;
+      state.selectedToolCalls = [];
+      state.selectedAuditLogs = [];
+      if (result.status === 'fulfilled') {
+        state.selectedTask = result.value.task;
+        state.selectedResult = result.value.result;
+      } else if (result.reason.status !== 404) {
+        if (!silent) showError(result.reason);
+      }
+      if (tools.status === 'fulfilled') {
+        state.selectedTask = state.selectedTask || tools.value.task;
+        state.selectedToolCalls = tools.value.tool_calls || [];
+      } else if (!silent && tools.reason.status !== 404) {
+        showError(tools.reason);
+      }
+      if (audits.status === 'fulfilled') {
+        state.selectedAuditLogs = audits.value.audit_logs || [];
+      } else if (!silent && audits.reason.status !== 404) {
+        showError(audits.reason);
+      }
+
+      if (!state.selectedTask) {
+        state.selectedTask = state.tasks.find(task => task.id === id) ||
+          state.deadLetters.find(task => task.id === id);
+      }
+      renderDetail();
+    }
+
+    function renderDetail() {
+      if (!state.selectedTask) {
+        $('detail-body').innerHTML = '<div class="skeleton">Task not found</div>';
+        return;
+      }
+      const task = state.selectedTask;
+      $('detail-meta').textContent = `#${task.id}`;
+      const result = state.selectedResult;
+      const toolCalls = state.selectedToolCalls || [];
+      const audits = state.selectedAuditLogs || [];
+
+      let html = `
+        <section class="detail-section">
+          <h3 class="detail-title">Task</h3>
+          <dl class="detail-list">
+            <dt class="detail-key">Status</dt><dd class="detail-value"><span class="pill pill-${task.status}">${task.status}</span></dd>
+            <dt class="detail-key">Repository</dt><dd class="detail-value">${escapeHtml(task.repo)}</dd>
+            <dt class="detail-key">Pull request</dt><dd class="detail-value">#${task.pr_number}</dd>
+            <dt class="detail-key">Commit</dt><dd class="detail-value mono">${shortSha(task.commit_sha)}</dd>
+            <dt class="detail-key">Action</dt><dd class="detail-value">${task.action}</dd>
+            <dt class="detail-key">Attempts</dt><dd class="detail-value">${task.attempt_count}/${task.max_attempts}</dd>
+            <dt class="detail-key">Duration</dt><dd class="detail-value">${duration(task.duration_ms)}</dd>
+            <dt class="detail-key">Updated</dt><dd class="detail-value">${formatDate(task.updated_at)}</dd>
+            ${task.error ? `<dt class="detail-key">Error</dt><dd class="detail-value">${escapeHtml(task.error)}</dd>` : ''}
+          </dl>
+        </section>
+        <section class="detail-section">
+          <h3 class="detail-title">Review result</h3>
+          ${result ? `
+            <dl class="detail-list">
+              <dt class="detail-key">Model</dt><dd class="detail-value">${escapeHtml(result.model || '-')}</dd>
+              <dt class="detail-key">Tokens</dt><dd class="detail-value mono">${number(result.input_tokens)} / ${number(result.output_tokens)} / ${number(result.total_tokens)}</dd>
+              <dt class="detail-key">LLM time</dt><dd class="detail-value">${duration(result.llm_duration_ms)}</dd>
+              <dt class="detail-key">Findings</dt><dd class="detail-value">${result.findings?.length || 0}</dd>
+            </dl>
+            <p class="summary" style="margin-top:10px">${escapeHtml(result.summary || '')}</p>
+            ${(result.findings || []).map((finding, index) => `
+              <article class="finding">
+                <div class="finding-head">
+                  <span class="pill">${finding.category || 'general'}</span>
+                  <span class="pill pill-${finding.severity || 'low'}">${finding.severity || 'low'}</span>
+                  <span class="pill">${finding.confidence || '-'}</span>
+                  <span class="finding-file">${finding.file || 'unknown'}:${finding.line || 0}</span>
+                </div>
+                <p class="finding-comment">${index + 1}. ${escapeHtml(finding.comment || '')}</p>
+                ${finding.suggestion ? `<p class="finding-suggestion">Suggestion: ${escapeHtml(finding.suggestion)}</p>` : ''}
+              </article>`).join('')}
+            <details class="raw"><summary>Raw model output</summary><pre>${escapeHtml(result.raw_response || '')}</pre></details>
+          ` : '<div class="empty">No review result</div>'}
+        </section>
+        <section class="detail-section">
+          <h3 class="detail-title">Tool calls</h3>
+          ${toolCalls.length ? toolCalls.map(call => `
+            <article class="tool-call">
+              <div class="tool-call-head">
+                <span class="tool-name">${escapeHtml(call.tool_name)}</span>
+                <span class="tool-duration">${duration(call.duration_ms)}</span>
+              </div>
+              <pre class="tool-output">input: ${escapeHtml(prettyJSON(call.input))}\n\noutput: ${escapeHtml(prettyText(call.output))}</pre>
+              ${call.error ? `<div class="tool-error">${escapeHtml(call.error)}</div>` : ''}
+            </article>`).join('') : '<div class="empty">No tool calls</div>'}
+        </section>
+        <section class="detail-section">
+          <h3 class="detail-title">Audit trail</h3>
+          ${audits.length ? audits.map(log => `
+            <div class="detail-list" style="margin-bottom:8px">
+              <dt class="detail-key">${formatDate(log.created_at)}</dt>
+              <dd class="detail-value">${log.action} ${escapeHtml(statusTransition(log))}</dd>
+            </div>`).join('') : '<div class="empty">No audit logs</div>'}
+        </section>`;
+      $('detail-body').innerHTML = html;
+    }
+
+    function statusTransition(log) {
+      if (log.old_status && log.new_status) return `${log.old_status} -> ${log.new_status}`;
+      return log.new_status || log.old_status || '-';
+    }
+
+    function showToast(message) {
+      const toast = $('toast');
+      toast.textContent = message;
+      toast.classList.add('visible');
+      setTimeout(() => toast.classList.remove('visible'), 2500);
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+    }
+
+    function prettyJSON(value) {
+      if (value == null) return '{}';
+      try { return JSON.stringify(value, null, 2); } catch (_) { return String(value); }
+    }
+
+    function compactJSON(value) {
+      if (value == null) return '-';
+      try { return JSON.stringify(value); } catch (_) { return String(value); }
+    }
+
+    function prettyText(value) {
+      if (value == null || value === '') return '';
+      try { return JSON.stringify(JSON.parse(value), null, 2); } catch (_) { return String(value); }
+    }
+
+    function number(value) {
+      return new Intl.NumberFormat('en-US').format(Number(value || 0));
+    }
+
+    function percent(value) {
+      return `${((Number(value || 0)) * 100).toFixed(1)}%`;
+    }
+
+    function duration(value) {
+      const ms = Number(value || 0);
+      if (ms < 1000) return `${Math.round(ms)} ms`;
+      if (ms < 60000) return `${(ms / 1000).toFixed(1)} s`;
+      return `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`;
+    }
+
+    function shortSha(value) {
+      return value ? String(value).slice(0, 7) : '-';
+    }
+
+    function formatDate(value) {
+      if (!value) return '-';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return String(value);
+      return date.toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+  </script>
+</body>
+</html>

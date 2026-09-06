@@ -195,6 +195,42 @@ UPDATE review_task SET updated_at = ? WHERE id = ?`,
 		t.Fatalf("touched task is still stale: %+v", staleQueued)
 	}
 
+	orphaned, _, err := s.CreateTask(ctx, NewTask{
+		Repo:       "Lhh220/github-pr-review-agent-test",
+		PRNumber:   2,
+		CommitSHA:  "89abcdef0123456789abcdef0123456789abcdef",
+		Action:     "opened",
+		DeliveryID: fmt.Sprintf("orphan-%d", time.Now().UnixNano()),
+	})
+	if err != nil {
+		t.Fatalf("create orphaned task: %v", err)
+	}
+	defer func() {
+		_, _ = s.db.Exec("DELETE FROM review_task WHERE id = ?", orphaned.ID)
+	}()
+	if _, err := s.db.ExecContext(ctx, `
+UPDATE review_task SET updated_at = ? WHERE id = ?`,
+		time.Now().Add(-2*time.Minute), orphaned.ID,
+	); err != nil {
+		t.Fatalf("make orphaned task stale: %v", err)
+	}
+	recoveredReceived, err := s.ListStaleQueuedTasks(ctx, time.Now().Add(-time.Minute), 100)
+	if err != nil {
+		t.Fatalf("list stale received tasks: %v", err)
+	}
+	foundOrphaned := false
+	for _, candidate := range recoveredReceived {
+		if candidate.ID == orphaned.ID {
+			foundOrphaned = true
+		}
+	}
+	if !foundOrphaned {
+		t.Fatalf("stale received task %d was not recoverable: %+v", orphaned.ID, recoveredReceived)
+	}
+	if err := s.TouchQueuedTask(ctx, orphaned.ID, time.Now()); err != nil {
+		t.Fatalf("touch stale received task: %v", err)
+	}
+
 	tasks, err := s.ListTasks(ctx, ListFilter{Repo: "Lhh220/github-pr-review-agent-test", Limit: 10})
 	if err != nil {
 		t.Fatalf("list tasks: %v", err)
@@ -276,6 +312,18 @@ UPDATE review_task SET updated_at = ? WHERE id = ?`,
 	}
 	if statusTransitions["dead_letter -> queued"] != 1 || statusTransitions["queued -> done"] != 1 {
 		t.Fatalf("unexpected audit status transitions: %+v", statusTransitions)
+	}
+	filteredLogs, err := s.ListAuditLogs(ctx, AuditFilter{
+		Repo:     task.Repo,
+		PRNumber: task.PRNumber,
+		Action:   AuditActionReviewResultCreated,
+		Limit:    10,
+	})
+	if err != nil {
+		t.Fatalf("list filtered audit logs: %v", err)
+	}
+	if len(filteredLogs) == 0 || filteredLogs[0].TaskID != task.ID {
+		t.Fatalf("unexpected filtered audit logs: %+v", filteredLogs)
 	}
 
 	stats, err := s.GetTaskStats(ctx, StatsFilter{Repo: "Lhh220/github-pr-review-agent-test"})

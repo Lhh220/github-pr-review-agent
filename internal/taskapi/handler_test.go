@@ -282,13 +282,19 @@ func TestAuditLogsPassFiltersToStore(t *testing.T) {
 	router := setupRouter(fake, "")
 
 	recorder := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/audit-logs?task_id=1&action=task_status_changed&limit=20", nil)
+	req := httptest.NewRequest(http.MethodGet, "/audit-logs?task_id=1&repo=owner/repo&pr=12&action=task_status_changed&limit=20", nil)
 	router.ServeHTTP(recorder, req)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d body = %s", recorder.Code, recorder.Body.String())
 	}
-	if fake.auditFilter != (store.AuditFilter{TaskID: 1, Action: "task_status_changed", Limit: 20}) {
+	if fake.auditFilter != (store.AuditFilter{
+		TaskID:   1,
+		Repo:     "owner/repo",
+		PRNumber: 12,
+		Action:   "task_status_changed",
+		Limit:    20,
+	}) {
 		t.Fatalf("unexpected audit filter: %+v", fake.auditFilter)
 	}
 
