@@ -44,7 +44,7 @@ func New(apiKey, baseURL, model string) *Client {
 }
 
 func (c *Client) SetLimiter(l limiter.Limiter) {
-	if l != nil {
+	if l == nil {
 		l = limiter.NoopLimiter{}
 	}
 	c.limiter = l
