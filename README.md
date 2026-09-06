@@ -254,6 +254,8 @@ go test ./...
 go vet ./...
 ```
 
+Railway / Docker 生产构建使用仓库根目录的 `Dockerfile`。构建阶段会安装 `gcc` 和 `musl-dev`，并强制 `CGO_ENABLED=1`；运行阶段使用同 Alpine 基础镜像，避免 CGO 二进制和运行时 C 库不匹配。
+
 ## 任务状态查询
 
 服务启动后会自动创建 `review_task` 表。任务状态流转：
