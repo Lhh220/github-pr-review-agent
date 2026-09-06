@@ -29,8 +29,8 @@ func TestMySQLTaskStore(t *testing.T) {
 	if len(migrationStatuses) == 0 || !migrationStatuses[0].Applied {
 		t.Fatalf("unexpected migration status: %+v", migrationStatuses)
 	}
-	if len(migrationStatuses) != 2 || !migrationStatuses[1].Applied {
-		t.Fatalf("expected migrations version 1 and 2 to be applied: %+v", migrationStatuses)
+	if len(migrationStatuses) != 3 || !migrationStatuses[1].Applied || !migrationStatuses[2].Applied {
+		t.Fatalf("expected migrations version 1, 2, and 3 to be applied: %+v", migrationStatuses)
 	}
 
 	var createdPrecision, updatedPrecision int
@@ -233,6 +233,28 @@ UPDATE review_task SET updated_at = ? WHERE id = ?`,
 
 	if err := s.UpdateTaskStatus(ctx, task.ID, "done", ""); err != nil {
 		t.Fatalf("update done: %v", err)
+	}
+
+	toolCall, err := s.CreateToolCallLog(ctx, NewToolCallLog{
+		TaskID:     task.ID,
+		ToolName:   "echo_language",
+		Input:      `{"language":"Go"}`,
+		Output:     `{"language":"Go"}`,
+		DurationMS: 3,
+	})
+	if err != nil {
+		t.Fatalf("create tool call log: %v", err)
+	}
+	if toolCall.Status != "success" || toolCall.Input["language"] != "Go" {
+		t.Fatalf("unexpected tool call: %+v", toolCall)
+	}
+	toolCalls, err := s.ListToolCallLogs(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("list tool call logs: %v", err)
+	}
+	if len(toolCalls) != 1 || toolCalls[0].ToolName != "echo_language" ||
+		toolCalls[0].Output != `{"language":"Go"}` || toolCalls[0].DurationMS != 3 {
+		t.Fatalf("unexpected tool call logs: %+v", toolCalls)
 	}
 
 	logs, err := s.ListAuditLogs(ctx, AuditFilter{TaskID: task.ID, Limit: 200})

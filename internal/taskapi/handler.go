@@ -18,6 +18,7 @@ type Store interface {
 	GetTask(ctx context.Context, id uint64) (*store.Task, error)
 	ListTasks(ctx context.Context, filter store.ListFilter) ([]store.Task, error)
 	GetReviewResultByTaskID(ctx context.Context, taskID uint64) (*store.ReviewResult, error)
+	ListToolCallLogs(ctx context.Context, taskID uint64) ([]store.ToolCallLog, error)
 	RequeueTask(ctx context.Context, id uint64) error
 	ListAuditLogs(ctx context.Context, filter store.AuditFilter) ([]store.AuditLog, error)
 	GetTaskStats(ctx context.Context, filter store.StatsFilter) (*store.TaskStats, error)
@@ -60,6 +61,18 @@ type ReviewResultResponse struct {
 	CreatedAt     time.Time       `json:"created_at"`
 }
 
+type ToolCallResponse struct {
+	ID         uint64         `json:"id"`
+	TaskID     uint64         `json:"task_id"`
+	ToolName   string         `json:"tool_name"`
+	Input      map[string]any `json:"input"`
+	Output     string         `json:"output"`
+	Status     string         `json:"status"`
+	Error      string         `json:"error,omitempty"`
+	DurationMS int64          `json:"duration_ms"`
+	CreatedAt  time.Time      `json:"created_at"`
+}
+
 func New(store Store, publisher queue.Publisher, adminToken string) *Handler {
 	return &Handler{store: store, publisher: publisher, adminToken: adminToken}
 }
@@ -69,6 +82,7 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.GET("", h.list)
 	group.GET("/:id", h.get)
 	group.GET("/:id/result", h.result)
+	group.GET("/:id/tool-calls", h.toolCalls)
 
 	deadLetters := r.Group("/dead-letters", h.authorize)
 	deadLetters.GET("", h.deadLetters)
@@ -174,6 +188,43 @@ func (h *Handler) result(c *gin.Context) {
 		"task":   newTaskResponse(*task),
 		"result": newReviewResultResponse(*result),
 	})
+}
+
+func (h *Handler) toolCalls(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || id == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid task id"})
+		return
+	}
+	task, err := h.store.GetTask(c.Request.Context(), id)
+	if errors.Is(err, store.ErrTaskNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "get task"})
+		return
+	}
+	logs, err := h.store.ListToolCallLogs(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "list tool calls"})
+		return
+	}
+	responses := make([]ToolCallResponse, 0, len(logs))
+	for _, log := range logs {
+		responses = append(responses, ToolCallResponse{
+			ID:         log.ID,
+			TaskID:     log.TaskID,
+			ToolName:   log.ToolName,
+			Input:      log.Input,
+			Output:     log.Output,
+			Status:     log.Status,
+			Error:      log.Error,
+			DurationMS: log.DurationMS,
+			CreatedAt:  log.CreatedAt,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"task": newTaskResponse(*task), "tool_calls": responses})
 }
 
 func (h *Handler) requeue(c *gin.Context) {

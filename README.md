@@ -32,10 +32,11 @@ MVP 已经跑通并部署到 Railway：
 - 提供 `/tasks`、`/tasks/:id` 查询任务状态，以及 `/tasks/:id/result` 查询结构化审查结果
 - 提供 `/dead-letters` 查询死信任务，`/dead-letters/:id/requeue` 手动重新入队
 - 提供 `/audit-logs` 查询任务审计轨迹，`/stats` 查询任务成功率、重试次数、token 用量和平均耗时
+- 阶段三 Day 1 已完成 Agent 基础框架：Tool 接口、工具注册表、Agent Loop、DeepSeek tool calls、`tool_call_log` 和 `/tasks/:id/tool-calls`
 - 关键状态变更与审查结果创建会同步写入 `audit_log`，任务数据和审计数据保持同一事务
 - MySQL 结构通过版本化 migration 管理，服务启动自动执行，也提供 `cmd/migrate` CLI
 
-Day 5 的审计表和观测统计已完成本地与线上验收，阶段二收官。
+Day 5 的审计表和观测统计已完成本地与线上验收，阶段二收官。阶段三 Day 1 的 Agent 框架已完成本地验收；真实 PR 工具和线上 Agent 审查链路从 Day 2 开始接入。
 
 当前线上示例：
 
@@ -105,6 +106,9 @@ GITHUB_API_RATE_LIMIT=120
 GITHUB_API_RATE_WINDOW=1m
 LLM_RATE_LIMIT=6
 LLM_RATE_WINDOW=1m
+AGENT_MODE=legacy
+AGENT_MAX_STEPS=8
+AGENT_TOOL_TIMEOUT=20s
 ```
 
 说明：
@@ -132,6 +136,9 @@ LLM_RATE_WINDOW=1m
 - `REVIEW_LOCK_RETRY_DELAY`：同一个 PR 已有审查在执行时，后续任务重新入队等待的延迟，默认 2s。
 - `GITHUB_API_RATE_LIMIT / GITHUB_API_RATE_WINDOW`：GitHub API 限流，默认 120 次 / 1m。
 - `LLM_RATE_LIMIT / LLM_RATE_WINDOW`：DeepSeek 调用限流，默认 6 次 / 1m，用于控制成本和上游压力。
+- `AGENT_MODE`：`legacy` 表示当前固定上下文审查链路；`tool_calling` 预留给阶段三接入真实工具后的 Agent 链路。
+- `AGENT_MAX_STEPS`：Agent 最大工具调用轮次，默认 8。
+- `AGENT_TOOL_TIMEOUT`：单个工具执行超时，默认 20s。
 
 注意：阶段二接入 RabbitMQ 后，Railway 部署必须提供可达的 `RABBITMQ_URL`，否则服务启动会失败。
 
@@ -399,6 +406,15 @@ Authorization: Bearer <ADMIN_TOKEN>
 
 返回内容包括任务总数、各状态数量、成功率、重试事件数、平均任务耗时、审查结果数、findings 总数、token 用量和 LLM 平均耗时。当前实现直接从 MySQL 聚合，适合个人项目规模；数据量变大后再引入汇总表或 Prometheus。
 
+查询任务工具调用轨迹：
+
+```text
+GET /tasks/<task_id>/tool-calls
+Authorization: Bearer <ADMIN_TOKEN>
+```
+
+返回工具名、输入、输出、状态、错误和耗时。当前线上审查链路仍是 legacy 模式，所以新任务暂不会产生工具调用；Day 2 接入 GitHub 工具后可用这个接口追踪 Agent 的每一步。
+
 Day 5 线上验收步骤：
 
 1. push 代码到 `main`，等待 Railway 部署完成。
@@ -415,6 +431,8 @@ Day 5 线上验收步骤：
 - 无法确认被删除的字段、函数、类型是否仍被其他文件引用
 - 无法验证 PR 是否能通过编译、测试或静态检查
 
+代码库中已经具备 Tool Calling 基础框架和工具调用日志表，但它尚未替换线上 PR 审查链路。阶段三接下来会把 GitHub 工具注册进 Agent，再逐步启用 `AGENT_MODE=tool_calling`。
+
 下一阶段计划升级为 **code-aware agent**，增加：
 
 - `read_file_context`
@@ -426,7 +444,7 @@ Day 5 线上验收步骤：
 
 ## 后续计划
 
-- Tool Calling 框架
+- GitHub 工具接入 Agent 链路
 - tree-sitter 上下文裁剪
 - 评测集和误报率统计
 

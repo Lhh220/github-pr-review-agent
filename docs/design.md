@@ -14,7 +14,7 @@
 
 ## 3. 整体架构
 
-当前实现已接入 RabbitMQ 延迟重试、死信队列、Worker Pool、Redis PR 级分布式锁和外部 API 限流；还没有接入 Tool Calling、tree-sitter 和静态检查沙箱。当前实际链路是：
+当前实现已接入 RabbitMQ 延迟重试、死信队列、Worker Pool、Redis PR 级分布式锁、外部 API 限流，以及阶段三 Day 1 的 Tool Calling 基础框架；线上 PR 审查链路仍使用 legacy 固定上下文模式，还没有接入真实 GitHub 工具、tree-sitter 和静态检查沙箱。当前实际链路是：
 
 ```text
 GitHub PR Event
@@ -133,7 +133,9 @@ MySQL (任务/结果/审计) + Redis (锁 / API 限流)
 
 ### 4.4 Agent Loop
 
-- 输入：任务上下文（仓库、PR、commit）。
+- Day 1 已实现基础 Agent Loop：构造 system/user 消息、发送工具定义、接收模型 `tool_calls`、调度注册表执行工具、把 tool result 回传模型、聚合 usage，并在工具预算耗尽后强制模型输出最终 JSON。
+- 每轮工具调用有独立超时；未知工具、参数错误和工具执行错误会作为 tool result 回传给模型，避免一次工具选择错误直接导致任务失败。
+- 输入：任务上下文（仓库、PR、commit）。Day 2 开始接入真实工具。
 - Agent 执行多步推理：
   1. 调 `get_pr_meta` 了解 PR 标题、描述、改动文件列表。
   2. 调 `read_diff` 读取完整 diff。
@@ -142,7 +144,7 @@ MySQL (任务/结果/审计) + Redis (锁 / API 限流)
   5. 必要时调 `run_static_checks` 获取编译、测试或静态分析结果。
   6. 必要时调 `get_commit_history` 理解修改动机。
   7. 输出结构化审查意见。
-- 每一步工具调用记录到审计表。
+- 每一步工具调用记录到 `tool_call_log`。
 
 ### 4.5 工具注册
 
@@ -150,11 +152,12 @@ MySQL (任务/结果/审计) + Redis (锁 / API 限流)
 ```go
 type Tool interface {
     Name() string
-    Schema() jsonschema.Schema
+    Description() string
+    Schema() map[string]any
     Execute(ctx context.Context, input map[string]any) (string, error)
 }
 ```
-工具注册表 `ToolRegistry`，Agent 根据模型返回的 tool_call 调度。每个工具定义 JSON Schema，供 LLM function calling 使用。
+工具注册表 `Registry` 负责校验工具名、描述和 JSON Schema，避免重复注册，并输出稳定的工具定义列表。Agent 根据模型返回的 tool_call 调度。DeepSeek Provider 使用 OpenAI 兼容的 tools / tool_calls / tool 消息格式。
 
 ### 4.6 上下文裁剪
 
@@ -245,7 +248,7 @@ MySQL 表：
 - `review_task`：id, repo, pr_number, commit_sha, status, attempt_count, max_attempts, next_retry_at, created_at, updated_at, error。
 - `review_result`：id, task_id, summary, payload_json, raw_response, model, input_tokens, output_tokens, total_tokens, llm_duration_ms, created_at；`task_id` 唯一并外键关联 `review_task(id)`。
 - `schema_migrations`：version, name, applied_at，记录已执行的数据库 migration。
-- `tool_call_log`：id, task_id, tool_name, input_json, output_json, tokens, duration_ms, created_at。
+- `tool_call_log`：id, task_id, tool_name, input_json, output_json, status, error, duration_ms, created_at；`task_id` 外键关联 `review_task(id)`。
 - `audit_log`：id, task_id, action, old_status, new_status, detail_json, created_at；`task_id` 外键关联 `review_task(id)`。
 
 数据库结构通过 `internal/store/migrations/*.up.sql` 管理，服务启动时自动执行；也可以通过 `go run ./cmd/migrate status` 和 `go run ./cmd/migrate up` 手动查看和执行。
@@ -254,6 +257,7 @@ MySQL 表：
 
 - `0001_init.up.sql`：`review_task`、`review_result`、基础索引和外键。
 - `0002_audit_log.up.sql`：`audit_log`、任务索引、action 索引和外键。
+- `0003_tool_call_log.up.sql`：`tool_call_log`、任务索引、工具名索引和外键。
 
 死信管理接口：
 - `GET /dead-letters`：按仓库、PR、limit 查询死信任务。
@@ -262,6 +266,7 @@ MySQL 表：
 审计与观测接口：
 - `GET /audit-logs`：按 task_id、action、limit 查询任务审计轨迹。
 - `GET /stats`：按 repo 聚合任务状态、成功率、重试事件、耗时、findings 和 token 用量。
+- `GET /tasks/:id/tool-calls`：按任务查询 Agent 工具调用轨迹、输入输出和耗时。
 
 审计 action：
 - `task_created`：Webhook 首次创建任务。
