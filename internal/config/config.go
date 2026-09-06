@@ -3,24 +3,47 @@ package config
 import (
 	"os"
 	"strconv"
+	"time"
 )
 
 type Config struct {
-	Port                     string
-	GitHubWebhookSecret      string
-	GitHubToken              string
-	GitHubAppID              string
-	GitHubAppPrivateKey      string
-	GitHubAppPrivateKeyPath  string
-	GitHubInstallationID     string
-	DeepSeekAPIKey           string
-	DeepSeekBaseURL          string
-	DeepSeekModel            string
-	MaxDiffLines             int
+	AppEnv                  string
+	Port                    string
+	GitHubWebhookSecret     string
+	GitHubToken             string
+	GitHubAppID             string
+	GitHubAppPrivateKey     string
+	GitHubAppPrivateKeyPath string
+	GitHubInstallationID    string
+	DeepSeekAPIKey          string
+	DeepSeekBaseURL         string
+	DeepSeekModel           string
+	MaxDiffLines            int
+	MaxFileContexts         int
+	MaxFileContextLines     int
+	MySQLDSN                string
+	AdminToken              string
+	RabbitMQURL             string
+	ReviewQueue             string
+	ReviewRetryQueue        string
+	ReviewDeadLetterQueue   string
+	ReviewWorkers           int
+	ReviewMaxAttempts       int
+	ReviewRetryBaseDelay    time.Duration
+	ReviewRetryMaxDelay     time.Duration
+	ReviewRetryJitter       time.Duration
+	RedisURL                string
+	ReviewLockTTL           time.Duration
+	ReviewLockRetryDelay    time.Duration
+	GitHubAPIRateLimit      int
+	GitHubAPIRateWindow     time.Duration
+	LLMRateLimit            int
+	LLMRateWindow           time.Duration
 }
 
 func Load() *Config {
 	return &Config{
+		AppEnv:                  getEnv("APP_ENV", "local"),
 		Port:                    getEnv("PORT", "8080"),
 		GitHubWebhookSecret:     getEnv("GITHUB_WEBHOOK_SECRET", ""),
 		GitHubToken:             getEnv("GITHUB_TOKEN", ""),
@@ -32,6 +55,26 @@ func Load() *Config {
 		DeepSeekBaseURL:         getEnv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
 		DeepSeekModel:           getEnv("DEEPSEEK_MODEL", "deepseek-chat"),
 		MaxDiffLines:            getEnvInt("MAX_DIFF_LINES", 2000),
+		MaxFileContexts:         getEnvInt("MAX_FILE_CONTEXTS", 10),
+		MaxFileContextLines:     getEnvInt("MAX_FILE_CONTEXT_LINES", 200),
+		MySQLDSN:                getEnv("MYSQL_DSN", ""),
+		AdminToken:              getEnv("ADMIN_TOKEN", ""),
+		RabbitMQURL:             os.Getenv("RABBITMQ_URL"),
+		ReviewQueue:             getEnv("REVIEW_QUEUE", "pr.review.queue"),
+		ReviewRetryQueue:        getEnv("REVIEW_RETRY_QUEUE", "pr.review.retry.queue"),
+		ReviewDeadLetterQueue:   getEnv("REVIEW_DEAD_LETTER_QUEUE", "pr.review.dead_letter.queue"),
+		ReviewWorkers:           getEnvInt("REVIEW_WORKERS", 4),
+		ReviewMaxAttempts:       getEnvInt("REVIEW_MAX_ATTEMPTS", 3),
+		ReviewRetryBaseDelay:    getEnvDuration("REVIEW_RETRY_BASE_DELAY", 30*time.Second),
+		ReviewRetryMaxDelay:     getEnvDuration("REVIEW_RETRY_MAX_DELAY", 10*time.Minute),
+		ReviewRetryJitter:       getEnvDurationAllowZero("REVIEW_RETRY_JITTER", 5*time.Second),
+		RedisURL:                os.Getenv("REDIS_URL"),
+		ReviewLockTTL:           getEnvDuration("REVIEW_LOCK_TTL", 7*time.Minute),
+		ReviewLockRetryDelay:    getEnvDuration("REVIEW_LOCK_RETRY_DELAY", 2*time.Second),
+		GitHubAPIRateLimit:      getEnvInt("GITHUB_API_RATE_LIMIT", 120),
+		GitHubAPIRateWindow:     getEnvDuration("GITHUB_API_RATE_WINDOW", time.Minute),
+		LLMRateLimit:            getEnvInt("LLM_RATE_LIMIT", 6),
+		LLMRateWindow:           getEnvDuration("LLM_RATE_WINDOW", time.Minute),
 	}
 }
 
@@ -49,4 +92,25 @@ func getEnvInt(key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+func getEnvDuration(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return fallback
+}
+
+func getEnvDurationAllowZero(key string, fallback time.Duration) time.Duration {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil || d < 0 {
+		return fallback
+	}
+	return d
 }
