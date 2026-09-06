@@ -163,6 +163,65 @@ func TestFileContextToolCapsRangeAndNumbersLines(t *testing.T) {
 	}
 }
 
+func TestFileContextToolInfersChangedLinesAndUsesTreeSitter(t *testing.T) {
+	client := newFakeClient()
+	client.files = []github.PullRequestFile{{
+		Filename: "internal/auth/auth.go",
+		Status:   "modified",
+		Patch:    "@@ -0,0 +3,3 @@\n+func Validate() error {\n+\treturn nil\n+}",
+	}}
+	client.fileContents = map[string]string{
+		"internal/auth/auth.go": `package auth
+
+func Validate() error {
+	return nil
+}
+
+func Other() {}
+`,
+	}
+	toolkit := NewToolkit(client, "owner", "repo", 12, Options{MaxFileContextLines: 20})
+
+	output, err := toolByName(t, toolkit, "read_file_context").Execute(context.Background(), map[string]any{
+		"path": "internal/auth/auth.go",
+	})
+	if err != nil {
+		t.Fatalf("read_file_context: %v", err)
+	}
+
+	var result struct {
+		ContextMode string `json:"context_mode"`
+		Language    string `json:"language"`
+		Content     string `json:"content"`
+		Symbols     []struct {
+			Name string `json:"name"`
+		} `json:"symbols"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+	if result.ContextMode != "tree_sitter" || result.Language != "go" {
+		t.Fatalf("unexpected context mode: %+v", result)
+	}
+	if len(result.Symbols) != 1 || result.Symbols[0].Name != "Validate" {
+		t.Fatalf("unexpected symbols: %+v", result.Symbols)
+	}
+	if !strings.Contains(result.Content, "func Validate") || strings.Contains(result.Content, "func Other") {
+		t.Fatalf("unexpected context: %s", result.Content)
+	}
+}
+
+func TestChangedLinesForPathParsesUnifiedDiff(t *testing.T) {
+	files := []github.PullRequestFile{{
+		Filename: "service.py",
+		Patch:    "@@ -2,3 +3,4 @@ context\n unchanged\n-old\n+new\n+added\n context",
+	}}
+
+	if got := changedLinesForPath(files, "service.py"); len(got) != 2 || got[0] != 4 || got[1] != 5 {
+		t.Fatalf("changed lines = %v, want [4 5]", got)
+	}
+}
+
 func TestDiffToolFiltersAndBoundsFullDiff(t *testing.T) {
 	client := newFakeClient()
 	toolkit := NewToolkit(client, "owner", "repo", 12, Options{MaxDiffLines: 2})

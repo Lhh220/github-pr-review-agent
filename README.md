@@ -35,10 +35,11 @@ MVP 已经跑通并部署到 Railway：
 - 提供轻量开发者后台 `/admin`，可视化任务、审查结果、Agent 工具调用轨迹、审计日志和死信管理
 - 阶段三 Day 1 已完成 Agent 基础框架：Tool 接口、工具注册表、Agent Loop、DeepSeek tool calls、`tool_call_log` 和 `/tasks/:id/tool-calls`
 - 阶段三 Day 2 已接入真实 GitHub 工具：`get_pr_meta`、`list_changed_files`、`read_diff`、`read_file_context`、`get_commit_history`
+- 阶段三 Day 3 已接入 tree-sitter：`read_file_context` 支持 Go / Python / JavaScript 函数级上下文，其他文件回退到有界行范围
 - 关键状态变更与审查结果创建会同步写入 `audit_log`，任务数据和审计数据保持同一事务
 - MySQL 结构通过版本化 migration 管理，服务启动自动执行，也提供 `cmd/migrate` CLI
 
-Day 5 的审计表和观测统计已完成本地与线上验收，阶段二收官。阶段三 Day 1 的 Agent 框架与 Day 2 的 5 个 GitHub 工具已完成本地验收；线上默认仍是 `AGENT_MODE=legacy`，把 Railway 变量改成 `AGENT_MODE=tool_calling` 后即可启用 Agent 审查链路。
+Day 5 的审计表和观测统计已完成本地与线上验收，阶段二收官。阶段三 Day 1 的 Agent 框架、Day 2 的 5 个 GitHub 工具、Day 3 的 tree-sitter 上下文裁剪已完成本地验收；线上默认仍是 `AGENT_MODE=legacy`，把 Railway 变量改成 `AGENT_MODE=tool_calling` 后即可启用 Agent 审查链路。
 
 当前线上示例：
 
@@ -240,6 +241,13 @@ $env:REDIS_URL="redis://127.0.0.1:6379/0"
 ngrok 只用于本地调试；线上部署使用 Railway 的公网 HTTPS 地址，不需要 ngrok。
 
 ## 测试
+
+tree-sitter 官方 Go binding 依赖 CGO。Linux/macOS 通常可直接运行；Windows 本地如默认禁用 CGO，需要先启用并指定可用的 C 编译器：
+
+```powershell
+$env:CGO_ENABLED="1"
+$env:CC="<gcc 路径>"
+```
 
 ```powershell
 go test ./...
@@ -469,7 +477,7 @@ Day 5 线上验收步骤：
 - 无法确认被删除的字段、函数、类型是否仍被其他文件引用
 - 无法验证 PR 是否能通过编译、测试或静态检查
 
-代码库已经具备 Tool Calling 基础框架、5 个 GitHub 工具和工具调用日志；线上启用 `AGENT_MODE=tool_calling` 后，模型可以多轮读取 PR 信息、diff、指定文件上下文和提交历史。tree-sitter、跨文件引用检索和静态检查仍在后续阶段。
+代码库已经具备 Tool Calling 基础框架、5 个 GitHub 工具和工具调用日志；线上启用 `AGENT_MODE=tool_calling` 后，模型可以多轮读取 PR 信息、diff、指定文件上下文和提交历史。`read_file_context` 会从 diff 推断变更行，并用 tree-sitter 提取 Go / Python / JavaScript 的函数、方法或类上下文；TypeScript、Java 等其他语言暂回退到有界行范围。跨文件引用检索和静态检查仍在后续阶段。
 
 下一阶段计划升级为 **code-aware agent**，增加：
 
@@ -481,8 +489,8 @@ Day 5 线上验收步骤：
 
 ## 后续计划
 
-- GitHub 工具接入 Agent 链路
-- tree-sitter 上下文裁剪
+- search_references 跨文件引用检索
+- run_static_checks 静态检查沙箱
 - 评测集和误报率统计
 
 开发节奏见 [docs/roadmap.md](docs/roadmap.md)。

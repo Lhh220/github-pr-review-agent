@@ -14,7 +14,7 @@
 
 ## 3. 整体架构
 
-当前实现已接入 RabbitMQ 延迟重试、死信队列、Worker Pool、Redis PR 级分布式锁、外部 API 限流、阶段三 Day 1 的 Tool Calling 基础框架，以及 Day 2 的 5 个真实 GitHub 工具。默认链路仍是 `AGENT_MODE=legacy` 固定上下文审查；设置 `AGENT_MODE=tool_calling` 后启用 Agent 链路。tree-sitter、跨文件引用检索和静态检查沙箱还未实现。
+当前实现已接入 RabbitMQ 延迟重试、死信队列、Worker Pool、Redis PR 级分布式锁、外部 API 限流、阶段三 Day 1 的 Tool Calling 基础框架、Day 2 的 5 个真实 GitHub 工具，以及 Day 3 的 tree-sitter 函数级上下文裁剪。默认链路仍是 `AGENT_MODE=legacy` 固定上下文审查；设置 `AGENT_MODE=tool_calling` 后启用 Agent 链路。跨文件引用检索和静态检查沙箱还未实现。
 
 ```text
 GitHub PR Event
@@ -44,7 +44,7 @@ MySQL review_task + review_result
 GitHub PR Review API
 ```
 
-下图是 `AGENT_MODE=tool_calling` 的当前 Agent 架构；`search_references`、tree-sitter 和静态检查仍是后续增强：
+下图是 `AGENT_MODE=tool_calling` 的当前 Agent 架构；`read_file_context` 内部使用 tree-sitter 做上下文裁剪，`search_references` 和静态检查仍是后续增强：
 
 ```text
 GitHub PR Event
@@ -64,11 +64,9 @@ Agent Loop
    |-- Tool: list_changed_files
    |-- Tool: read_diff
    |-- Tool: read_file_context
-   |-- Tool: search_references
-   |-- Tool: run_static_checks
    |-- Tool: get_commit_history
+   |  read_file_context -> tree-sitter / line fallback
    v
-Context Builder (tree-sitter 裁剪)
    |
    v
 LLM Provider (Tool Calling, 结构化输出)
@@ -140,11 +138,10 @@ MySQL (任务/结果/审计) + Redis (锁 / API 限流)
 - Agent 执行多步推理：
   1. 调 `get_pr_meta` 了解 PR 标题、描述、改动文件列表。
   2. 调 `read_diff` 读取完整 diff。
-  3. 对关注文件调 `read_file_context`，用 tree-sitter 取函数级上下文。
-  4. 对被删除或改名的字段、函数、类型，调 `search_references` 确认是否仍有引用。
-  5. 必要时调 `run_static_checks` 获取编译、测试或静态分析结果。
-  6. 必要时调 `get_commit_history` 理解修改动机。
-  7. 输出结构化审查意见。
+  3. 对关注文件调 `read_file_context`，取函数、方法或类级上下文。
+  4. 必要时调 `get_commit_history` 理解修改动机。
+  5. 输出结构化审查意见。
+  6. `search_references` 和 `run_static_checks` 是后续增强，当前还未注册为工具。
 - 每一步工具调用记录到 `tool_call_log`。
 
 ### 4.5 工具注册
@@ -164,12 +161,13 @@ Day 2 的 GitHub Toolkit 绑定当前任务的 owner / repo / PR number，模型
 
 ### 4.6 上下文裁剪
 
-- diff 可能很大，不能全塞给 LLM。
-- 策略：
-  - 按文件优先级排序：源码 > 配置 > 文档。
-  - 每个文件只取变更点附近函数级上下文，用 tree-sitter 解析 AST。
-  - 设置 token 预算，超出则降级为只看 diff。
-- 目标：控制单次审查 token 成本，避免超长导致质量下降。
+`read_file_context` 当前的裁剪流程如下：
+
+1. 从当前 PR 的 unified diff 中解析指定文件的新增行号；模型只传 `path` 时也能自动定位变更区域。
+2. 用 tree-sitter 解析文件 AST，根据目标行找到所在或最相关的函数、方法、类或类型声明；Go / Python / JavaScript 已支持。命中嵌套符号时优先保留内层函数或方法，最多返回 8 个符号。
+3. 不支持的语言、解析失败或找不到符号时，回退到围绕目标行的 bounded line range。
+
+工具输出包含 `context_mode`（`tree_sitter` / `line_fallback`）、`language`、`symbols`、带行号的 `content`、截断标记和最终行范围。所有片段继续受 `MAX_FILE_CONTEXT_LINES` 与工具输出字符上限约束，避免超长上下文抬高 token 成本。
 
 ### 4.7 当前能力边界与增强方向
 
@@ -178,7 +176,7 @@ Day 2 的 GitHub Toolkit 绑定当前任务的 owner / repo / PR number，模型
 - PR 无变更文件时短路处理，直接回固定评论，不调用 LLM。
 - 把 PR diff 交给 LLM。
 - 额外读取部分变更文件的完整内容，并按行数裁剪后一起送给 LLM。
-- `AGENT_MODE=tool_calling` 已能按需读取当前仓库指定文件上下文，但还没有符号级引用检索。
+- `AGENT_MODE=tool_calling` 已能按需读取当前仓库指定文件上下文；Go / Python / JavaScript 支持函数级 tree-sitter 裁剪，但还没有跨文件符号引用检索。
 - 无法确认被删除的字段、函数、类型是否仍被其他文件引用。
 - 无法验证 PR 是否能通过编译、测试或静态检查。
 

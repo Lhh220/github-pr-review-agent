@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/liaohonghui/github-pr-review-agent/internal/agent"
+	"github.com/liaohonghui/github-pr-review-agent/internal/codecontext"
 	"github.com/liaohonghui/github-pr-review-agent/internal/github"
 )
 
@@ -227,7 +229,7 @@ type fileContextTool struct {
 func (fileContextTool) Name() string { return "read_file_context" }
 
 func (fileContextTool) Description() string {
-	return "Read a bounded line range from a file in the current repository at the pull request head commit."
+	return "Read function or class context around a target line in a file. For Go, Python, and JavaScript it uses tree-sitter; other files fall back to a bounded line range."
 }
 
 func (fileContextTool) Schema() map[string]any {
@@ -238,12 +240,12 @@ func (fileContextTool) Schema() map[string]any {
 			"start_line": map[string]any{
 				"type":        "integer",
 				"minimum":     1,
-				"description": "One-based starting line. Defaults to 1.",
+				"description": "Optional one-based starting line. When line numbers are omitted, changed lines from the pull request diff are used.",
 			},
 			"end_line": map[string]any{
 				"type":        "integer",
 				"minimum":     1,
-				"description": "One-based inclusive ending line. The server caps the requested range.",
+				"description": "Optional one-based inclusive ending line. The server caps the requested range.",
 			},
 		},
 		"required":             []string{"path"},
@@ -267,36 +269,73 @@ func (t fileContextTool) Execute(ctx context.Context, input map[string]any) (str
 		return "", fmt.Errorf("get file content: %w", err)
 	}
 
-	startLine, err := optionalInt(input, "start_line", 1)
+	startLine, err := optionalInt(input, "start_line", 0)
 	if err != nil {
 		return "", fmt.Errorf("decode start_line: %w", err)
 	}
-	if startLine < 1 {
-		return "", fmt.Errorf("start_line must be at least 1")
-	}
-	defaultEnd := startLine + t.toolkit.maxFileContextLines - 1
-	endLine, err := optionalInt(input, "end_line", defaultEnd)
+	endLine, err := optionalInt(input, "end_line", 0)
 	if err != nil {
 		return "", fmt.Errorf("decode end_line: %w", err)
 	}
-	if endLine < startLine {
-		return "", fmt.Errorf("end_line must be greater than or equal to start_line")
-	}
 	rangeCapped := false
-	if endLine-startLine+1 > t.toolkit.maxFileContextLines {
-		endLine = startLine + t.toolkit.maxFileContextLines - 1
-		rangeCapped = true
+
+	var targetLines []int
+	_, hasStart := input["start_line"]
+	_, hasEnd := input["end_line"]
+	if !hasStart && !hasEnd {
+		files, listErr := t.toolkit.files(ctx)
+		if listErr != nil {
+			return "", listErr
+		}
+		targetLines = changedLinesForPath(files, path)
+		if len(targetLines) == 0 {
+			targetLines = []int{1}
+		}
+		startLine, endLine = targetLines[0], targetLines[len(targetLines)-1]
+		if endLine-startLine+1 > t.toolkit.maxFileContextLines {
+			endLine = startLine + t.toolkit.maxFileContextLines - 1
+			rangeCapped = true
+			targetLines = expandLineRange(startLine, endLine)
+		}
+	} else {
+		if hasStart && startLine < 1 {
+			return "", fmt.Errorf("start_line must be at least 1")
+		}
+		if hasEnd && endLine < 1 {
+			return "", fmt.Errorf("end_line must be at least 1")
+		}
+		if startLine == 0 {
+			startLine = 1
+		}
+		if endLine == 0 {
+			endLine = startLine + t.toolkit.maxFileContextLines - 1
+		}
+		if endLine < startLine {
+			return "", fmt.Errorf("end_line must be greater than or equal to start_line")
+		}
+		if endLine-startLine+1 > t.toolkit.maxFileContextLines {
+			endLine = startLine + t.toolkit.maxFileContextLines - 1
+			rangeCapped = true
+		}
+		targetLines = expandLineRange(startLine, endLine)
 	}
 
 	lines := splitLines(content)
-	selected := make([]string, 0, t.toolkit.maxFileContextLines)
-	for lineNumber := startLine; lineNumber <= endLine && lineNumber <= len(lines); lineNumber++ {
-		selected = append(selected, fmt.Sprintf("%d: %s", lineNumber, lines[lineNumber-1]))
+	contextResult := codecontext.Extract(codecontext.Request{
+		Path:        path,
+		Content:     content,
+		TargetLines: targetLines,
+		MaxLines:    t.toolkit.maxFileContextLines,
+	})
+	context, contextTruncated := clampString(contextResult.Content, maxToolOutputChars)
+	if contextResult.Strategy == "tree_sitter" && len(contextResult.Symbols) > 0 {
+		startLine = contextResult.Symbols[0].SnippetStart
+		endLine = contextResult.Symbols[len(contextResult.Symbols)-1].SnippetEnd
 	}
-	context, contextTruncated := clampString(strings.Join(selected, "\n"), maxToolOutputChars)
-	if len(selected) == 0 {
+	if strings.TrimSpace(contextResult.Content) == "" {
 		context = fmt.Sprintf("The file has %d lines; requested start_line %d is beyond the end.", len(lines), startLine)
 	}
+
 	return encodeJSON(map[string]any{
 		"path":              path,
 		"ref":               pr.Head.SHA,
@@ -304,9 +343,71 @@ func (t fileContextTool) Execute(ctx context.Context, input map[string]any) (str
 		"end_line":          min(endLine, len(lines)),
 		"total_lines":       len(lines),
 		"range_capped":      rangeCapped,
+		"context_mode":      contextResult.Strategy,
+		"language":          contextResult.Language,
+		"symbols":           contextResult.Symbols,
 		"content_truncated": contextTruncated,
 		"content":           context,
 	})
+}
+
+func changedLinesForPath(files []github.PullRequestFile, path string) []int {
+	for _, file := range files {
+		if file.Filename != path || strings.TrimSpace(file.Patch) == "" {
+			continue
+		}
+
+		changed := make([]int, 0)
+		newLineNumber := 0
+		for _, line := range strings.Split(file.Patch, "\n") {
+			switch {
+			case strings.HasPrefix(line, "@@"):
+				newLineNumber = parseNewHunkStart(line)
+			case strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"):
+				continue
+			case strings.HasPrefix(line, "+"):
+				if newLineNumber > 0 {
+					changed = append(changed, newLineNumber)
+				}
+				newLineNumber++
+			case strings.HasPrefix(line, "-"):
+				continue
+			case strings.HasPrefix(line, "\\"):
+				continue
+			default:
+				newLineNumber++
+			}
+		}
+		return changed
+	}
+	return nil
+}
+
+func parseNewHunkStart(header string) int {
+	plusIndex := strings.Index(header, "+")
+	if plusIndex < 0 {
+		return 0
+	}
+	value := header[plusIndex+1:]
+	if commaIndex := strings.IndexAny(value, ", "); commaIndex >= 0 {
+		value = value[:commaIndex]
+	}
+	number, err := strconv.Atoi(value)
+	if err != nil || number <= 0 {
+		return 0
+	}
+	return number
+}
+
+func expandLineRange(start, end int) []int {
+	if start <= 0 || end < start {
+		return nil
+	}
+	lines := make([]int, 0, end-start+1)
+	for lineNumber := start; lineNumber <= end; lineNumber++ {
+		lines = append(lines, lineNumber)
+	}
+	return lines
 }
 
 type commitHistoryTool struct {
