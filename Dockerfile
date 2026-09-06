@@ -16,9 +16,9 @@ RUN apk add --no-cache ca-certificates tzdata \
     && addgroup -S app \
     && adduser -S app -G app
 
-COPY --from=builder /out/app /usr/local/bin/app
+COPY --from=builder /out/app /app
 
 USER app
 EXPOSE 8080
 
-ENTRYPOINT ["app"]
+ENTRYPOINT ["/app"]
