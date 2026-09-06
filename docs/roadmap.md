@@ -47,14 +47,15 @@
 目标：Agent 面试能讲。
 
 任务：
-- Tool Calling 框架 + 工具注册
-- 实现 get_pr_meta / list_changed_files / read_diff / read_file_context / get_commit_history
-- 新增 search_references，检索被删除或改名符号的跨文件引用
-- 新增 run_static_checks，执行 go test / go vet 并回传结果
-- tree-sitter 函数级上下文裁剪
-- 结构化输出：bug/performance/style/security
-- 结论分级：confirmed / needs_verification
-- 基础评测集 + 准确率/误报率统计
+- [x] Day 1：Tool Calling 框架、工具注册、Agent Loop、DeepSeek tool calls、tool_call_log、`/tasks/:id/tool-calls`
+- [x] Day 2：实现 get_pr_meta / list_changed_files / read_diff / read_file_context / get_commit_history（本地完成，待线上 tool_calling 验收）
+- [x] Day 2.5：轻量开发者后台 `/admin`，可视化任务、审查结果、工具调用、审计和死信管理
+- [x] Day 3：tree-sitter 函数级上下文裁剪（本地完成，待线上部署验收）
+- [ ] Day 4：search_references，检索被删除或改名符号的跨文件引用
+- [ ] Day 5：run_static_checks，执行 go test / go vet 并回传结果
+- [ ] Day 6：结构化输出与 confirmed / needs_verification 分级
+- [ ] Day 7：基础评测集 + 准确率/误报率统计
+- [ ] Day 8：线上验收、文档和简历收尾
 
 验收：
 - Agent 能多步调工具

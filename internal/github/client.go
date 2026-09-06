@@ -95,6 +95,21 @@ type PullRequestFile struct {
 	Patch     string `json:"patch"`
 }
 
+type PullRequestCommit struct {
+	SHA    string       `json:"sha"`
+	Commit CommitDetail `json:"commit"`
+}
+
+type CommitDetail struct {
+	Message string       `json:"message"`
+	Author  CommitAuthor `json:"author"`
+}
+
+type CommitAuthor struct {
+	Name string    `json:"name"`
+	Date time.Time `json:"date"`
+}
+
 type FileContent struct {
 	Path    string
 	Content string
@@ -180,6 +195,24 @@ func (c *Client) GetPullRequestFiles(ctx context.Context, owner, repo string, nu
 		}
 	}
 	return files, nil
+}
+
+func (c *Client) GetPullRequestCommits(ctx context.Context, owner, repo string, number, limit int) ([]PullRequestCommit, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	var commits []PullRequestCommit
+	path := fmt.Sprintf(
+		"/repos/%s/%s/pulls/%d/commits?per_page=%d",
+		owner, repo, number, limit,
+	)
+	if err := c.do(ctx, http.MethodGet, path, nil, &commits); err != nil {
+		return nil, err
+	}
+	return commits, nil
 }
 
 func (c *Client) GetFileContent(ctx context.Context, owner, repo, path, ref string) (string, error) {

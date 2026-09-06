@@ -153,6 +153,7 @@ type captureConsumer struct {
 	retries     []retryPublish
 	deadLetters []deadLetterPublish
 	publishErr  error
+	retryErr    error
 }
 
 type fakeLock struct {
@@ -226,6 +227,9 @@ func (c *captureConsumer) Publish(ctx context.Context, taskID uint64) error {
 }
 
 func (c *captureConsumer) PublishRetry(ctx context.Context, taskID uint64, attempt int, delay time.Duration) error {
+	if c.retryErr != nil {
+		return c.retryErr
+	}
 	c.retries = append(c.retries, retryPublish{TaskID: taskID, Attempt: attempt, Delay: delay})
 	return nil
 }
@@ -321,6 +325,45 @@ func TestProcessReleasesPRLockAfterReview(t *testing.T) {
 	}
 	if released := locker.recordedReleased(); len(released) != 1 || released[0] != "review:pr:owner/repo:12" {
 		t.Fatalf("unexpected lock releases: %v", released)
+	}
+}
+
+func TestProcessDefersEarlyRetryUntilNextRetryTime(t *testing.T) {
+	task := newWorkerTestTask("retrying")
+	task.AttemptCount = 1
+	nextRetryAt := time.Now().Add(17 * time.Second)
+	task.NextRetryAt = &nextRetryAt
+	taskStore := &fakeTaskGetter{task: task}
+	client := &captureConsumer{}
+	w := New(taskStore, &fakeReviewer{}, client, 1, Options{})
+
+	action := w.process(queue.Message{TaskID: task.ID, Attempt: 1})
+
+	if action != queue.Ack {
+		t.Fatalf("action = %d, want %d", queue.Ack, action)
+	}
+	if got := taskStore.recordedStatuses(); len(got) != 0 {
+		t.Fatalf("early retry was claimed: statuses=%v", got)
+	}
+	if len(client.retries) != 1 || client.retries[0].TaskID != task.ID ||
+		client.retries[0].Attempt != 1 || client.retries[0].Delay <= 0 ||
+		client.retries[0].Delay > 17*time.Second {
+		t.Fatalf("unexpected deferred retry: %+v", client.retries)
+	}
+}
+
+func TestProcessRequeuesEarlyRetryWhenPublishFails(t *testing.T) {
+	task := newWorkerTestTask("retrying")
+	nextRetryAt := time.Now().Add(5 * time.Second)
+	task.NextRetryAt = &nextRetryAt
+	taskStore := &fakeTaskGetter{task: task}
+	client := &captureConsumer{retryErr: errors.New("rabbit unavailable")}
+	w := New(taskStore, &fakeReviewer{}, client, 1, Options{})
+
+	action := w.process(queue.Message{TaskID: task.ID, Attempt: 1})
+
+	if action != queue.NackRequeue {
+		t.Fatalf("action = %d, want %d", queue.NackRequeue, action)
 	}
 }
 

@@ -39,6 +39,10 @@ type Config struct {
 	GitHubAPIRateWindow     time.Duration
 	LLMRateLimit            int
 	LLMRateWindow           time.Duration
+	AgentMode               string
+	AgentMaxSteps           int
+	AgentToolTimeout        time.Duration
+	AgentMaxCommitHistory   int
 }
 
 func Load() *Config {
@@ -75,6 +79,10 @@ func Load() *Config {
 		GitHubAPIRateWindow:     getEnvDuration("GITHUB_API_RATE_WINDOW", time.Minute),
 		LLMRateLimit:            getEnvInt("LLM_RATE_LIMIT", 6),
 		LLMRateWindow:           getEnvDuration("LLM_RATE_WINDOW", time.Minute),
+		AgentMode:               getEnv("AGENT_MODE", "legacy"),
+		AgentMaxSteps:           getEnvInt("AGENT_MAX_STEPS", 8),
+		AgentToolTimeout:        getEnvDuration("AGENT_TOOL_TIMEOUT", 20*time.Second),
+		AgentMaxCommitHistory:   getEnvInt("AGENT_MAX_COMMIT_HISTORY", 20),
 	}
 }
 

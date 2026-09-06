@@ -14,7 +14,7 @@
 
 ## 3. 整体架构
 
-当前实现已接入 RabbitMQ 延迟重试、死信队列、Worker Pool、Redis PR 级分布式锁和外部 API 限流；还没有接入 Tool Calling、tree-sitter 和静态检查沙箱。当前实际链路是：
+当前实现已接入 RabbitMQ 延迟重试、死信队列、Worker Pool、Redis PR 级分布式锁、外部 API 限流、阶段三 Day 1 的 Tool Calling 基础框架、Day 2 的 5 个真实 GitHub 工具，以及 Day 3 的 tree-sitter 函数级上下文裁剪。默认链路仍是 `AGENT_MODE=legacy` 固定上下文审查；设置 `AGENT_MODE=tool_calling` 后启用 Agent 链路。跨文件引用检索和静态检查沙箱还未实现。
 
 ```text
 GitHub PR Event
@@ -44,7 +44,7 @@ MySQL review_task + review_result
 GitHub PR Review API
 ```
 
-下图是后续目标架构，Tool Calling 和静态检查沙箱还未实现：
+下图是 `AGENT_MODE=tool_calling` 的当前 Agent 架构；`read_file_context` 内部使用 tree-sitter 做上下文裁剪，`search_references` 和静态检查仍是后续增强：
 
 ```text
 GitHub PR Event
@@ -64,11 +64,9 @@ Agent Loop
    |-- Tool: list_changed_files
    |-- Tool: read_diff
    |-- Tool: read_file_context
-   |-- Tool: search_references
-   |-- Tool: run_static_checks
    |-- Tool: get_commit_history
+   |  read_file_context -> tree-sitter / line fallback
    v
-Context Builder (tree-sitter 裁剪)
    |
    v
 LLM Provider (Tool Calling, 结构化输出)
@@ -116,7 +114,8 @@ MySQL (任务/结果/审计) + Redis (锁 / API 限流)
 - 成功后更新为 `done`；可重试失败更新为 `retrying`；达到最大次数后更新为 `dead_letter`。
 - `next_retry_at` 未到期的重复消息直接 ack，避免提前执行。
 - 后台恢复循环每 30 秒扫描超过 6 分钟仍是 `running` 的任务，重新进入延迟重试链路，避免进程崩溃后任务卡死。
-- 后台恢复循环同时扫描超过 60 秒仍是 `queued` 的任务，重新投递到主队列；重复消息由原子 claim 和状态机兜底，不会重复审查。
+- 后台恢复循环同时扫描超过 60 秒仍是 `received` 或 `queued` 的任务，重新投递到主队列；这能覆盖“任务已落库但状态更新/发布前进程退出”的窗口，重复消息由原子 claim 和状态机兜底，不会重复审查。
+- 如果 `retrying` 消息因时钟偏差等原因早于 `next_retry_at` 到达主队列，Worker 会按剩余等待时间重新写入延迟队列，而不是直接 Ack 丢掉队列载体。
 - Worker 在原子 claim 之前先获取 Redis 分布式锁 `lock:review:pr:{repo}:{number}`，避免同一个 PR 的不同 task 被并发审查。
 - 锁使用 `SET NX EX` 和随机 token；释放时通过 Lua 比较 token 后删除，避免误删其他 Worker 的锁。
 - 锁默认 TTL 7 分钟，大于单次 review 超时 5 分钟；进程崩溃后锁自动过期，配合 running 超时恢复避免死锁。
@@ -133,16 +132,17 @@ MySQL (任务/结果/审计) + Redis (锁 / API 限流)
 
 ### 4.4 Agent Loop
 
-- 输入：任务上下文（仓库、PR、commit）。
+- Day 1 已实现基础 Agent Loop：构造 system/user 消息、发送工具定义、接收模型 `tool_calls`、调度注册表执行工具、把 tool result 回传模型、聚合 usage，并在工具预算耗尽后强制模型输出最终 JSON。
+- 每轮工具调用有独立超时；未知工具、参数错误和工具执行错误会作为 tool result 回传给模型，避免一次工具选择错误直接导致任务失败。
+- Day 2 已接入 5 个只读 GitHub 工具：`get_pr_meta`、`list_changed_files`、`read_diff`、`read_file_context`、`get_commit_history`。
 - Agent 执行多步推理：
   1. 调 `get_pr_meta` 了解 PR 标题、描述、改动文件列表。
   2. 调 `read_diff` 读取完整 diff。
-  3. 对关注文件调 `read_file_context`，用 tree-sitter 取函数级上下文。
-  4. 对被删除或改名的字段、函数、类型，调 `search_references` 确认是否仍有引用。
-  5. 必要时调 `run_static_checks` 获取编译、测试或静态分析结果。
-  6. 必要时调 `get_commit_history` 理解修改动机。
-  7. 输出结构化审查意见。
-- 每一步工具调用记录到审计表。
+  3. 对关注文件调 `read_file_context`，取函数、方法或类级上下文。
+  4. 必要时调 `get_commit_history` 理解修改动机。
+  5. 输出结构化审查意见。
+  6. `search_references` 和 `run_static_checks` 是后续增强，当前还未注册为工具。
+- 每一步工具调用记录到 `tool_call_log`。
 
 ### 4.5 工具注册
 
@@ -150,20 +150,24 @@ MySQL (任务/结果/审计) + Redis (锁 / API 限流)
 ```go
 type Tool interface {
     Name() string
-    Schema() jsonschema.Schema
+    Description() string
+    Schema() map[string]any
     Execute(ctx context.Context, input map[string]any) (string, error)
 }
 ```
-工具注册表 `ToolRegistry`，Agent 根据模型返回的 tool_call 调度。每个工具定义 JSON Schema，供 LLM function calling 使用。
+工具注册表 `Registry` 负责校验工具名、描述和 JSON Schema，避免重复注册，并输出稳定的工具定义列表。Agent 根据模型返回的 tool_call 调度。DeepSeek Provider 使用 OpenAI 兼容的 tools / tool_calls / tool 消息格式。
+
+Day 2 的 GitHub Toolkit 绑定当前任务的 owner / repo / PR number，模型不能指定其他仓库或 PR。PR meta 和 changed files 在同一次任务内缓存，避免模型多轮工具调用时重复请求 GitHub。所有工具输出都是 JSON，并受 diff 行数、文件行范围、commit 数量和输出字符数限制。`CreatePullRequestReview` 不注册为工具；写评论仍由服务端在 Agent 输出结构化结果后统一执行。
 
 ### 4.6 上下文裁剪
 
-- diff 可能很大，不能全塞给 LLM。
-- 策略：
-  - 按文件优先级排序：源码 > 配置 > 文档。
-  - 每个文件只取变更点附近函数级上下文，用 tree-sitter 解析 AST。
-  - 设置 token 预算，超出则降级为只看 diff。
-- 目标：控制单次审查 token 成本，避免超长导致质量下降。
+`read_file_context` 当前的裁剪流程如下：
+
+1. 从当前 PR 的 unified diff 中解析指定文件的新增行号；模型只传 `path` 时也能自动定位变更区域。
+2. 用 tree-sitter 解析文件 AST，根据目标行找到所在或最相关的函数、方法、类或类型声明；Go / Python / JavaScript 已支持。命中嵌套符号时优先保留内层函数或方法，最多返回 8 个符号。
+3. 不支持的语言、解析失败或找不到符号时，回退到围绕目标行的 bounded line range。
+
+工具输出包含 `context_mode`（`tree_sitter` / `line_fallback`）、`language`、`symbols`、带行号的 `content`、截断标记和最终行范围。所有片段继续受 `MAX_FILE_CONTEXT_LINES` 与工具输出字符上限约束，避免超长上下文抬高 token 成本。
 
 ### 4.7 当前能力边界与增强方向
 
@@ -172,7 +176,7 @@ type Tool interface {
 - PR 无变更文件时短路处理，直接回固定评论，不调用 LLM。
 - 把 PR diff 交给 LLM。
 - 额外读取部分变更文件的完整内容，并按行数裁剪后一起送给 LLM。
-- 看不到改动文件之外的关联代码。
+- `AGENT_MODE=tool_calling` 已能按需读取当前仓库指定文件上下文；Go / Python / JavaScript 支持函数级 tree-sitter 裁剪，但还没有跨文件符号引用检索。
 - 无法确认被删除的字段、函数、类型是否仍被其他文件引用。
 - 无法验证 PR 是否能通过编译、测试或静态检查。
 
@@ -245,7 +249,7 @@ MySQL 表：
 - `review_task`：id, repo, pr_number, commit_sha, status, attempt_count, max_attempts, next_retry_at, created_at, updated_at, error。
 - `review_result`：id, task_id, summary, payload_json, raw_response, model, input_tokens, output_tokens, total_tokens, llm_duration_ms, created_at；`task_id` 唯一并外键关联 `review_task(id)`。
 - `schema_migrations`：version, name, applied_at，记录已执行的数据库 migration。
-- `tool_call_log`：id, task_id, tool_name, input_json, output_json, tokens, duration_ms, created_at。
+- `tool_call_log`：id, task_id, tool_name, input_json, output_json, status, error, duration_ms, created_at；`task_id` 外键关联 `review_task(id)`。
 - `audit_log`：id, task_id, action, old_status, new_status, detail_json, created_at；`task_id` 外键关联 `review_task(id)`。
 
 数据库结构通过 `internal/store/migrations/*.up.sql` 管理，服务启动时自动执行；也可以通过 `go run ./cmd/migrate status` 和 `go run ./cmd/migrate up` 手动查看和执行。
@@ -254,14 +258,16 @@ MySQL 表：
 
 - `0001_init.up.sql`：`review_task`、`review_result`、基础索引和外键。
 - `0002_audit_log.up.sql`：`audit_log`、任务索引、action 索引和外键。
+- `0003_tool_call_log.up.sql`：`tool_call_log`、任务索引、工具名索引和外键。
 
 死信管理接口：
 - `GET /dead-letters`：按仓库、PR、limit 查询死信任务。
 - `POST /dead-letters/:id/requeue`：把死信任务改回 `queued`，重置 `attempt_count`，并重新投递主队列。
 
 审计与观测接口：
-- `GET /audit-logs`：按 task_id、action、limit 查询任务审计轨迹。
+- `GET /audit-logs`：按 task_id、repo、PR、action、limit 查询任务审计轨迹。
 - `GET /stats`：按 repo 聚合任务状态、成功率、重试事件、耗时、findings 和 token 用量。
+- `GET /tasks/:id/tool-calls`：按任务查询 Agent 工具调用轨迹、输入输出和耗时。
 
 审计 action：
 - `task_created`：Webhook 首次创建任务。
@@ -287,6 +293,34 @@ running -> failed
 ```
 
 `failed` 保留给队列发布失败等不可重试的基础设施错误；业务审查失败优先走 `retrying`，达到最大次数后进入 `dead_letter`。
+
+### 4.11 开发者后台
+
+`internal/adminui` 提供轻量 Admin Console，静态 HTML / CSS / JS 通过 `go:embed` 打进服务二进制，路由为 `/admin`。
+
+后台复用现有管理 API，不直接访问 MySQL：
+
+```text
+/stats
+/tasks
+/tasks/:id/result
+/tasks/:id/tool-calls
+/audit-logs
+/dead-letters
+/dead-letters/:id/requeue
+```
+
+页面在浏览器中保存 `ADMIN_TOKEN` 到当前标签页的 `sessionStorage`，每次请求带 Bearer Token。后台本身不保存 token，也不渲染任何秘钥。
+
+当前视图：
+
+- Overview：核心指标、状态分布和最近任务。
+- Tasks：任务筛选和详情。
+- Task Detail：任务信息、结构化审查结果、raw output、工具调用轨迹和审计轨迹。
+- Dead Letters：死信列表和 Requeue 操作。
+- Audit：按仓库、PR、action 和 limit 筛选审计日志。
+
+该后台定位是开发调试和项目演示，不是完整 APM；Prometheus / Grafana / 日志平台放后续生产化阶段。
 
 ## 5. 技术选型
 

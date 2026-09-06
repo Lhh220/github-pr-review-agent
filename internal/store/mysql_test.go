@@ -29,8 +29,8 @@ func TestMySQLTaskStore(t *testing.T) {
 	if len(migrationStatuses) == 0 || !migrationStatuses[0].Applied {
 		t.Fatalf("unexpected migration status: %+v", migrationStatuses)
 	}
-	if len(migrationStatuses) != 2 || !migrationStatuses[1].Applied {
-		t.Fatalf("expected migrations version 1 and 2 to be applied: %+v", migrationStatuses)
+	if len(migrationStatuses) != 3 || !migrationStatuses[1].Applied || !migrationStatuses[2].Applied {
+		t.Fatalf("expected migrations version 1, 2, and 3 to be applied: %+v", migrationStatuses)
 	}
 
 	var createdPrecision, updatedPrecision int
@@ -195,6 +195,42 @@ UPDATE review_task SET updated_at = ? WHERE id = ?`,
 		t.Fatalf("touched task is still stale: %+v", staleQueued)
 	}
 
+	orphaned, _, err := s.CreateTask(ctx, NewTask{
+		Repo:       "Lhh220/github-pr-review-agent-test",
+		PRNumber:   2,
+		CommitSHA:  "89abcdef0123456789abcdef0123456789abcdef",
+		Action:     "opened",
+		DeliveryID: fmt.Sprintf("orphan-%d", time.Now().UnixNano()),
+	})
+	if err != nil {
+		t.Fatalf("create orphaned task: %v", err)
+	}
+	defer func() {
+		_, _ = s.db.Exec("DELETE FROM review_task WHERE id = ?", orphaned.ID)
+	}()
+	if _, err := s.db.ExecContext(ctx, `
+UPDATE review_task SET updated_at = ? WHERE id = ?`,
+		time.Now().Add(-2*time.Minute), orphaned.ID,
+	); err != nil {
+		t.Fatalf("make orphaned task stale: %v", err)
+	}
+	recoveredReceived, err := s.ListStaleQueuedTasks(ctx, time.Now().Add(-time.Minute), 100)
+	if err != nil {
+		t.Fatalf("list stale received tasks: %v", err)
+	}
+	foundOrphaned := false
+	for _, candidate := range recoveredReceived {
+		if candidate.ID == orphaned.ID {
+			foundOrphaned = true
+		}
+	}
+	if !foundOrphaned {
+		t.Fatalf("stale received task %d was not recoverable: %+v", orphaned.ID, recoveredReceived)
+	}
+	if err := s.TouchQueuedTask(ctx, orphaned.ID, time.Now()); err != nil {
+		t.Fatalf("touch stale received task: %v", err)
+	}
+
 	tasks, err := s.ListTasks(ctx, ListFilter{Repo: "Lhh220/github-pr-review-agent-test", Limit: 10})
 	if err != nil {
 		t.Fatalf("list tasks: %v", err)
@@ -235,6 +271,28 @@ UPDATE review_task SET updated_at = ? WHERE id = ?`,
 		t.Fatalf("update done: %v", err)
 	}
 
+	toolCall, err := s.CreateToolCallLog(ctx, NewToolCallLog{
+		TaskID:     task.ID,
+		ToolName:   "echo_language",
+		Input:      `{"language":"Go"}`,
+		Output:     `{"language":"Go"}`,
+		DurationMS: 3,
+	})
+	if err != nil {
+		t.Fatalf("create tool call log: %v", err)
+	}
+	if toolCall.Status != "success" || toolCall.Input["language"] != "Go" {
+		t.Fatalf("unexpected tool call: %+v", toolCall)
+	}
+	toolCalls, err := s.ListToolCallLogs(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("list tool call logs: %v", err)
+	}
+	if len(toolCalls) != 1 || toolCalls[0].ToolName != "echo_language" ||
+		toolCalls[0].Output != `{"language":"Go"}` || toolCalls[0].DurationMS != 3 {
+		t.Fatalf("unexpected tool call logs: %+v", toolCalls)
+	}
+
 	logs, err := s.ListAuditLogs(ctx, AuditFilter{TaskID: task.ID, Limit: 200})
 	if err != nil {
 		t.Fatalf("list audit logs: %v", err)
@@ -254,6 +312,18 @@ UPDATE review_task SET updated_at = ? WHERE id = ?`,
 	}
 	if statusTransitions["dead_letter -> queued"] != 1 || statusTransitions["queued -> done"] != 1 {
 		t.Fatalf("unexpected audit status transitions: %+v", statusTransitions)
+	}
+	filteredLogs, err := s.ListAuditLogs(ctx, AuditFilter{
+		Repo:     task.Repo,
+		PRNumber: task.PRNumber,
+		Action:   AuditActionReviewResultCreated,
+		Limit:    10,
+	})
+	if err != nil {
+		t.Fatalf("list filtered audit logs: %v", err)
+	}
+	if len(filteredLogs) == 0 || filteredLogs[0].TaskID != task.ID {
+		t.Fatalf("unexpected filtered audit logs: %+v", filteredLogs)
 	}
 
 	stats, err := s.GetTaskStats(ctx, StatsFilter{Repo: "Lhh220/github-pr-review-agent-test"})

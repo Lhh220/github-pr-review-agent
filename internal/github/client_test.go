@@ -51,3 +51,25 @@ func TestGetPullRequestFilesPaginates(t *testing.T) {
 		t.Fatalf("second page = %s, want 2", got)
 	}
 }
+
+func TestGetPullRequestCommitsRequestsLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/owner/repo/pulls/12/commits" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if got := r.URL.Query().Get("per_page"); got != "7" {
+			t.Errorf("per_page = %s, want 7", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]PullRequestCommit{})
+	}))
+	defer server.Close()
+
+	client := NewClient("test-token")
+	client.baseURL = server.URL
+	if _, err := client.GetPullRequestCommits(context.Background(), "owner", "repo", 12, 7); err != nil {
+		t.Fatalf("GetPullRequestCommits() error = %v", err)
+	}
+}

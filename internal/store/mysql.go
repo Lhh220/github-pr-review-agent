@@ -519,7 +519,7 @@ func (s *Store) TouchQueuedTask(ctx context.Context, id uint64, updatedAt time.T
 	result, err := s.db.ExecContext(ctx, `
 UPDATE review_task
 SET updated_at = ?
-WHERE id = ? AND status = 'queued'`,
+WHERE id = ? AND status IN ('received', 'queued')`,
 		updatedAt,
 		id,
 	)
@@ -638,7 +638,7 @@ func (s *Store) ListStaleQueuedTasks(ctx context.Context, staleBefore time.Time,
 SELECT id, repo, pr_number, commit_sha, action, delivery_id, status,
        COALESCE(error, ''), attempt_count, max_attempts, next_retry_at, created_at, updated_at
 FROM review_task
-WHERE status = 'queued' AND updated_at < ?
+WHERE status IN ('received', 'queued') AND updated_at < ?
 ORDER BY updated_at ASC
 LIMIT ?`, staleBefore, limit)
 	if err != nil {

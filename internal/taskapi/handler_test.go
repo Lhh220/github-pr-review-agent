@@ -24,6 +24,9 @@ type fakeStore struct {
 	filter       store.ListFilter
 	resultTaskID uint64
 	resultErr    error
+	toolCalls    []store.ToolCallLog
+	toolCallID   uint64
+	toolCallErr  error
 	requeueErr   error
 	requeueID    uint64
 	auditLogs    []store.AuditLog
@@ -54,6 +57,14 @@ func (f *fakeStore) GetReviewResultByTaskID(ctx context.Context, taskID uint64) 
 		return nil, f.resultErr
 	}
 	return f.result, nil
+}
+
+func (f *fakeStore) ListToolCallLogs(ctx context.Context, taskID uint64) ([]store.ToolCallLog, error) {
+	f.toolCallID = taskID
+	if f.toolCallErr != nil {
+		return nil, f.toolCallErr
+	}
+	return f.toolCalls, nil
 }
 
 func (f *fakeStore) RequeueTask(ctx context.Context, id uint64) error {
@@ -271,13 +282,19 @@ func TestAuditLogsPassFiltersToStore(t *testing.T) {
 	router := setupRouter(fake, "")
 
 	recorder := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/audit-logs?task_id=1&action=task_status_changed&limit=20", nil)
+	req := httptest.NewRequest(http.MethodGet, "/audit-logs?task_id=1&repo=owner/repo&pr=12&action=task_status_changed&limit=20", nil)
 	router.ServeHTTP(recorder, req)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d body = %s", recorder.Code, recorder.Body.String())
 	}
-	if fake.auditFilter != (store.AuditFilter{TaskID: 1, Action: "task_status_changed", Limit: 20}) {
+	if fake.auditFilter != (store.AuditFilter{
+		TaskID:   1,
+		Repo:     "owner/repo",
+		PRNumber: 12,
+		Action:   "task_status_changed",
+		Limit:    20,
+	}) {
 		t.Fatalf("unexpected audit filter: %+v", fake.auditFilter)
 	}
 
@@ -513,4 +530,41 @@ func TestGetReviewResult(t *testing.T) {
 			t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
 		}
 	})
+}
+
+func TestGetToolCalls(t *testing.T) {
+	task := newTestTask()
+	fake := &fakeStore{
+		task: task,
+		toolCalls: []store.ToolCallLog{{
+			ID:         1,
+			TaskID:     task.ID,
+			ToolName:   "echo_language",
+			Input:      map[string]any{"language": "Go"},
+			Output:     `{"language":"Go"}`,
+			Status:     "success",
+			DurationMS: 3,
+			CreatedAt:  time.Now(),
+		}},
+	}
+	router := setupRouter(fake, "")
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/tasks/1/tool-calls", nil)
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK || fake.toolCallID != 1 {
+		t.Fatalf("status = %d toolCallID = %d body = %s", recorder.Code, fake.toolCallID, recorder.Body.String())
+	}
+	var response struct {
+		Task      TaskResponse       `json:"task"`
+		ToolCalls []ToolCallResponse `json:"tool_calls"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(response.ToolCalls) != 1 || response.ToolCalls[0].ToolName != "echo_language" ||
+		response.ToolCalls[0].Input["language"] != "Go" || response.ToolCalls[0].DurationMS != 3 {
+		t.Fatalf("unexpected response: %+v", response)
+	}
 }

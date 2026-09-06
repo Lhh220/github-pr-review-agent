@@ -255,7 +255,7 @@ func (w *Worker) process(msg queue.Message) (action queue.Action) {
 	case task.Status == "done", task.Status == "dead_letter", task.Status == "failed":
 		return queue.Ack
 	case task.Status == "retrying" && task.NextRetryAt != nil && task.NextRetryAt.After(now):
-		return queue.Ack
+		return w.deferTaskUntilRetry(task, msg, task.NextRetryAt.Sub(now))
 	case task.Status == "running" && msg.Attempt <= task.AttemptCount:
 		return queue.Ack
 	}
@@ -326,6 +326,27 @@ func (w *Worker) deferTaskForActivePR(task *store.Task, msg queue.Message) queue
 	log.Printf(
 		"deferred review task because pr is active: task_id=%d repo=%s pr=%d retry_in=%s",
 		task.ID, task.Repo, task.PRNumber, w.lockRetryDelay,
+	)
+	return queue.Ack
+}
+
+func (w *Worker) deferTaskUntilRetry(task *store.Task, msg queue.Message, delay time.Duration) queue.Action {
+	if delay < time.Millisecond {
+		delay = time.Millisecond
+	}
+
+	publishCtx, cancelPublish := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelPublish()
+	if err := w.client.PublishRetry(publishCtx, task.ID, msg.Attempt, delay); err != nil {
+		log.Printf(
+			"defer early retry task failed: task_id=%d attempt=%d retry_in=%s error=%v",
+			task.ID, msg.Attempt, delay, err,
+		)
+		return queue.NackRequeue
+	}
+	log.Printf(
+		"deferred early retry task: task_id=%d attempt=%d retry_in=%s",
+		task.ID, msg.Attempt, delay,
 	)
 	return queue.Ack
 }

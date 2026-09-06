@@ -32,10 +32,14 @@ MVP 已经跑通并部署到 Railway：
 - 提供 `/tasks`、`/tasks/:id` 查询任务状态，以及 `/tasks/:id/result` 查询结构化审查结果
 - 提供 `/dead-letters` 查询死信任务，`/dead-letters/:id/requeue` 手动重新入队
 - 提供 `/audit-logs` 查询任务审计轨迹，`/stats` 查询任务成功率、重试次数、token 用量和平均耗时
+- 提供轻量开发者后台 `/admin`，可视化任务、审查结果、Agent 工具调用轨迹、审计日志和死信管理
+- 阶段三 Day 1 已完成 Agent 基础框架：Tool 接口、工具注册表、Agent Loop、DeepSeek tool calls、`tool_call_log` 和 `/tasks/:id/tool-calls`
+- 阶段三 Day 2 已接入真实 GitHub 工具：`get_pr_meta`、`list_changed_files`、`read_diff`、`read_file_context`、`get_commit_history`
+- 阶段三 Day 3 已接入 tree-sitter：`read_file_context` 支持 Go / Python / JavaScript 函数级上下文，其他文件回退到有界行范围
 - 关键状态变更与审查结果创建会同步写入 `audit_log`，任务数据和审计数据保持同一事务
 - MySQL 结构通过版本化 migration 管理，服务启动自动执行，也提供 `cmd/migrate` CLI
 
-Day 5 的审计表和观测统计已完成本地与线上验收，阶段二收官。
+Day 5 的审计表和观测统计已完成本地与线上验收，阶段二收官。阶段三 Day 1 的 Agent 框架、Day 2 的 5 个 GitHub 工具、Day 3 的 tree-sitter 上下文裁剪已完成本地验收；线上默认仍是 `AGENT_MODE=legacy`，把 Railway 变量改成 `AGENT_MODE=tool_calling` 后即可启用 Agent 审查链路。
 
 当前线上示例：
 
@@ -47,6 +51,12 @@ https://github-pr-review-agent-production.up.railway.app
 
 ```text
 GET /healthz
+```
+
+开发者后台：
+
+```text
+https://github-pr-review-agent-production.up.railway.app/admin
 ```
 
 ## GitHub App 配置
@@ -105,6 +115,10 @@ GITHUB_API_RATE_LIMIT=120
 GITHUB_API_RATE_WINDOW=1m
 LLM_RATE_LIMIT=6
 LLM_RATE_WINDOW=1m
+AGENT_MODE=legacy
+AGENT_MAX_STEPS=8
+AGENT_TOOL_TIMEOUT=20s
+AGENT_MAX_COMMIT_HISTORY=20
 ```
 
 说明：
@@ -132,6 +146,10 @@ LLM_RATE_WINDOW=1m
 - `REVIEW_LOCK_RETRY_DELAY`：同一个 PR 已有审查在执行时，后续任务重新入队等待的延迟，默认 2s。
 - `GITHUB_API_RATE_LIMIT / GITHUB_API_RATE_WINDOW`：GitHub API 限流，默认 120 次 / 1m。
 - `LLM_RATE_LIMIT / LLM_RATE_WINDOW`：DeepSeek 调用限流，默认 6 次 / 1m，用于控制成本和上游压力。
+- `AGENT_MODE`：`legacy` 表示固定上下文审查链路；`tool_calling` 表示启用 GitHub Tool Calling Agent 链路。默认 `legacy`，便于回滚。
+- `AGENT_MAX_STEPS`：Agent 最大工具调用轮次，默认 8。
+- `AGENT_TOOL_TIMEOUT`：单个工具执行超时，默认 20s。
+- `AGENT_MAX_COMMIT_HISTORY`：`get_commit_history` 最多返回多少个 commit，默认 20，工具内部最大会限制到 100。
 
 注意：阶段二接入 RabbitMQ 后，Railway 部署必须提供可达的 `RABBITMQ_URL`，否则服务启动会失败。
 
@@ -224,10 +242,19 @@ ngrok 只用于本地调试；线上部署使用 Railway 的公网 HTTPS 地址�
 
 ## 测试
 
+tree-sitter 官方 Go binding 依赖 CGO。Linux/macOS 通常可直接运行；Windows 本地如默认禁用 CGO，需要先启用并指定可用的 C 编译器：
+
+```powershell
+$env:CGO_ENABLED="1"
+$env:CC="<gcc 路径>"
+```
+
 ```powershell
 go test ./...
 go vet ./...
 ```
+
+Railway / Docker 生产构建使用仓库根目录的 `Dockerfile`。构建阶段会安装 `gcc` 和 `musl-dev`，并强制 `CGO_ENABLED=1`；运行阶段使用同 Alpine 基础镜像，避免 CGO 二进制和运行时 C 库不匹配。
 
 ## 任务状态查询
 
@@ -253,7 +280,7 @@ running -> failed   # 队列发布失败等不可重试的基础设施错误
 - 第 1 次失败延迟 30s + jitter，第 2 次失败延迟 60s + jitter，第 3 次失败进入死信队列。
 - 延迟由消息 TTL 实现：`pr.review.retry.queue` 中的消息过期后，通过 DLX 自动回到 `pr.review.queue`。
 - Worker 每 30 秒扫描一次超过 6 分钟仍是 `running` 的任务，避免进程崩溃后任务卡死。
-- Worker 每 30 秒扫描一次超过 60 秒仍是 `queued` 的任务，自动重新投递；重复消息由原子 claim 和状态机兜底。
+- Worker 每 30 秒扫描一次超过 60 秒仍是 `received` 或 `queued` 的任务，自动重新投递；重复消息由原子 claim 和状态机兜底。早到的 `retrying` 消息会按剩余延迟重新入队，避免被过早 Ack 后卡住。
 
 查询任务列表：
 
@@ -360,7 +387,7 @@ Requeue 会把任务从 `dead_letter` 改回 `queued`，重置 `attempt_count`�
 查询任务审计日志：
 
 ```text
-GET /audit-logs?task_id=1&limit=20
+GET /audit-logs?task_id=1&repo=owner/repo&pr=12&action=task_status_changed&limit=20
 Authorization: Bearer <ADMIN_TOKEN>
 ```
 
@@ -399,6 +426,43 @@ Authorization: Bearer <ADMIN_TOKEN>
 
 返回内容包括任务总数、各状态数量、成功率、重试事件数、平均任务耗时、审查结果数、findings 总数、token 用量和 LLM 平均耗时。当前实现直接从 MySQL 聚合，适合个人项目规模；数据量变大后再引入汇总表或 Prometheus。
 
+查询任务工具调用轨迹：
+
+```text
+GET /tasks/<task_id>/tool-calls
+Authorization: Bearer <ADMIN_TOKEN>
+```
+
+返回工具名、输入、输出、状态、错误和耗时。`AGENT_MODE=tool_calling` 的任务会记录每一步工具调用；`legacy` 任务不会产生工具调用记录。
+
+### 轻量开发者后台
+
+访问：
+
+```text
+GET /admin
+```
+
+后台页面内嵌在 Go 服务二进制中，不需要单独部署前端。页面复用现有管理 API，并在浏览器中携带 `Authorization: Bearer <ADMIN_TOKEN>`。`ADMIN_TOKEN` 只保存在当前浏览器标签页的 `sessionStorage` 中，关闭标签页后清除。
+
+当前提供：
+
+- Overview：任务总数、成功率、状态分布、重试事件、token 用量、平均任务耗时和平均 LLM 耗时。
+- Tasks：按仓库、状态、PR 和 limit 筛选任务。
+- Task Detail：任务状态、审查 summary、findings、raw model output、Agent tool calls 输入输出和审计轨迹。
+- Dead Letters：查看死信任务并执行 Requeue。
+- Audit：按仓库、PR、action 和 limit 筛选任务状态流转和结果创建审计。
+- Auto Refresh：每 10 秒刷新当前视图和已选中的任务详情。
+
+Day 2 Agent 模式线上验收步骤：
+
+1. push 代码到 `main`，等待 Railway 部署完成。
+2. 在 Railway 中把 `AGENT_MODE` 改成 `tool_calling`，保留 `AGENT_MAX_STEPS=8`、`AGENT_TOOL_TIMEOUT=20s`、`AGENT_MAX_COMMIT_HISTORY=20`。
+3. 提一个包含代码改动的测试 PR。
+4. 日志应出现 `agent review mode enabled`，bot 评论后记录评论里的 Task ID。
+5. 请求 `/tasks/<task_id>/tool-calls`，应能看到模型调用 GitHub 工具的输入、输出和耗时。
+6. 验收完成后可保留 `tool_calling`；如果质量不稳定，把 `AGENT_MODE` 改回 `legacy` 即可回滚。
+
 Day 5 线上验收步骤：
 
 1. push 代码到 `main`，等待 Railway 部署完成。
@@ -408,16 +472,17 @@ Day 5 线上验收步骤：
 
 ## 当前能力边界
 
-当前审查能力是 **diff + changed-file-context reviewer**：
+默认 `legacy` 审查能力是 **diff + changed-file-context reviewer**：
 
 - 会把 PR diff 和变更文件内容交给 LLM
 - 还看不到改动文件之外的关联代码
 - 无法确认被删除的字段、函数、类型是否仍被其他文件引用
 - 无法验证 PR 是否能通过编译、测试或静态检查
 
+代码库已经具备 Tool Calling 基础框架、5 个 GitHub 工具和工具调用日志；线上启用 `AGENT_MODE=tool_calling` 后，模型可以多轮读取 PR 信息、diff、指定文件上下文和提交历史。`read_file_context` 会从 diff 推断变更行，并用 tree-sitter 提取 Go / Python / JavaScript 的函数、方法或类上下文；TypeScript、Java 等其他语言暂回退到有界行范围。跨文件引用检索和静态检查仍在后续阶段。
+
 下一阶段计划升级为 **code-aware agent**，增加：
 
-- `read_file_context`
 - `search_references`
 - `run_static_checks`
 - `confirmed / needs_verification` 结论分级
@@ -426,8 +491,8 @@ Day 5 线上验收步骤：
 
 ## 后续计划
 
-- Tool Calling 框架
-- tree-sitter 上下文裁剪
+- search_references 跨文件引用检索
+- run_static_checks 静态检查沙箱
 - 评测集和误报率统计
 
 开发节奏见 [docs/roadmap.md](docs/roadmap.md)。
