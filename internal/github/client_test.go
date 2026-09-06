@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -49,6 +50,39 @@ func TestGetPullRequestFilesPaginates(t *testing.T) {
 	}
 	if got := <-requestedPages; got != "2" {
 		t.Fatalf("second page = %s, want 2", got)
+	}
+}
+
+func TestGetFileContentEscapesPathSegmentsButKeepsSeparators(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.EscapedPath(); got != "/repos/owner/repo/contents/internal/code%20review/service.go" {
+			t.Errorf("escaped path = %s", got)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(fileContentResponse{
+			Content:  base64.StdEncoding.EncodeToString([]byte("package service")),
+			Encoding: "base64",
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient("test-token")
+	client.baseURL = server.URL
+
+	content, err := client.GetFileContent(
+		context.Background(),
+		"owner",
+		"repo",
+		"internal/code review/service.go",
+		"main",
+	)
+	if err != nil {
+		t.Fatalf("GetFileContent() error = %v", err)
+	}
+	if content != "package service" {
+		t.Fatalf("content = %q", content)
 	}
 }
 

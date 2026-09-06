@@ -27,6 +27,7 @@ type RabbitBroker struct {
 	publisher  *amqp.Channel
 	consumer   *amqp.Channel
 	closed     bool
+	ackMu      sync.Mutex
 
 	publishMu sync.Mutex
 }
@@ -197,18 +198,6 @@ func (b *RabbitBroker) closeLocked() {
 	}
 }
 
-func (b *RabbitBroker) currentPublisher() (*amqp.Channel, error) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	if b.closed {
-		return nil, errors.New("rabbitmq broker is closed")
-	}
-	if b.publisher == nil {
-		return nil, errors.New("rabbitmq publisher is unavailable")
-	}
-	return b.publisher, nil
-}
-
 func (b *RabbitBroker) Publish(ctx context.Context, taskID uint64) error {
 	return b.publish(ctx, b.queue, Message{TaskID: taskID}, 0)
 }
@@ -237,12 +226,18 @@ func (b *RabbitBroker) publish(ctx context.Context, queue string, msg Message, d
 	b.publishMu.Lock()
 	defer b.publishMu.Unlock()
 
-	publisher, err := b.currentPublisher()
-	if err != nil {
+	b.mu.RLock()
+	if b.closed {
+		b.mu.RUnlock()
+		return errors.New("rabbitmq broker is closed")
+	}
+	publisher := b.publisher
+	if publisher == nil {
+		b.mu.RUnlock()
 		if reconnectErr := b.reconnect(); reconnectErr != nil {
 			log.Printf("reconnect rabbitmq publisher failed: error=%v", reconnectErr)
 		}
-		return fmt.Errorf("get rabbitmq publisher: %w", err)
+		return errors.New("rabbitmq publisher is unavailable")
 	}
 
 	confirmation, err := publisher.PublishWithDeferredConfirmWithContext(
@@ -258,6 +253,7 @@ func (b *RabbitBroker) publish(ctx context.Context, queue string, msg Message, d
 			Expiration:   expiration,
 		},
 	)
+	b.mu.RUnlock()
 	if err != nil {
 		if reconnectErr := b.reconnect(); reconnectErr != nil {
 			log.Printf("reconnect rabbitmq publisher failed: error=%v", reconnectErr)
@@ -280,6 +276,7 @@ func (b *RabbitBroker) publish(ctx context.Context, queue string, msg Message, d
 
 func (b *RabbitBroker) Consume(ctx context.Context, handler Handler) error {
 	attempt := 0
+	var inflight sync.WaitGroup
 	for {
 		b.mu.RLock()
 		consumer := b.consumer
@@ -326,6 +323,7 @@ func (b *RabbitBroker) Consume(ctx context.Context, handler Handler) error {
 		for {
 			select {
 			case <-ctx.Done():
+				inflight.Wait()
 				return ctx.Err()
 			case delivery, ok := <-deliveries:
 				if !ok {
@@ -333,10 +331,15 @@ func (b *RabbitBroker) Consume(ctx context.Context, handler Handler) error {
 					channelClosed = true
 				}
 				if ok {
-					b.handleDelivery(ctx, delivery, handler)
+					inflight.Add(1)
+					go func(delivery amqp.Delivery) {
+						defer inflight.Done()
+						b.handleDelivery(ctx, delivery, handler)
+					}(delivery)
 				}
 			}
 			if channelClosed {
+				inflight.Wait()
 				if err := b.reconnect(); err != nil {
 					log.Printf("reconnect rabbitmq consumer failed: error=%v", err)
 					if !waitRetry(ctx, attempt) {
@@ -369,13 +372,17 @@ func (b *RabbitBroker) handleDelivery(ctx context.Context, delivery amqp.Deliver
 	var msg Message
 	if err := json.Unmarshal(delivery.Body, &msg); err != nil || msg.TaskID == 0 {
 		log.Printf("discard invalid rabbitmq message: delivery_tag=%d body=%q", delivery.DeliveryTag, delivery.Body)
+		b.ackMu.Lock()
 		if err := delivery.Nack(false, false); err != nil {
 			log.Printf("nack invalid rabbitmq message failed: error=%v", err)
 		}
+		b.ackMu.Unlock()
 		return
 	}
 
 	action := handler(ctx, msg)
+	b.ackMu.Lock()
+	defer b.ackMu.Unlock()
 	switch action {
 	case Ack:
 		if err := delivery.Ack(false); err != nil {

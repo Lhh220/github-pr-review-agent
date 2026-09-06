@@ -79,7 +79,7 @@ func (l *RedisLimiter) Wait(ctx context.Context, scope string) error {
 
 		delay := l.retryDelay
 		ttl, ttlErr := l.client.TTL(ctx, key).Result()
-		if ttlErr == nil && ttl > 0 && ttl < delay {
+		if ttlErr == nil && ttl > 0 {
 			delay = ttl
 		}
 		timer := time.NewTimer(delay)

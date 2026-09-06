@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -220,7 +221,7 @@ func (c *Client) GetFileContent(ctx context.Context, owner, repo, path, ref stri
 	if ref != "" {
 		query = "?ref=" + url.QueryEscape(ref)
 	}
-	apiPath := fmt.Sprintf("/repos/%s/%s/contents/%s%s", owner, repo, url.PathEscape(path), query)
+	apiPath := fmt.Sprintf("/repos/%s/%s/contents/%s%s", owner, repo, escapeContentPath(path), query)
 	var out fileContentResponse
 	if err := c.do(ctx, http.MethodGet, apiPath, nil, &out); err != nil {
 		return "", err
@@ -236,6 +237,14 @@ func (c *Client) GetFileContent(ctx context.Context, owner, repo, path, ref stri
 		return "", fmt.Errorf("decode file content: %w", err)
 	}
 	return string(content), nil
+}
+
+func escapeContentPath(path string) string {
+	segments := strings.Split(path, "/")
+	for i, segment := range segments {
+		segments[i] = url.PathEscape(segment)
+	}
+	return strings.Join(segments, "/")
 }
 
 func (c *Client) CreatePullRequestReview(ctx context.Context, owner, repo string, number int, body string) error {

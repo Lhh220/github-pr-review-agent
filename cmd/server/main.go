@@ -46,6 +46,15 @@ func main() {
 		if cfg.RedisURL == "" {
 			log.Fatal("REDIS_URL is required in production")
 		}
+		if cfg.DeepSeekAPIKey == "" {
+			log.Fatal("DEEPSEEK_API_KEY is required in production")
+		}
+		if cfg.GitHubToken == "" {
+			if cfg.GitHubAppID == "" || cfg.GitHubInstallationID == "" ||
+				(cfg.GitHubAppPrivateKey == "" && cfg.GitHubAppPrivateKeyPath == "") {
+				log.Fatal("GitHub App credentials are required in production when GITHUB_TOKEN is not set")
+			}
+		}
 	}
 	if cfg.MySQLDSN == "" {
 		log.Fatal("MYSQL_DSN is required")
