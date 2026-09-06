@@ -1,0 +1,11 @@
+.git
+.gocache
+.gomodcache
+.gopath
+.vscode
+.env
+.env.*
+dist
+tmp
+*.exe
+*.log

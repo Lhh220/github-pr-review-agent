@@ -17,26 +17,28 @@
 目标：跑通“PR 事件 -> 审查 -> 回写评论”主链路。
 
 任务：
-- Webhook 接收 PR 事件，签名校验
-- 用 GitHub API 拿 PR meta、diff、文件内容
-- 调 DeepSeek 生成审查意见（先不用 Tool Calling，直接给 diff）
-- 回写 PR 评论
-- 简单任务表记录状态
+- [x] Webhook 接收 PR 事件，签名校验
+- [x] 用 GitHub API 拿 PR meta、diff、文件内容
+- [x] 调 DeepSeek 生成审查意见（先不用 Tool Calling，直接给 diff + 变更文件上下文）
+- [x] 回写 PR 评论
+- [x] MySQL 简单任务表记录状态
+- [x] `/tasks`、`/tasks/:id` 查询任务状态
 
 验收：在一个测试仓库开 PR，能收到评论，任务状态能查。
+
+当前状态：已完成。线上链路已验证能回写 PR Review；本地 MySQL 已验证任务创建、去重、状态流转和查询。
 
 ## 阶段 2：工程化（1-2 周）
 
 目标：后端面试能讲。
 
 任务：
-- RabbitMQ 接入，Webhook 后异步投递
-- Worker 池消费
-- Redis 分布式锁，同一 PR 幂等
-- MySQL 任务/结果/审计表完善
-- 状态机 + 失败重试 + 死信队列
-- token 成本统计
-- 限流
+- [x] Day 1：结构化审查输出，`review_result` 落库，token / 耗时统计，`/tasks/:id/result` 查询
+- [x] Day 2：RabbitMQ 异步队列，publisher confirm，manual ack，Worker Pool，`queued` 状态，连接断开自动重连
+- [x] Day 3：失败重试、死信队列、完整状态机（本地和线上 RabbitMQ 验收完成）
+- [x] Day 3 收尾：queued 超时兜底恢复、死信查询与 Requeue、重试抖动、MySQL migration
+- [x] Day 4：Redis 分布式锁、限流、同一 PR 并发控制（本地和线上验收完成）
+- [x] Day 5：审计表、观测统计、部署和文档收尾（本地和线上验收完成）
 
 验收：重复发同一 PR 事件不重复审查；失败可重试；审计日志可查。
 
@@ -45,13 +47,32 @@
 目标：Agent 面试能讲。
 
 任务：
-- Tool Calling 框架 + 工具注册
-- 实现 get_pr_meta / list_changed_files / read_diff / read_file_context / get_commit_history
-- tree-sitter 函数级上下文裁剪
-- 结构化输出：bug/performance/style/security
-- 基础评测集 + 准确率/误报率统计
+- [x] Day 1：Tool Calling 框架、工具注册、Agent Loop、DeepSeek tool calls、tool_call_log、`/tasks/:id/tool-calls`
+- [x] Day 2：实现 get_pr_meta / list_changed_files / read_diff / read_file_context / get_commit_history（本地完成，待线上 tool_calling 验收）
+- [x] Day 2.5：轻量开发者后台 `/admin`，可视化任务、审查结果、工具调用、审计和死信管理
+- [x] Day 3：tree-sitter 函数级上下文裁剪（本地完成，待线上部署验收）
+- [ ] Day 4：search_references，检索被删除或改名符号的跨文件引用
+- [ ] Day 5：run_static_checks，执行 go test / go vet 并回传结果
+- [ ] Day 6：结构化输出与 confirmed / needs_verification 分级
+- [ ] Day 7：基础评测集 + 准确率/误报率统计
+- [ ] Day 8：线上验收、文档和简历收尾
 
-验收：Agent 能多步调工具；审查意见结构化；评测有指标。
+验收：
+- Agent 能多步调工具
+- 能读取文件上下文并检索跨文件引用
+- 能把编译失败定位到具体文件和行号
+- 审查意见区分 confirmed 和 needs_verification
+- 评测有指标
+
+回归样本：
+
+- 删除 `Config.MaxDiffLines` 字段，但保留 `cmd/server/main.go` 中的引用。
+- 期望 Agent 输出：
+  ```text
+  internal/config/config.go 删除了 MaxDiffLines，
+  但 cmd/server/main.go:40 仍在引用 cfg.MaxDiffLines，
+  go test ./... 会编译失败
+  ```
 
 ## 阶段 4：交付（几天）
 

@@ -3,27 +3,36 @@ package github
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
+
+	"github.com/liaohonghui/github-pr-review-agent/internal/limiter"
 )
 
 const apiBaseURL = "https://api.github.com"
+
+const maxPullRequestFilePages = 10
 
 type Client struct {
 	token       string
 	tokenSource func() (string, error)
 	http        *http.Client
+	baseURL     string
+	limiter     limiter.Limiter
 }
 
 func NewClient(token string) *Client {
 	return &Client{
-		token: token,
-		http:  &http.Client{Timeout: 30 * time.Second},
+		token:   token,
+		http:    &http.Client{Timeout: 30 * time.Second},
+		baseURL: apiBaseURL,
 	}
 }
 
@@ -52,8 +61,16 @@ func NewAppClient(auth AppAuth) *Client {
 			)
 			return token.Token, nil
 		},
-		http: &http.Client{Timeout: 30 * time.Second},
+		http:    &http.Client{Timeout: 30 * time.Second},
+		baseURL: apiBaseURL,
 	}
+}
+
+func (c *Client) SetLimiter(l limiter.Limiter) {
+	if l == nil {
+		l = limiter.NoopLimiter{}
+	}
+	c.limiter = l
 }
 
 type PullRequest struct {
@@ -78,7 +95,39 @@ type PullRequestFile struct {
 	Patch     string `json:"patch"`
 }
 
+type PullRequestCommit struct {
+	SHA    string       `json:"sha"`
+	Commit CommitDetail `json:"commit"`
+}
+
+type CommitDetail struct {
+	Message string       `json:"message"`
+	Author  CommitAuthor `json:"author"`
+}
+
+type CommitAuthor struct {
+	Name string    `json:"name"`
+	Date time.Time `json:"date"`
+}
+
+type FileContent struct {
+	Path    string
+	Content string
+}
+
+type fileContentResponse struct {
+	Content  string `json:"content"`
+	Encoding string `json:"encoding"`
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) error {
+	if c.limiter == nil {
+		c.limiter = limiter.NoopLimiter{}
+	}
+	if err := c.limiter.Wait(ctx, "github:api"); err != nil {
+		return fmt.Errorf("wait github api rate limit: %w", err)
+	}
+
 	token := c.token
 	if c.tokenSource != nil {
 		var err error
@@ -95,7 +144,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 		}
 		reader = bytes.NewReader(buf)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, apiBaseURL+path, reader)
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
 	if err != nil {
 		return err
 	}
@@ -131,17 +180,62 @@ func (c *Client) GetPullRequest(ctx context.Context, owner, repo string, number 
 
 func (c *Client) GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]PullRequestFile, error) {
 	var files []PullRequestFile
-	path := fmt.Sprintf("/repos/%s/%s/pulls/%d/files?per_page=100", owner, repo, number)
-	if err := c.do(ctx, http.MethodGet, path, nil, &files); err != nil {
-		return nil, err
+	for page := 1; page <= maxPullRequestFilePages; page++ {
+		path := fmt.Sprintf(
+			"/repos/%s/%s/pulls/%d/files?per_page=100&page=%d",
+			owner, repo, number, page,
+		)
+		var pageFiles []PullRequestFile
+		if err := c.do(ctx, http.MethodGet, path, nil, &pageFiles); err != nil {
+			return nil, err
+		}
+		files = append(files, pageFiles...)
+		if len(pageFiles) < 100 {
+			break
+		}
 	}
 	return files, nil
 }
 
-func (c *Client) CreateIssueComment(ctx context.Context, owner, repo string, number int, body string) error {
-	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, repo, number)
-	payload := map[string]string{"body": body}
-	return c.do(ctx, http.MethodPost, path, payload, nil)
+func (c *Client) GetPullRequestCommits(ctx context.Context, owner, repo string, number, limit int) ([]PullRequestCommit, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	var commits []PullRequestCommit
+	path := fmt.Sprintf(
+		"/repos/%s/%s/pulls/%d/commits?per_page=%d",
+		owner, repo, number, limit,
+	)
+	if err := c.do(ctx, http.MethodGet, path, nil, &commits); err != nil {
+		return nil, err
+	}
+	return commits, nil
+}
+
+func (c *Client) GetFileContent(ctx context.Context, owner, repo, path, ref string) (string, error) {
+	query := ""
+	if ref != "" {
+		query = "?ref=" + url.QueryEscape(ref)
+	}
+	apiPath := fmt.Sprintf("/repos/%s/%s/contents/%s%s", owner, repo, url.PathEscape(path), query)
+	var out fileContentResponse
+	if err := c.do(ctx, http.MethodGet, apiPath, nil, &out); err != nil {
+		return "", err
+	}
+	if out.Content == "" {
+		return "", nil
+	}
+	if out.Encoding != "base64" {
+		return "", fmt.Errorf("unsupported file encoding: %s", out.Encoding)
+	}
+	content, err := base64.StdEncoding.DecodeString(out.Content)
+	if err != nil {
+		return "", fmt.Errorf("decode file content: %w", err)
+	}
+	return string(content), nil
 }
 
 func (c *Client) CreatePullRequestReview(ctx context.Context, owner, repo string, number int, body string) error {
