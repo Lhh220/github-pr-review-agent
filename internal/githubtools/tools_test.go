@@ -1,8 +1,12 @@
 package githubtools
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
+	"io"
 	"strings"
 	"testing"
 
@@ -14,6 +18,7 @@ type fakeClient struct {
 	files        []github.PullRequestFile
 	commits      []github.PullRequestCommit
 	fileContents map[string]string
+	tarball      io.Reader
 
 	getPRCalls    int
 	getFilesCalls int
@@ -23,6 +28,7 @@ type fakeClient struct {
 	commitLimits  []int
 	filePaths     []string
 	refs          []string
+	tarballRef    string
 }
 
 func (f *fakeClient) GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error) {
@@ -47,6 +53,14 @@ func (f *fakeClient) GetFileContent(ctx context.Context, owner, repo, path, ref 
 	f.filePaths = append(f.filePaths, path)
 	f.refs = append(f.refs, ref)
 	return f.fileContents[path], nil
+}
+
+func (f *fakeClient) GetRepositoryTarball(ctx context.Context, owner, repo, ref string) (io.ReadCloser, error) {
+	f.tarballRef = ref
+	if f.tarball == nil {
+		return io.NopCloser(strings.NewReader("")), nil
+	}
+	return io.NopCloser(f.tarball), nil
 }
 
 func newFakeClient() *fakeClient {
@@ -84,7 +98,7 @@ func toolByName(t *testing.T, toolkit *Toolkit, name string) interface {
 	return nil
 }
 
-func TestToolkitRegistersFiveReadOnlyTools(t *testing.T) {
+func TestToolkitRegistersSixReadOnlyTools(t *testing.T) {
 	toolkit := NewToolkit(newFakeClient(), "owner", "repo", 12, Options{})
 	tools := toolkit.Tools()
 	expected := []string{
@@ -92,6 +106,7 @@ func TestToolkitRegistersFiveReadOnlyTools(t *testing.T) {
 		"list_changed_files",
 		"read_diff",
 		"read_file_context",
+		"search_references",
 		"get_commit_history",
 	}
 	if len(tools) != len(expected) {
@@ -220,6 +235,131 @@ func TestChangedLinesForPathParsesUnifiedDiff(t *testing.T) {
 	if got := changedLinesForPath(files, "service.py"); len(got) != 2 || got[0] != 4 || got[1] != 5 {
 		t.Fatalf("changed lines = %v, want [4 5]", got)
 	}
+}
+
+func TestSearchReferencesFindsExactIdentifierAtPullRequestHead(t *testing.T) {
+	client := newFakeClient()
+	client.files = []github.PullRequestFile{{
+		Filename: "internal/config/config.go",
+		Status:   "modified",
+		Patch:    "@@ -3 +2,0 @@\n-	MaxDiffLines int",
+	}}
+	client.tarball = gzipTarballForTest(t, map[string]string{
+		"cmd/server/main.go":        "package main\n_ = cfg.MaxDiffLines\n",
+		"internal/config/config.go": "package config\n\ntype Config struct {}\n",
+		"internal/other.go":         "package other\n_ = MaxDiffLinesExtra\n",
+		"vendor/skip.go":            "package vendor\n_ = MaxDiffLines\n",
+	})
+	toolkit := NewToolkit(client, "owner", "repo", 12, Options{})
+
+	output, err := toolByName(t, toolkit, "search_references").Execute(context.Background(), map[string]any{
+		"symbol": "MaxDiffLines",
+	})
+	if err != nil {
+		t.Fatalf("search_references: %v", err)
+	}
+
+	var result struct {
+		Ref          string `json:"ref"`
+		ScannedFiles int    `json:"scanned_files"`
+		MatchedFiles int    `json:"matched_files"`
+		Truncated    bool   `json:"truncated"`
+		Matches      []struct {
+			Path        string `json:"path"`
+			Line        int    `json:"line"`
+			Snippet     string `json:"snippet"`
+			ChangedFile bool   `json:"changed_file"`
+		} `json:"matches"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+	if client.tarballRef != "head-sha" {
+		t.Fatalf("tarball ref = %s, want head-sha", client.tarballRef)
+	}
+	if result.ScannedFiles != 3 || result.MatchedFiles != 1 || len(result.Matches) != 1 {
+		t.Fatalf("unexpected search result: %+v", result)
+	}
+	match := result.Matches[0]
+	if match.Path != "cmd/server/main.go" || match.Line != 2 ||
+		!strings.Contains(match.Snippet, "cfg.MaxDiffLines") || match.ChangedFile {
+		t.Fatalf("unexpected match: %+v", match)
+	}
+	if result.Truncated {
+		t.Fatalf("unexpected truncation: %+v", result)
+	}
+}
+
+func TestSearchReferencesCapsResultsAndFiltersPathPrefix(t *testing.T) {
+	client := newFakeClient()
+	client.tarball = gzipTarballForTest(t, map[string]string{
+		"cmd/server/a.go": "package main\n_ = cfg.MaxDiffLines\n",
+		"cmd/server/b.go": "package main\n_ = cfg.MaxDiffLines\n",
+	})
+	toolkit := NewToolkit(client, "owner", "repo", 12, Options{MaxReferenceResults: 1})
+
+	output, err := toolByName(t, toolkit, "search_references").Execute(context.Background(), map[string]any{
+		"symbol":      "MaxDiffLines",
+		"path_prefix": "cmd/server/",
+		"max_results": 10,
+	})
+	if err != nil {
+		t.Fatalf("search_references: %v", err)
+	}
+	var result struct {
+		ScannedFiles int `json:"scanned_files"`
+		Matches      []struct {
+			Path string `json:"path"`
+		} `json:"matches"`
+		Truncated     bool `json:"truncated"`
+		MaxResultsCap bool `json:"max_results_capped"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+	if result.ScannedFiles != 1 || len(result.Matches) != 1 || !result.Truncated || !result.MaxResultsCap {
+		t.Fatalf("unexpected capped result: %+v", result)
+	}
+	if result.Matches[0].Path != "cmd/server/a.go" && result.Matches[0].Path != "cmd/server/b.go" {
+		t.Fatalf("unexpected match path: %+v", result.Matches[0])
+	}
+}
+
+func TestSearchReferencesRejectsInvalidSymbol(t *testing.T) {
+	toolkit := NewToolkit(newFakeClient(), "owner", "repo", 12, Options{})
+	_, err := toolByName(t, toolkit, "search_references").Execute(context.Background(), map[string]any{
+		"symbol": "cfg.MaxDiffLines",
+	})
+	if err == nil || !strings.Contains(err.Error(), "symbol must be") {
+		t.Fatalf("expected invalid symbol error, got %v", err)
+	}
+}
+
+func gzipTarballForTest(t *testing.T, files map[string]string) io.Reader {
+	t.Helper()
+	var buffer bytes.Buffer
+	gzipWriter := gzip.NewWriter(&buffer)
+	tarWriter := tar.NewWriter(gzipWriter)
+	for filePath, content := range files {
+		if err := tarWriter.WriteHeader(&tar.Header{
+			Name:     "repo-head/" + filePath,
+			Mode:     0o644,
+			Size:     int64(len(content)),
+			Typeflag: tar.TypeReg,
+		}); err != nil {
+			t.Fatalf("write tar header: %v", err)
+		}
+		if _, err := tarWriter.Write([]byte(content)); err != nil {
+			t.Fatalf("write tar content: %v", err)
+		}
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatalf("close gzip writer: %v", err)
+	}
+	return &buffer
 }
 
 func TestDiffToolFiltersAndBoundsFullDiff(t *testing.T) {

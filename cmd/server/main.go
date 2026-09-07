@@ -145,6 +145,7 @@ func startServer(
 			MaxDiffLines:        cfg.MaxDiffLines,
 			MaxFileContextLines: cfg.MaxFileContextLines,
 			MaxCommitHistory:    cfg.AgentMaxCommitHistory,
+			MaxReferenceResults: cfg.AgentMaxReferenceResults,
 		})
 		log.Printf("agent review mode enabled: max_steps=%d tool_timeout=%s", cfg.AgentMaxSteps, cfg.AgentToolTimeout)
 	default:
