@@ -31,13 +31,23 @@ type Task struct {
 }
 
 type Finding struct {
-	Category   string `json:"category"`
-	File       string `json:"file"`
-	Line       int    `json:"line"`
-	Severity   string `json:"severity"`
-	Comment    string `json:"comment"`
-	Suggestion string `json:"suggestion,omitempty"`
-	Confidence string `json:"confidence"`
+	Category   string     `json:"category"`
+	File       string     `json:"file"`
+	Line       int        `json:"line"`
+	Severity   string     `json:"severity"`
+	Comment    string     `json:"comment"`
+	Suggestion string     `json:"suggestion,omitempty"`
+	Confidence string     `json:"confidence"`
+	Evidence   []Evidence `json:"evidence"`
+}
+
+type Evidence struct {
+	Type    string `json:"type"`
+	File    string `json:"file,omitempty"`
+	Line    int    `json:"line,omitempty"`
+	Text    string `json:"text,omitempty"`
+	Command string `json:"command,omitempty"`
+	Excerpt string `json:"excerpt,omitempty"`
 }
 
 type ReviewResult struct {

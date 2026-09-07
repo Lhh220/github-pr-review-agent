@@ -76,6 +76,37 @@ func (s *AgentService) ReviewPR(ctx context.Context, owner, repo string, number 
 		StaticCheckWorkDir:  s.Options.StaticCheckWorkDir,
 		StaticCheckGoProxy:  s.Options.StaticCheckGoProxy,
 	})
+	pr, err := toolkit.PullRequest(ctx)
+	if err != nil {
+		return fmt.Errorf("get pull request before agent review: %w", err)
+	}
+	files, err := toolkit.Files(ctx)
+	if err != nil {
+		return fmt.Errorf("get pull request files before agent review: %w", err)
+	}
+	if len(files) == 0 || isDocsOnlyPR(files) {
+		summary := "This pull request has no changed files relative to its base branch; review skipped."
+		rawResponse := "No changed files relative to the base branch."
+		if len(files) > 0 {
+			summary = "This pull request only changes documentation; code review skipped."
+			rawResponse = "Documentation-only pull request; code review skipped."
+		}
+		stored, err := s.Store.CreateReviewResult(ctx, store.NewReviewResult{
+			TaskID:      taskID,
+			Summary:     summary,
+			Findings:    []store.Finding{},
+			RawResponse: rawResponse,
+			Model:       "none",
+		})
+		if err != nil {
+			return fmt.Errorf("create skipped agent review result: %w", err)
+		}
+		comment := buildReviewComment(*stored, taskID, pr.Head.SHA)
+		if err := s.GitHub.CreatePullRequestReview(ctx, owner, repo, number, comment); err != nil {
+			return fmt.Errorf("create skipped pull request review: %w", err)
+		}
+		return nil
+	}
 	registry, err := agent.NewRegistry(toolkit.Tools()...)
 	if err != nil {
 		return fmt.Errorf("register github tools: %w", err)
@@ -117,7 +148,7 @@ func (s *AgentService) ReviewPR(ctx context.Context, owner, repo string, number 
 		return fmt.Errorf("create agent review result: %w", err)
 	}
 
-	pr, err := toolkit.PullRequest(ctx)
+	pr, err = toolkit.PullRequest(ctx)
 	if err != nil {
 		return fmt.Errorf("get pull request after review: %w", err)
 	}
@@ -159,10 +190,32 @@ Return only a valid JSON object matching this schema:
       "severity": "high|medium|low",
       "comment": "specific issue",
       "suggestion": "optional fix suggestion",
-      "confidence": "confirmed|needs_verification"
+      "confidence": "confirmed|needs_verification",
+      "evidence": [
+        {
+          "type": "reference",
+          "file": "path/to/file.go",
+          "line": 12,
+          "text": "exact source line from a tool result"
+        },
+        {
+          "type": "static_check",
+          "command": "go test ./...",
+          "excerpt": "exact failure output from the tool"
+        }
+      ]
     }
   ]
 }
 
-Focus on real bugs, performance issues, security risks, and important readability problems. If the code looks good, return an empty findings array. Be concise and specific.`
+Rules:
+- Every finding must include non-empty evidence copied exactly from a tool result; do not paraphrase or invent evidence.
+- Use confirmed only when a tool result proves the issue, such as a remaining cross-file reference or a failed static check. Without deterministic tool evidence, use needs_verification.
+- Treat architectural concerns, performance risks, and concurrency concerns that need human confirmation as needs_verification.
+- Do not report pure formatting or style preferences.
+- Do not invent files, line numbers, commands, or output.
+- Prioritize bugs, security risks, and performance issues over style.
+- If every changed file is documentation-only, return an empty findings array.
+- If the code looks good, return an empty findings array.
+Be concise and specific.`
 }

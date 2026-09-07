@@ -122,6 +122,10 @@ func (t *Toolkit) PullRequest(ctx context.Context) (*github.PullRequest, error) 
 	return t.pullRequest(ctx)
 }
 
+func (t *Toolkit) Files(ctx context.Context) ([]github.PullRequestFile, error) {
+	return t.files(ctx)
+}
+
 func (t *Toolkit) pullRequest(ctx context.Context) (*github.PullRequest, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
