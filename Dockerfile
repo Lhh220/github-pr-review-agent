@@ -12,11 +12,17 @@ RUN CGO_ENABLED=1 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/app ./c
 
 FROM alpine:3.22
 
-RUN apk add --no-cache ca-certificates tzdata \
+RUN apk add --no-cache ca-certificates tzdata gcc musl-dev \
     && addgroup -S app \
-    && adduser -S app -G app
+    && adduser -S app -G app \
+    && mkdir -p /workspace/.static-checks \
+    && chown -R app:app /workspace
 
 COPY --from=builder /out/app /app
+COPY --from=builder /usr/local/go /usr/local/go
+
+ENV PATH="/usr/local/go/bin:${PATH}" \
+    AGENT_STATIC_CHECK_WORK_DIR=/workspace/.static-checks
 
 USER app
 EXPOSE 8080

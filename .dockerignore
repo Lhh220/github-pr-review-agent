@@ -2,6 +2,7 @@
 .gocache
 .gomodcache
 .gopath
+.static-checks
 .vscode
 .env
 .env.*

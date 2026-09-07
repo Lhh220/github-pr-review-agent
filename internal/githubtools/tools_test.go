@@ -6,10 +6,14 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/liaohonghui/github-pr-review-agent/internal/agent"
 	"github.com/liaohonghui/github-pr-review-agent/internal/github"
 )
 
@@ -117,6 +121,39 @@ func TestToolkitRegistersSixReadOnlyTools(t *testing.T) {
 			t.Fatalf("unexpected tool at %d: %+v", i, tool)
 		}
 	}
+}
+
+func TestToolkitRegistersStaticChecksOnlyWhenEnabled(t *testing.T) {
+	defaultToolkit := NewToolkit(newFakeClient(), "owner", "repo", 12, Options{})
+	if names := toolNames(defaultToolkit.Tools()); containsString(names, "run_static_checks") {
+		t.Fatalf("run_static_checks should not be registered by default: %v", names)
+	}
+
+	staticToolkit := NewToolkit(newFakeClient(), "owner", "repo", 12, Options{
+		EnableStaticChecks: true,
+		StaticCheckWorkDir: t.TempDir(),
+	})
+	names := toolNames(staticToolkit.Tools())
+	if len(names) != 7 || names[6] != "run_static_checks" {
+		t.Fatalf("unexpected enabled tools: %v", names)
+	}
+}
+
+func toolNames(tools []agent.Tool) []string {
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names = append(names, tool.Name())
+	}
+	return names
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func TestToolkitCachesPRAndFiles(t *testing.T) {
@@ -290,6 +327,173 @@ func TestSearchReferencesFindsExactIdentifierAtPullRequestHead(t *testing.T) {
 	}
 }
 
+func TestStaticChecksRunServerDefinedCommandsAndCleanTemporaryRepository(t *testing.T) {
+	client := newFakeClient()
+	client.tarball = gzipTarballForTest(t, map[string]string{
+		"go.mod":        "module example.test/repo\n\ngo 1.25\n",
+		"main.go":       "package main\n\nfunc main() {}\n",
+		"internal/a.go": "package internal\n",
+	})
+	workDir := t.TempDir()
+	toolkit := NewToolkit(client, "owner", "repo", 12, Options{
+		EnableStaticChecks: true,
+		StaticCheckWorkDir: workDir,
+		StaticCheckGoProxy: "off",
+	})
+
+	var (
+		commandDirs    []string
+		commandEnvs    [][]string
+		extractedGoMod bool
+	)
+	toolkit.staticCheckRunner = func(
+		ctx context.Context,
+		args []string,
+		dir string,
+		env []string,
+	) (staticCheckCommandResult, error) {
+		commandDirs = append(commandDirs, dir)
+		commandEnvs = append(commandEnvs, env)
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			extractedGoMod = true
+		}
+		return staticCheckCommandResult{Success: true, Output: "ok"}, nil
+	}
+
+	output, err := toolByName(t, toolkit, "run_static_checks").Execute(context.Background(), map[string]any{
+		"checks": []any{"go_vet"},
+	})
+	if err != nil {
+		t.Fatalf("run_static_checks: %v", err)
+	}
+	var result struct {
+		Supported bool `json:"supported"`
+		Checks    []struct {
+			Name       string `json:"name"`
+			Command    string `json:"command"`
+			Success    bool   `json:"success"`
+			DurationMS int64  `json:"duration_ms"`
+			Output     string `json:"output"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+	if !result.Supported || len(result.Checks) != 1 || result.Checks[0].Name != "go_vet" ||
+		result.Checks[0].Command != "go vet ./..." || !result.Checks[0].Success {
+		t.Fatalf("unexpected static check result: %+v", result)
+	}
+	if client.tarballRef != "head-sha" {
+		t.Fatalf("tarball ref = %s, want head-sha", client.tarballRef)
+	}
+	if len(commandDirs) != 1 {
+		t.Fatalf("command calls = %d, want 1", len(commandDirs))
+	}
+	if !extractedGoMod {
+		t.Fatal("go.mod was not extracted before command execution")
+	}
+	if !containsString(commandEnvs[0], "GOPROXY=off") ||
+		containsString(commandEnvs[0], "DEEPSEEK_API_KEY=secret") {
+		t.Fatalf("unexpected command environment: %v", commandEnvs[0])
+	}
+	if _, err := os.Stat(commandDirs[0]); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary repository was not removed: %v", err)
+	}
+}
+
+func TestStaticChecksReturnUnsupportedWithoutGoMod(t *testing.T) {
+	client := newFakeClient()
+	client.tarball = gzipTarballForTest(t, map[string]string{
+		"README.md": "# not go\n",
+	})
+	toolkit := NewToolkit(client, "owner", "repo", 12, Options{
+		EnableStaticChecks: true,
+		StaticCheckWorkDir: t.TempDir(),
+	})
+	toolkit.staticCheckRunner = func(
+		ctx context.Context,
+		args []string,
+		dir string,
+		env []string,
+	) (staticCheckCommandResult, error) {
+		t.Fatal("runner must not be called without go.mod")
+		return staticCheckCommandResult{}, nil
+	}
+
+	output, err := toolByName(t, toolkit, "run_static_checks").Execute(context.Background(), map[string]any{})
+	if err != nil {
+		t.Fatalf("run_static_checks: %v", err)
+	}
+	var result struct {
+		Supported bool   `json:"supported"`
+		Reason    string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+	if result.Supported || result.Reason != "go.mod not found at repository root" {
+		t.Fatalf("unexpected unsupported result: %+v", result)
+	}
+}
+
+func TestStaticChecksRejectNonWhitelistedCheck(t *testing.T) {
+	toolkit := NewToolkit(newFakeClient(), "owner", "repo", 12, Options{
+		EnableStaticChecks: true,
+		StaticCheckWorkDir: t.TempDir(),
+	})
+	_, err := toolByName(t, toolkit, "run_static_checks").Execute(context.Background(), map[string]any{
+		"checks": []any{"go_build ./... && whoami"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported check") {
+		t.Fatalf("expected unsupported check error, got %v", err)
+	}
+}
+
+func TestStaticCheckArchiveExtractionRejectsUnsafeEntries(t *testing.T) {
+	tests := []struct {
+		name   string
+		header *tar.Header
+	}{
+		{
+			name: "path traversal",
+			header: &tar.Header{
+				Name:     "repo/../../escape.txt",
+				Mode:     0o600,
+				Size:     0,
+				Typeflag: tar.TypeReg,
+			},
+		},
+		{
+			name: "symlink",
+			header: &tar.Header{
+				Name:     "repo/link",
+				Linkname: "/tmp/target",
+				Mode:     0o777,
+				Typeflag: tar.TypeSymlink,
+			},
+		},
+		{
+			name: "hard link",
+			header: &tar.Header{
+				Name:     "repo/link",
+				Linkname: "/etc/passwd",
+				Mode:     0o644,
+				Typeflag: tar.TypeLink,
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			archive := gzipTarballWithHeaderForTest(t, test.header)
+			err := extractStaticCheckArchive(archive, t.TempDir())
+			if err == nil {
+				t.Fatal("expected unsafe archive error")
+			}
+		})
+	}
+}
+
 func TestSearchReferencesCapsResultsAndFiltersPathPrefix(t *testing.T) {
 	client := newFakeClient()
 	client.tarball = gzipTarballForTest(t, map[string]string{
@@ -352,6 +556,23 @@ func gzipTarballForTest(t *testing.T, files map[string]string) io.Reader {
 		if _, err := tarWriter.Write([]byte(content)); err != nil {
 			t.Fatalf("write tar content: %v", err)
 		}
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatalf("close gzip writer: %v", err)
+	}
+	return &buffer
+}
+
+func gzipTarballWithHeaderForTest(t *testing.T, header *tar.Header) io.Reader {
+	t.Helper()
+	var buffer bytes.Buffer
+	gzipWriter := gzip.NewWriter(&buffer)
+	tarWriter := tar.NewWriter(gzipWriter)
+	if err := tarWriter.WriteHeader(header); err != nil {
+		t.Fatalf("write tar header: %v", err)
 	}
 	if err := tarWriter.Close(); err != nil {
 		t.Fatalf("close tar writer: %v", err)

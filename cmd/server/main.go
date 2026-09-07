@@ -146,8 +146,15 @@ func startServer(
 			MaxFileContextLines: cfg.MaxFileContextLines,
 			MaxCommitHistory:    cfg.AgentMaxCommitHistory,
 			MaxReferenceResults: cfg.AgentMaxReferenceResults,
+			EnableStaticChecks:  cfg.AgentEnableStaticChecks,
+			StaticCheckTimeout:  cfg.AgentStaticCheckTimeout,
+			StaticCheckWorkDir:  cfg.AgentStaticCheckWorkDir,
+			StaticCheckGoProxy:  cfg.AgentStaticCheckGoProxy,
 		})
-		log.Printf("agent review mode enabled: max_steps=%d tool_timeout=%s", cfg.AgentMaxSteps, cfg.AgentToolTimeout)
+		log.Printf(
+			"agent review mode enabled: max_steps=%d tool_timeout=%s static_checks=%t static_check_timeout=%s",
+			cfg.AgentMaxSteps, cfg.AgentToolTimeout, cfg.AgentEnableStaticChecks, cfg.AgentStaticCheckTimeout,
+		)
 	default:
 		return fmt.Errorf("unsupported AGENT_MODE %q: use legacy or tool_calling", cfg.AgentMode)
 	}
