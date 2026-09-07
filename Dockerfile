@@ -21,8 +21,8 @@ RUN apk add --no-cache ca-certificates tzdata gcc musl-dev \
 COPY --from=builder /out/app /app
 COPY --from=builder /usr/local/go /usr/local/go
 
-ENV PATH="/usr/local/go/bin:${PATH}"
-WORKDIR /workspace
+ENV PATH="/usr/local/go/bin:${PATH}" \
+    AGENT_STATIC_CHECK_WORK_DIR=/workspace/.static-checks
 
 USER app
 EXPOSE 8080
