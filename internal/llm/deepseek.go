@@ -195,11 +195,33 @@ func (c *Client) ReviewCode(ctx context.Context, title, body, diff, fileContext 
       "severity": "high|medium|low",
       "comment": "specific issue",
       "suggestion": "optional fix suggestion",
-      "confidence": "confirmed|needs_verification"
+      "confidence": "confirmed|needs_verification",
+      "evidence": [
+        {
+          "type": "reference",
+          "file": "path/to/file.go",
+          "line": 12,
+          "text": "exact source line from the supplied diff or file context"
+        },
+        {
+          "type": "static_check",
+          "command": "go test ./...",
+          "excerpt": "exact failure output supplied to you"
+        }
+      ]
     }
   ]
 }
-Focus on real bugs, performance issues, security risks, and important readability problems. Be concise and specific. If the code looks good, return an empty findings array.`
+Rules:
+- Every finding must include non-empty evidence copied exactly from the supplied diff or file context; do not paraphrase or invent evidence.
+- Use confirmed only when the supplied code directly proves the issue, such as an explicit invalid reference or nil map write. Otherwise use needs_verification.
+- Treat architectural concerns, performance risks, and concurrency concerns that need human confirmation as needs_verification.
+- Do not report pure formatting or style preferences.
+- Do not invent files, line numbers, commands, or output.
+- Prioritize bugs, security risks, and performance issues over style.
+- If every changed file is documentation-only, return an empty findings array.
+- If the code looks good, return an empty findings array.
+Be concise and specific.`
 	user := fmt.Sprintf(
 		"Pull request title: %s\n\nPull request description:\n%s\n\nChanged files diff:\n%s\n\nChanged file context:\n%s",
 		title,

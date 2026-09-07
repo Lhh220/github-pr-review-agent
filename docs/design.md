@@ -205,10 +205,10 @@ Day 2 的 GitHub Toolkit 绑定当前任务的 owner / repo / PR number，模型
 - `AGENT_MODE=tool_calling` 能按需读取 PR 信息、diff、函数上下文、提交历史和跨文件引用。
 - 开启 `AGENT_ENABLE_STATIC_CHECKS=true` 后，能把 `go test` / `go vet` 的确定性失败信息交给模型。
 - 静态检查结果同样记录在 `tool_call_log`，可查询输入、输出、状态和耗时。
+- 每条 finding 都要求携带工具返回的 `evidence`；确定性问题标记 `confirmed`，推测性问题标记 `needs_verification`。
 
 后续增强：
 
-- 结论分级：`confirmed` 要求有跨文件引用、静态检查或其他工具证据；仅凭 diff 推断时标记 `needs_verification`。
 - 评测集和误报率统计。
 
 目标示例：
@@ -233,7 +233,20 @@ go test ./... 输出编译失败。
       "severity": "high|medium|low",
       "comment": "具体问题",
       "suggestion": "修改建议",
-      "confidence": "confirmed|needs_verification"
+      "confidence": "confirmed|needs_verification",
+      "evidence": [
+        {
+          "type": "reference",
+          "file": "cmd/server/main.go",
+          "line": 42,
+          "text": "cfg.MaxDiffLines"
+        },
+        {
+          "type": "static_check",
+          "command": "go test ./...",
+          "excerpt": "undefined: cfg.MaxDiffLines"
+        }
+      ]
     }
   ]
 }
@@ -242,7 +255,9 @@ go test ./... 输出编译失败。
 当前实现：
 
 - DeepSeek 被要求只返回上述 JSON。
-- `review.Service` 解析 JSON，先写入 `review_result`，再回写 PR Review。
+- `review.Service` 解析 JSON，过滤没有文件、行号或 evidence 的 finding，并把非法 confidence 归一化为 `needs_verification`。
+- 无 diff 和纯文档 PR 直接返回空 findings，不调用 LLM。
+- 解析结果先写入 `review_result`，再回写 PR Review。
 - `payload_json` 保存 findings，`raw_response` 保存模型原文。
 - `model / input_tokens / output_tokens / total_tokens / llm_duration_ms` 同时落库。
 - 如果模型偶发不按 JSON 返回，则降级为：summary 使用原文、findings 为空，避免整条任务失败。

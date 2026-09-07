@@ -106,6 +106,35 @@ func TestReviewPRSkipsLLMWhenNoChangedFiles(t *testing.T) {
 	}
 }
 
+func TestReviewPRSkipsLLMForDocsOnlyPR(t *testing.T) {
+	gh := &fakeGitHubClient{
+		pr: &github.PullRequest{
+			Title: "Update README",
+			Head:  github.Ref{SHA: "291ac5aedc5fd96c5030a6c18e91923140677591"},
+		},
+		files: []github.PullRequestFile{
+			{Filename: "README.md", Patch: "@@ -1 +1 @@\n+updated"},
+		},
+	}
+	fakeLLM := &fakeLLMClient{response: llm.ReviewResponse{Content: "should not be called"}}
+	results := &fakeResultStore{}
+	service := New(gh, fakeLLM, results, 100, 10, 100)
+
+	if err := service.ReviewPR(context.Background(), "owner", "repo", 12, 2); err != nil {
+		t.Fatalf("ReviewPR() error = %v", err)
+	}
+	if fakeLLM.called {
+		t.Fatal("LLM was called for a documentation-only pull request")
+	}
+	if len(results.input.Findings) != 0 || results.input.Model != "none" ||
+		results.input.Summary != "This pull request only changes documentation; code review skipped." {
+		t.Fatalf("unexpected docs-only result input: %+v", results.input)
+	}
+	if !strings.Contains(gh.reviewBody, "only changes documentation") {
+		t.Fatalf("unexpected docs-only review comment: %s", gh.reviewBody)
+	}
+}
+
 func TestReviewPR(t *testing.T) {
 	gh := &fakeGitHubClient{
 		pr: &github.PullRequest{

@@ -53,7 +53,7 @@
 - [x] Day 3：tree-sitter 函数级上下文裁剪（本地与线上部署完成）
 - [x] Day 4：search_references，检索被删除或改名符号的跨文件引用（线上 tool_calling 验收完成）
 - [x] Day 5：run_static_checks，执行 go test / go vet 并回传结果（本地完成，待线上验收）
-- [ ] Day 6：结构化输出与 confirmed / needs_verification 分级
+- [x] Day 6：结构化输出、evidence 与 confirmed / needs_verification 分级（本地完成）
 - [ ] Day 7：基础评测集 + 准确率/误报率统计
 - [ ] Day 8：线上验收、文档和简历收尾
 
@@ -61,7 +61,7 @@
 - Agent 能多步调工具
 - 能读取文件上下文并检索跨文件引用
 - 开启静态检查后，能把 go test / go vet 失败信息回传给 Agent
-- 审查意见区分 confirmed 和 needs_verification
+- 审查意见区分 confirmed 和 needs_verification，且每条问题携带 evidence
 - 评测有指标
 
 回归样本：
