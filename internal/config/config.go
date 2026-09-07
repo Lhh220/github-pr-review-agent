@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -44,6 +45,10 @@ type Config struct {
 	AgentToolTimeout         time.Duration
 	AgentMaxCommitHistory    int
 	AgentMaxReferenceResults int
+	AgentEnableStaticChecks  bool
+	AgentStaticCheckTimeout  time.Duration
+	AgentStaticCheckWorkDir  string
+	AgentStaticCheckGoProxy  string
 }
 
 func Load() *Config {
@@ -85,6 +90,10 @@ func Load() *Config {
 		AgentToolTimeout:         getEnvDuration("AGENT_TOOL_TIMEOUT", 20*time.Second),
 		AgentMaxCommitHistory:    getEnvInt("AGENT_MAX_COMMIT_HISTORY", 20),
 		AgentMaxReferenceResults: getEnvInt("AGENT_MAX_REFERENCE_RESULTS", 100),
+		AgentEnableStaticChecks:  getEnvBool("AGENT_ENABLE_STATIC_CHECKS", false),
+		AgentStaticCheckTimeout:  getEnvDuration("AGENT_STATIC_CHECK_TIMEOUT", 2*time.Minute),
+		AgentStaticCheckWorkDir:  getEnv("AGENT_STATIC_CHECK_WORK_DIR", ".static-checks"),
+		AgentStaticCheckGoProxy:  getEnv("AGENT_STATIC_CHECK_GOPROXY", "off"),
 	}
 }
 
@@ -123,4 +132,16 @@ func getEnvDurationAllowZero(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }

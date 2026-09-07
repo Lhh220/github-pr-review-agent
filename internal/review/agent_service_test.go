@@ -159,3 +159,26 @@ func TestAgentReviewPRRunsToolsAndPersistsTrace(t *testing.T) {
 		t.Fatalf("unexpected review comment: %s", gh.reviewBody)
 	}
 }
+
+func TestAgentServiceRegistersStaticChecksWhenEnabled(t *testing.T) {
+	gh := &fakeAgentGitHubClient{
+		pr: &github.PullRequest{
+			Title: "No-op",
+			Head:  github.Ref{SHA: "291ac5aedc5fd96c5030a6c18e91923140677591"},
+		},
+	}
+	provider := &scriptedAgentProvider{responses: []llm.ChatResponse{
+		{Content: `{"summary":"No blocking issues.","findings":[]}`},
+	}}
+	service := NewAgent(gh, provider, &fakeAgentStore{}, AgentOptions{
+		EnableStaticChecks: true,
+		StaticCheckWorkDir: t.TempDir(),
+	})
+
+	if err := service.ReviewPR(context.Background(), "owner", "repo", 12, 8); err != nil {
+		t.Fatalf("ReviewPR() error = %v", err)
+	}
+	if len(provider.requests) == 0 || len(provider.requests[0].Tools) != 7 {
+		t.Fatalf("unexpected tool definitions: requests=%d tools=%d", len(provider.requests), len(provider.requests[0].Tools))
+	}
+}

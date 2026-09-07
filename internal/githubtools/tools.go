@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/liaohonghui/github-pr-review-agent/internal/agent"
 	"github.com/liaohonghui/github-pr-review-agent/internal/codecontext"
@@ -37,6 +38,10 @@ type Options struct {
 	MaxFileContextLines int
 	MaxCommitHistory    int
 	MaxReferenceResults int
+	EnableStaticChecks  bool
+	StaticCheckTimeout  time.Duration
+	StaticCheckWorkDir  string
+	StaticCheckGoProxy  string
 }
 
 type Toolkit struct {
@@ -49,6 +54,11 @@ type Toolkit struct {
 	maxFileContextLines int
 	maxCommitHistory    int
 	maxReferenceResults int
+	enableStaticChecks  bool
+	staticCheckTimeout  time.Duration
+	staticCheckWorkDir  string
+	staticCheckGoProxy  string
+	staticCheckRunner   staticCheckRunner
 
 	mu          sync.Mutex
 	cachedPR    *github.PullRequest
@@ -67,6 +77,14 @@ func NewToolkit(client Client, owner, repo string, number int, options Options) 
 	if options.MaxReferenceResults > defaultMaxReferenceResults {
 		options.MaxReferenceResults = defaultMaxReferenceResults
 	}
+	if options.StaticCheckTimeout <= 0 {
+		options.StaticCheckTimeout = defaultStaticCheckTimeout
+	}
+	options.StaticCheckWorkDir = strings.TrimSpace(options.StaticCheckWorkDir)
+	options.StaticCheckGoProxy = strings.TrimSpace(options.StaticCheckGoProxy)
+	if options.StaticCheckGoProxy == "" {
+		options.StaticCheckGoProxy = "off"
+	}
 
 	return &Toolkit{
 		client:              client,
@@ -77,11 +95,16 @@ func NewToolkit(client Client, owner, repo string, number int, options Options) 
 		maxFileContextLines: options.MaxFileContextLines,
 		maxCommitHistory:    options.MaxCommitHistory,
 		maxReferenceResults: options.MaxReferenceResults,
+		enableStaticChecks:  options.EnableStaticChecks,
+		staticCheckTimeout:  options.StaticCheckTimeout,
+		staticCheckWorkDir:  options.StaticCheckWorkDir,
+		staticCheckGoProxy:  options.StaticCheckGoProxy,
+		staticCheckRunner:   runStaticCheckCommand,
 	}
 }
 
 func (t *Toolkit) Tools() []agent.Tool {
-	return []agent.Tool{
+	tools := []agent.Tool{
 		prMetaTool{toolkit: t},
 		changedFilesTool{toolkit: t},
 		diffTool{toolkit: t},
@@ -89,6 +112,10 @@ func (t *Toolkit) Tools() []agent.Tool {
 		searchReferencesTool{toolkit: t},
 		commitHistoryTool{toolkit: t},
 	}
+	if t.enableStaticChecks {
+		tools = append(tools, staticChecksTool{toolkit: t})
+	}
+	return tools
 }
 
 func (t *Toolkit) PullRequest(ctx context.Context) (*github.PullRequest, error) {

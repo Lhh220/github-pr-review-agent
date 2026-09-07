@@ -38,6 +38,10 @@ type AgentOptions struct {
 	MaxFileContextLines int
 	MaxCommitHistory    int
 	MaxReferenceResults int
+	EnableStaticChecks  bool
+	StaticCheckTimeout  time.Duration
+	StaticCheckWorkDir  string
+	StaticCheckGoProxy  string
 }
 
 type AgentService struct {
@@ -67,6 +71,10 @@ func (s *AgentService) ReviewPR(ctx context.Context, owner, repo string, number 
 		MaxFileContextLines: s.Options.MaxFileContextLines,
 		MaxCommitHistory:    s.Options.MaxCommitHistory,
 		MaxReferenceResults: s.Options.MaxReferenceResults,
+		EnableStaticChecks:  s.Options.EnableStaticChecks,
+		StaticCheckTimeout:  s.Options.StaticCheckTimeout,
+		StaticCheckWorkDir:  s.Options.StaticCheckWorkDir,
+		StaticCheckGoProxy:  s.Options.StaticCheckGoProxy,
 	})
 	registry, err := agent.NewRegistry(toolkit.Tools()...)
 	if err != nil {
@@ -138,7 +146,7 @@ func (s *AgentService) recordToolCall(ctx context.Context, taskID uint64, invoca
 func agentSystemPrompt() string {
 	return `You are a senior code reviewer for a Go backend project.
 
-Use the available read-only GitHub tools to inspect the pull request before reaching a conclusion. Start by understanding the PR metadata and changed files, then read only the diffs and file context needed to validate possible issues. Prefer read_file_context for function or class context instead of judging from the diff alone. When a diff removes, renames, or changes an exported symbol, field, method, type, or important config key, use search_references to check remaining usages before reporting the issue. Do not invent tool results.
+Use the available read-only GitHub tools to inspect the pull request before reaching a conclusion. Start by understanding the PR metadata and changed files, then read only the diffs and file context needed to validate possible issues. Prefer read_file_context for function or class context instead of judging from the diff alone. When a diff removes, renames, or changes an exported symbol, field, method, type, or important config key, use search_references to check remaining usages before reporting the issue. If run_static_checks is available and the PR may affect compilation, tests, or static analysis, run the relevant server-defined check and use its result as deterministic evidence. Do not invent tool results.
 
 Return only a valid JSON object matching this schema:
 {
