@@ -1,8 +1,12 @@
 package github
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -52,6 +56,39 @@ func TestGetPullRequestFilesPaginates(t *testing.T) {
 	}
 }
 
+func TestGetFileContentEscapesPathSegmentsButKeepsSeparators(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.EscapedPath(); got != "/repos/owner/repo/contents/internal/code%20review/service.go" {
+			t.Errorf("escaped path = %s", got)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(fileContentResponse{
+			Content:  base64.StdEncoding.EncodeToString([]byte("package service")),
+			Encoding: "base64",
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient("test-token")
+	client.baseURL = server.URL
+
+	content, err := client.GetFileContent(
+		context.Background(),
+		"owner",
+		"repo",
+		"internal/code review/service.go",
+		"main",
+	)
+	if err != nil {
+		t.Fatalf("GetFileContent() error = %v", err)
+	}
+	if content != "package service" {
+		t.Fatalf("content = %q", content)
+	}
+}
+
 func TestGetPullRequestCommitsRequestsLimit(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/repos/owner/repo/pulls/12/commits" {
@@ -71,5 +108,46 @@ func TestGetPullRequestCommitsRequestsLimit(t *testing.T) {
 	client.baseURL = server.URL
 	if _, err := client.GetPullRequestCommits(context.Background(), "owner", "repo", 12, 7); err != nil {
 		t.Fatalf("GetPullRequestCommits() error = %v", err)
+	}
+}
+
+func TestGetRepositoryTarball(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/owner/repo/tarball/head-sha" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Errorf("authorization = %s", got)
+		}
+		var buffer bytes.Buffer
+		gzipWriter := gzip.NewWriter(&buffer)
+		if err := gzipWriter.Close(); err != nil {
+			t.Errorf("close gzip writer: %v", err)
+		}
+		_, _ = w.Write(buffer.Bytes())
+	}))
+	defer server.Close()
+
+	client := NewClient("test-token")
+	client.baseURL = server.URL
+	body, err := client.GetRepositoryTarball(context.Background(), "owner", "repo", "head-sha")
+	if err != nil {
+		t.Fatalf("GetRepositoryTarball() error = %v", err)
+	}
+	defer body.Close()
+
+	gzipReader, err := gzip.NewReader(body)
+	if err != nil {
+		t.Fatalf("open gzip reader: %v", err)
+	}
+	defer gzipReader.Close()
+	content, err := io.ReadAll(gzipReader)
+	if err != nil {
+		t.Fatalf("read gzip content: %v", err)
+	}
+	if len(content) != 0 {
+		t.Fatalf("content = %q, want empty", content)
 	}
 }

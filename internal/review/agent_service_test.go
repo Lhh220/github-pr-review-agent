@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,10 @@ func (f *fakeAgentGitHubClient) GetFileContent(ctx context.Context, owner, repo,
 	f.contentPath = path
 	f.contentRef = ref
 	return f.content, nil
+}
+
+func (f *fakeAgentGitHubClient) GetRepositoryTarball(ctx context.Context, owner, repo, ref string) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
 }
 
 func (f *fakeAgentGitHubClient) CreatePullRequestReview(ctx context.Context, owner, repo string, number int, body string) error {
@@ -125,7 +130,7 @@ func TestAgentReviewPRRunsToolsAndPersistsTrace(t *testing.T) {
 	if err := service.ReviewPR(context.Background(), "owner", "repo", 12, 7); err != nil {
 		t.Fatalf("ReviewPR() error = %v", err)
 	}
-	if len(provider.requests) != 3 || len(provider.requests[0].Tools) != 5 {
+	if len(provider.requests) != 3 || len(provider.requests[0].Tools) != 6 {
 		t.Fatalf("unexpected provider requests: count=%d first_tools=%d", len(provider.requests), len(provider.requests[0].Tools))
 	}
 	if provider.requests[1].Messages[3].Role != "tool" ||

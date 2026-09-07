@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ const (
 	defaultMaxDiffLines        = 2000
 	defaultMaxFileContextLines = 200
 	defaultMaxCommitHistory    = 20
+	defaultMaxReferenceResults = 100
 	maxListedFiles             = 200
 	maxToolOutputChars         = 40000
 	maxPRBodyChars             = 12000
@@ -27,12 +29,14 @@ type Client interface {
 	GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, error)
 	GetPullRequestCommits(ctx context.Context, owner, repo string, number, limit int) ([]github.PullRequestCommit, error)
 	GetFileContent(ctx context.Context, owner, repo, path, ref string) (string, error)
+	GetRepositoryTarball(ctx context.Context, owner, repo, ref string) (io.ReadCloser, error)
 }
 
 type Options struct {
 	MaxDiffLines        int
 	MaxFileContextLines int
 	MaxCommitHistory    int
+	MaxReferenceResults int
 }
 
 type Toolkit struct {
@@ -44,6 +48,7 @@ type Toolkit struct {
 	maxDiffLines        int
 	maxFileContextLines int
 	maxCommitHistory    int
+	maxReferenceResults int
 
 	mu          sync.Mutex
 	cachedPR    *github.PullRequest
@@ -55,8 +60,12 @@ func NewToolkit(client Client, owner, repo string, number int, options Options) 
 	normalizePositive(&options.MaxDiffLines, defaultMaxDiffLines)
 	normalizePositive(&options.MaxFileContextLines, defaultMaxFileContextLines)
 	normalizePositive(&options.MaxCommitHistory, defaultMaxCommitHistory)
+	normalizePositive(&options.MaxReferenceResults, defaultMaxReferenceResults)
 	if options.MaxCommitHistory > 100 {
 		options.MaxCommitHistory = 100
+	}
+	if options.MaxReferenceResults > defaultMaxReferenceResults {
+		options.MaxReferenceResults = defaultMaxReferenceResults
 	}
 
 	return &Toolkit{
@@ -67,6 +76,7 @@ func NewToolkit(client Client, owner, repo string, number int, options Options) 
 		maxDiffLines:        options.MaxDiffLines,
 		maxFileContextLines: options.MaxFileContextLines,
 		maxCommitHistory:    options.MaxCommitHistory,
+		maxReferenceResults: options.MaxReferenceResults,
 	}
 }
 
@@ -76,6 +86,7 @@ func (t *Toolkit) Tools() []agent.Tool {
 		changedFilesTool{toolkit: t},
 		diffTool{toolkit: t},
 		fileContextTool{toolkit: t},
+		searchReferencesTool{toolkit: t},
 		commitHistoryTool{toolkit: t},
 	}
 }

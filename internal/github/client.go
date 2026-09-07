@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -220,7 +221,7 @@ func (c *Client) GetFileContent(ctx context.Context, owner, repo, path, ref stri
 	if ref != "" {
 		query = "?ref=" + url.QueryEscape(ref)
 	}
-	apiPath := fmt.Sprintf("/repos/%s/%s/contents/%s%s", owner, repo, url.PathEscape(path), query)
+	apiPath := fmt.Sprintf("/repos/%s/%s/contents/%s%s", owner, repo, escapeContentPath(path), query)
 	var out fileContentResponse
 	if err := c.do(ctx, http.MethodGet, apiPath, nil, &out); err != nil {
 		return "", err
@@ -236,6 +237,57 @@ func (c *Client) GetFileContent(ctx context.Context, owner, repo, path, ref stri
 		return "", fmt.Errorf("decode file content: %w", err)
 	}
 	return string(content), nil
+}
+
+func (c *Client) GetRepositoryTarball(ctx context.Context, owner, repo, ref string) (io.ReadCloser, error) {
+	if c.limiter == nil {
+		c.limiter = limiter.NoopLimiter{}
+	}
+	if err := c.limiter.Wait(ctx, "github:api"); err != nil {
+		return nil, fmt.Errorf("wait github api rate limit: %w", err)
+	}
+
+	token := c.token
+	if c.tokenSource != nil {
+		var err error
+		token, err = c.tokenSource()
+		if err != nil {
+			return nil, fmt.Errorf("get github token: %w", err)
+		}
+	}
+
+	apiPath := fmt.Sprintf(
+		"/repos/%s/%s/tarball/%s",
+		owner,
+		repo,
+		url.PathEscape(ref),
+	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+apiPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("github api %s %s: status=%d body=%s", http.MethodGet, apiPath, resp.StatusCode, string(raw))
+	}
+	return resp.Body, nil
+}
+
+func escapeContentPath(path string) string {
+	segments := strings.Split(path, "/")
+	for i, segment := range segments {
+		segments[i] = url.PathEscape(segment)
+	}
+	return strings.Join(segments, "/")
 }
 
 func (c *Client) CreatePullRequestReview(ctx context.Context, owner, repo string, number int, body string) error {

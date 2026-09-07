@@ -14,7 +14,7 @@
 
 ## 3. 整体架构
 
-当前实现已接入 RabbitMQ 延迟重试、死信队列、Worker Pool、Redis PR 级分布式锁、外部 API 限流、阶段三 Day 1 的 Tool Calling 基础框架、Day 2 的 5 个真实 GitHub 工具，以及 Day 3 的 tree-sitter 函数级上下文裁剪。默认链路仍是 `AGENT_MODE=legacy` 固定上下文审查；设置 `AGENT_MODE=tool_calling` 后启用 Agent 链路。跨文件引用检索和静态检查沙箱还未实现。
+当前实现已接入 RabbitMQ 延迟重试、死信队列、Worker Pool、Redis PR 级分布式锁、外部 API 限流、阶段三 Day 1 的 Tool Calling 基础框架、Day 2 的 5 个真实 GitHub 工具、Day 3 的 tree-sitter 函数级上下文裁剪，以及 Day 4 的 `search_references` 跨文件引用检索。默认链路仍是 `AGENT_MODE=legacy` 固定上下文审查；设置 `AGENT_MODE=tool_calling` 后启用 Agent 链路。静态检查沙箱还未实现。
 
 ```text
 GitHub PR Event
@@ -44,7 +44,7 @@ MySQL review_task + review_result
 GitHub PR Review API
 ```
 
-下图是 `AGENT_MODE=tool_calling` 的当前 Agent 架构；`read_file_context` 内部使用 tree-sitter 做上下文裁剪，`search_references` 和静态检查仍是后续增强：
+下图是 `AGENT_MODE=tool_calling` 的当前 Agent 架构；`read_file_context` 内部使用 tree-sitter 做上下文裁剪，静态检查仍是后续增强：
 
 ```text
 GitHub PR Event
@@ -64,6 +64,7 @@ Agent Loop
    |-- Tool: list_changed_files
    |-- Tool: read_diff
    |-- Tool: read_file_context
+   |-- Tool: search_references
    |-- Tool: get_commit_history
    |  read_file_context -> tree-sitter / line fallback
    v
@@ -135,13 +136,15 @@ MySQL (任务/结果/审计) + Redis (锁 / API 限流)
 - Day 1 已实现基础 Agent Loop：构造 system/user 消息、发送工具定义、接收模型 `tool_calls`、调度注册表执行工具、把 tool result 回传模型、聚合 usage，并在工具预算耗尽后强制模型输出最终 JSON。
 - 每轮工具调用有独立超时；未知工具、参数错误和工具执行错误会作为 tool result 回传给模型，避免一次工具选择错误直接导致任务失败。
 - Day 2 已接入 5 个只读 GitHub 工具：`get_pr_meta`、`list_changed_files`、`read_diff`、`read_file_context`、`get_commit_history`。
+- Day 4 已接入第 6 个只读工具 `search_references`，用于检索被删除、改名或影响面不明确的符号引用。
 - Agent 执行多步推理：
   1. 调 `get_pr_meta` 了解 PR 标题、描述、改动文件列表。
   2. 调 `read_diff` 读取完整 diff。
   3. 对关注文件调 `read_file_context`，取函数、方法或类级上下文。
-  4. 必要时调 `get_commit_history` 理解修改动机。
-  5. 输出结构化审查意见。
-  6. `search_references` 和 `run_static_checks` 是后续增强，当前还未注册为工具。
+  4. 删除、改名或修改符号、字段、类型和配置键时，调 `search_references` 检查剩余引用。
+  5. 必要时调 `get_commit_history` 理解修改动机。
+  6. 输出结构化审查意见。
+  7. `run_static_checks` 是后续增强，当前还未注册为工具。
 - 每一步工具调用记录到 `tool_call_log`。
 
 ### 4.5 工具注册
@@ -157,7 +160,7 @@ type Tool interface {
 ```
 工具注册表 `Registry` 负责校验工具名、描述和 JSON Schema，避免重复注册，并输出稳定的工具定义列表。Agent 根据模型返回的 tool_call 调度。DeepSeek Provider 使用 OpenAI 兼容的 tools / tool_calls / tool 消息格式。
 
-Day 2 的 GitHub Toolkit 绑定当前任务的 owner / repo / PR number，模型不能指定其他仓库或 PR。PR meta 和 changed files 在同一次任务内缓存，避免模型多轮工具调用时重复请求 GitHub。所有工具输出都是 JSON，并受 diff 行数、文件行范围、commit 数量和输出字符数限制。`CreatePullRequestReview` 不注册为工具；写评论仍由服务端在 Agent 输出结构化结果后统一执行。
+Day 2 的 GitHub Toolkit 绑定当前任务的 owner / repo / PR number，模型不能指定其他仓库或 PR。PR meta 和 changed files 在同一次任务内缓存，避免模型多轮工具调用时重复请求 GitHub。所有工具输出都是 JSON，并受 diff 行数、文件行范围、commit 数量、引用结果数量和输出字符数限制。`CreatePullRequestReview` 不注册为工具；写评论仍由服务端在 Agent 输出结构化结果后统一执行。
 
 ### 4.6 上下文裁剪
 
@@ -169,31 +172,39 @@ Day 2 的 GitHub Toolkit 绑定当前任务的 owner / repo / PR number，模型
 
 工具输出包含 `context_mode`（`tree_sitter` / `line_fallback`）、`language`、`symbols`、带行号的 `content`、截断标记和最终行范围。所有片段继续受 `MAX_FILE_CONTEXT_LINES` 与工具输出字符上限约束，避免超长上下文抬高 token 成本。
 
-### 4.7 当前能力边界与增强方向
+### 4.7 跨文件引用检索
+
+`search_references` 的输入是一个精确标识符，例如 `MaxDiffLines`、`ValidateToken`，可选传入仓库相对路径前缀和最大结果数。它的执行流程如下：
+
+1. 获取当前 PR head SHA，下载对应 commit 的 gzip tarball，保证扫描的是 PR 最新代码，而不是默认分支。
+2. 流式遍历 tar 包，只扫描常见源码、配置和文档文件，跳过 `vendor/`、`node_modules/` 和 `.git/`。
+3. 对每一行做标识符边界匹配，避免把 `MaxDiffLinesExtra` 误判成 `MaxDiffLines`。
+4. 返回引用路径、行号、上下文片段，并标记该文件是否属于本次 PR 的变更文件。
+5. 工具层限制最多 2000 个文件、128MB 解压后内容、单文件 2MB 和默认 100 条结果，最终输出继续受工具输出字符上限保护。
+
+选择 tarball 而不是 GitHub Code Search，是因为 Code Search 主要面向默认分支索引，不能稳定检索 PR head；逐个读取 Git tree 文件则会消耗大量 GitHub API 配额。tarball 是一次下载、可流式处理、可严格限额的方案。
+
+### 4.8 当前能力边界与增强方向
 
 当前 MVP 是 **diff + changed-file-context reviewer**：
 
 - PR 无变更文件时短路处理，直接回固定评论，不调用 LLM。
 - 把 PR diff 交给 LLM。
 - 额外读取部分变更文件的完整内容，并按行数裁剪后一起送给 LLM。
-- `AGENT_MODE=tool_calling` 已能按需读取当前仓库指定文件上下文；Go / Python / JavaScript 支持函数级 tree-sitter 裁剪，但还没有跨文件符号引用检索。
-- 无法确认被删除的字段、函数、类型是否仍被其他文件引用。
+- `AGENT_MODE=tool_calling` 已能按需读取当前仓库指定文件上下文，并检索符号的跨文件引用。
 - 无法验证 PR 是否能通过编译、测试或静态检查。
 
-因此它只能给出“可能存在风险”的提示，不能把跨文件引用问题定位成确定的编译错误。
+因此它能把跨文件引用问题定位到具体文件和行号，但还不能确认最终编译结果；静态检查仍在后续增强。
 
-下一阶段要把它升级成 **code-aware agent**：
+下一阶段要把它升级成 **verifiable code-aware agent**：
 
 1. `read_file_context`
    - 读取变更文件及关联文件的完整上下文。
    - 优先读取被改动函数、结构体、接口的定义和使用位置。
-2. `search_references`
-   - 对被删除或改名的符号做引用检索。
-   - 输出引用文件、行号和上下文片段。
-3. `run_static_checks`
+2. `run_static_checks`
    - 在隔离环境中执行 `go test`、`go vet` 或编译检查。
    - 把失败信息回传给 Agent，作为确定性证据。
-4. 结论分级
+3. 结论分级
    - `confirmed`：有代码上下文或静态检查证据。
    - `needs_verification`：仅有 diff 推理，缺少跨文件证据。
 
@@ -212,7 +223,7 @@ go test ./... 会编译失败。
 - 限制 CPU、内存、执行时长和网络访问。
 - 只允许执行白名单命令，避免把 PR 中的代码当成任意命令执行。
 
-### 4.8 审查结果
+### 4.9 审查结果
 
 结构化输出：
 ```json
@@ -243,7 +254,7 @@ go test ./... 会编译失败。
 
 查询接口：`GET /tasks/:id/result`，返回任务状态和完整结构化结果。
 
-### 4.9 存储设计
+### 4.10 存储设计
 
 MySQL 表：
 - `review_task`：id, repo, pr_number, commit_sha, status, attempt_count, max_attempts, next_retry_at, created_at, updated_at, error。
@@ -280,7 +291,7 @@ Redis Key：
 - `ratelimit:llm:deepseek`：DeepSeek 固定窗口限流。
 - 事件去重当前由 MySQL `delivery_id` 唯一约束实现，不依赖 Redis。
 
-### 4.10 状态机
+### 4.11 状态机
 
 ```text
 received -> queued -> running -> done
@@ -294,7 +305,7 @@ running -> failed
 
 `failed` 保留给队列发布失败等不可重试的基础设施错误；业务审查失败优先走 `retrying`，达到最大次数后进入 `dead_letter`。
 
-### 4.11 开发者后台
+### 4.12 开发者后台
 
 `internal/adminui` 提供轻量 Admin Console，静态 HTML / CSS / JS 通过 `go:embed` 打进服务二进制，路由为 `/admin`。
 

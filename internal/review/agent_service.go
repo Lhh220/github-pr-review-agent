@@ -3,6 +3,7 @@ package review
 import (
 	"context"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/liaohonghui/github-pr-review-agent/internal/agent"
@@ -17,6 +18,7 @@ type AgentGitHubClient interface {
 	GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, error)
 	GetPullRequestCommits(ctx context.Context, owner, repo string, number, limit int) ([]github.PullRequestCommit, error)
 	GetFileContent(ctx context.Context, owner, repo, path, ref string) (string, error)
+	GetRepositoryTarball(ctx context.Context, owner, repo, ref string) (io.ReadCloser, error)
 	CreatePullRequestReview(ctx context.Context, owner, repo string, number int, body string) error
 }
 
@@ -35,6 +37,7 @@ type AgentOptions struct {
 	MaxDiffLines        int
 	MaxFileContextLines int
 	MaxCommitHistory    int
+	MaxReferenceResults int
 }
 
 type AgentService struct {
@@ -63,6 +66,7 @@ func (s *AgentService) ReviewPR(ctx context.Context, owner, repo string, number 
 		MaxDiffLines:        s.Options.MaxDiffLines,
 		MaxFileContextLines: s.Options.MaxFileContextLines,
 		MaxCommitHistory:    s.Options.MaxCommitHistory,
+		MaxReferenceResults: s.Options.MaxReferenceResults,
 	})
 	registry, err := agent.NewRegistry(toolkit.Tools()...)
 	if err != nil {
@@ -134,7 +138,7 @@ func (s *AgentService) recordToolCall(ctx context.Context, taskID uint64, invoca
 func agentSystemPrompt() string {
 	return `You are a senior code reviewer for a Go backend project.
 
-Use the available read-only GitHub tools to inspect the pull request before reaching a conclusion. Start by understanding the PR metadata and changed files, then read only the diffs and file context needed to validate possible issues. Prefer read_file_context for function or class context instead of judging from the diff alone. Do not invent tool results.
+Use the available read-only GitHub tools to inspect the pull request before reaching a conclusion. Start by understanding the PR metadata and changed files, then read only the diffs and file context needed to validate possible issues. Prefer read_file_context for function or class context instead of judging from the diff alone. When a diff removes, renames, or changes an exported symbol, field, method, type, or important config key, use search_references to check remaining usages before reporting the issue. Do not invent tool results.
 
 Return only a valid JSON object matching this schema:
 {
