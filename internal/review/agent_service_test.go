@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,10 @@ func (f *fakeAgentGitHubClient) GetFileContent(ctx context.Context, owner, repo,
 	f.contentPath = path
 	f.contentRef = ref
 	return f.content, nil
+}
+
+func (f *fakeAgentGitHubClient) GetRepositoryTarball(ctx context.Context, owner, repo, ref string) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
 }
 
 func (f *fakeAgentGitHubClient) CreatePullRequestReview(ctx context.Context, owner, repo string, number int, body string) error {
@@ -125,7 +130,7 @@ func TestAgentReviewPRRunsToolsAndPersistsTrace(t *testing.T) {
 	if err := service.ReviewPR(context.Background(), "owner", "repo", 12, 7); err != nil {
 		t.Fatalf("ReviewPR() error = %v", err)
 	}
-	if len(provider.requests) != 3 || len(provider.requests[0].Tools) != 5 {
+	if len(provider.requests) != 3 || len(provider.requests[0].Tools) != 6 {
 		t.Fatalf("unexpected provider requests: count=%d first_tools=%d", len(provider.requests), len(provider.requests[0].Tools))
 	}
 	if provider.requests[1].Messages[3].Role != "tool" ||
@@ -152,5 +157,92 @@ func TestAgentReviewPRRunsToolsAndPersistsTrace(t *testing.T) {
 	if !strings.Contains(gh.reviewBody, "No blocking issues.") ||
 		!strings.Contains(gh.reviewBody, "Task ID: 7 | commit 291ac5a") {
 		t.Fatalf("unexpected review comment: %s", gh.reviewBody)
+	}
+}
+
+func TestAgentServiceRegistersStaticChecksWhenEnabled(t *testing.T) {
+	gh := &fakeAgentGitHubClient{
+		pr: &github.PullRequest{
+			Title: "No-op",
+			Head:  github.Ref{SHA: "291ac5aedc5fd96c5030a6c18e91923140677591"},
+		},
+		files: []github.PullRequestFile{{Filename: "main.go", Patch: "@@ -1 +1 @@\n+package main"}},
+	}
+	provider := &scriptedAgentProvider{responses: []llm.ChatResponse{
+		{Content: `{"summary":"No blocking issues.","findings":[]}`},
+	}}
+	service := NewAgent(gh, provider, &fakeAgentStore{}, AgentOptions{
+		EnableStaticChecks: true,
+		StaticCheckWorkDir: t.TempDir(),
+	})
+
+	if err := service.ReviewPR(context.Background(), "owner", "repo", 12, 8); err != nil {
+		t.Fatalf("ReviewPR() error = %v", err)
+	}
+	if len(provider.requests) == 0 || len(provider.requests[0].Tools) != 7 {
+		t.Fatalf("unexpected tool definitions: requests=%d tools=%d", len(provider.requests), len(provider.requests[0].Tools))
+	}
+}
+
+func TestAgentReviewPRSkipsNoDiffAndDocsOnly(t *testing.T) {
+	tests := []struct {
+		name    string
+		files   []github.PullRequestFile
+		summary string
+	}{
+		{
+			name:    "no changed files",
+			files:   nil,
+			summary: "This pull request has no changed files relative to its base branch; review skipped.",
+		},
+		{
+			name:    "documentation only",
+			files:   []github.PullRequestFile{{Filename: "README.md", Patch: "@@ -1 +1 @@\n+updated"}},
+			summary: "This pull request only changes documentation; code review skipped.",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gh := &fakeAgentGitHubClient{
+				pr: &github.PullRequest{
+					Title: "No-op",
+					Head:  github.Ref{SHA: "291ac5aedc5fd96c5030a6c18e91923140677591"},
+				},
+				files: test.files,
+			}
+			provider := &scriptedAgentProvider{}
+			resultStore := &fakeAgentStore{}
+			service := NewAgent(gh, provider, resultStore, AgentOptions{})
+
+			if err := service.ReviewPR(context.Background(), "owner", "repo", 12, 9); err != nil {
+				t.Fatalf("ReviewPR() error = %v", err)
+			}
+			if len(provider.requests) != 0 {
+				t.Fatalf("provider was called for a skipped pull request: %+v", provider.requests)
+			}
+			if len(resultStore.toolCalls) != 0 || len(resultStore.result.Findings) != 0 ||
+				resultStore.result.Model != "none" || resultStore.result.Summary != test.summary {
+				t.Fatalf("unexpected skipped result: %+v", resultStore)
+			}
+			if !strings.Contains(gh.reviewBody, "review skipped") {
+				t.Fatalf("unexpected skipped review comment: %s", gh.reviewBody)
+			}
+		})
+	}
+}
+
+func TestAgentSystemPromptRequiresEvidenceAndConfidenceLevels(t *testing.T) {
+	prompt := agentSystemPrompt()
+	for _, required := range []string{
+		`"evidence"`,
+		"Every finding must include non-empty evidence",
+		"Use confirmed only when a tool result proves the issue",
+		"performance risks",
+		"needs_verification",
+		"documentation-only",
+	} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("system prompt missing %q: %s", required, prompt)
+		}
 	}
 }

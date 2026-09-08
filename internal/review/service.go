@@ -57,12 +57,18 @@ func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int, 
 	if err != nil {
 		return fmt.Errorf("get pull request files: %w", err)
 	}
-	if len(files) == 0 {
+	if len(files) == 0 || isDocsOnlyPR(files) {
+		summary := "This pull request has no changed files relative to its base branch; review skipped."
+		rawResponse := "No changed files relative to the base branch."
+		if len(files) > 0 {
+			summary = "This pull request only changes documentation; code review skipped."
+			rawResponse = "Documentation-only pull request; code review skipped."
+		}
 		result, err := s.Results.CreateReviewResult(ctx, store.NewReviewResult{
 			TaskID:      taskID,
-			Summary:     "This pull request has no changed files relative to its base branch; review skipped.",
+			Summary:     summary,
 			Findings:    []store.Finding{},
-			RawResponse: "No changed files relative to the base branch.",
+			RawResponse: rawResponse,
 			Model:       "none",
 		})
 		if err != nil {
@@ -126,7 +132,43 @@ func parseReviewResponse(content string) parsedReviewResponse {
 	if parsed.Findings == nil {
 		parsed.Findings = []store.Finding{}
 	}
+	parsed.Findings = normalizeFindings(parsed.Findings)
 	return parsed
+}
+
+func normalizeFindings(findings []store.Finding) []store.Finding {
+	normalized := make([]store.Finding, 0, len(findings))
+	for _, finding := range findings {
+		if finding.File == "" || finding.Line <= 0 || len(finding.Evidence) == 0 {
+			continue
+		}
+		if finding.Confidence != "confirmed" {
+			finding.Confidence = "needs_verification"
+		}
+		normalized = append(normalized, finding)
+	}
+	return normalized
+}
+
+func isDocsOnlyPR(files []github.PullRequestFile) bool {
+	if len(files) == 0 {
+		return false
+	}
+	for _, file := range files {
+		if !isDocumentationFile(file.Filename) {
+			return false
+		}
+	}
+	return true
+}
+
+func isDocumentationFile(filename string) bool {
+	switch strings.ToLower(filepath.Ext(filename)) {
+	case ".md", ".mdx", ".rst", ".adoc", ".txt":
+		return true
+	default:
+		return false
+	}
 }
 
 func extractJSONObject(content string) string {
@@ -157,10 +199,11 @@ func buildReviewComment(result store.ReviewResult, taskID uint64, commitSHA stri
 		b.WriteString("\n\n### Findings\n")
 		for i, finding := range result.Findings {
 			b.WriteString(fmt.Sprintf(
-				"\n%d. [%s / %s] `%s:%d` - %s\n",
+				"\n%d. [%s / %s / %s] `%s:%d` - %s\n",
 				i+1,
 				finding.Category,
 				finding.Severity,
+				finding.Confidence,
 				finding.File,
 				finding.Line,
 				finding.Comment,
@@ -168,12 +211,25 @@ func buildReviewComment(result store.ReviewResult, taskID uint64, commitSHA stri
 			if finding.Suggestion != "" {
 				b.WriteString(fmt.Sprintf("   Suggestion: %s\n", finding.Suggestion))
 			}
+			for _, evidence := range finding.Evidence {
+				b.WriteString(fmt.Sprintf("   Evidence: %s\n", formatEvidence(evidence)))
+			}
 		}
 	} else {
 		b.WriteString("\n\nNo issues found.")
 	}
 	b.WriteString(fmt.Sprintf("\n\n---\n%s", footer))
 	return b.String()
+}
+
+func formatEvidence(evidence store.Evidence) string {
+	if evidence.Command != "" {
+		return fmt.Sprintf("`%s`: %s", evidence.Command, evidence.Excerpt)
+	}
+	if evidence.File != "" {
+		return fmt.Sprintf("`%s:%d`: %s", evidence.File, evidence.Line, evidence.Text)
+	}
+	return fmt.Sprintf("%s: %s", evidence.Type, evidence.Excerpt)
 }
 
 func shortCommitSHA(commitSHA string) string {

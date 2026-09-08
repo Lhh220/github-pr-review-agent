@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/liaohonghui/github-pr-review-agent/internal/agent"
 	"github.com/liaohonghui/github-pr-review-agent/internal/codecontext"
@@ -17,6 +19,7 @@ const (
 	defaultMaxDiffLines        = 2000
 	defaultMaxFileContextLines = 200
 	defaultMaxCommitHistory    = 20
+	defaultMaxReferenceResults = 100
 	maxListedFiles             = 200
 	maxToolOutputChars         = 40000
 	maxPRBodyChars             = 12000
@@ -27,12 +30,18 @@ type Client interface {
 	GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, error)
 	GetPullRequestCommits(ctx context.Context, owner, repo string, number, limit int) ([]github.PullRequestCommit, error)
 	GetFileContent(ctx context.Context, owner, repo, path, ref string) (string, error)
+	GetRepositoryTarball(ctx context.Context, owner, repo, ref string) (io.ReadCloser, error)
 }
 
 type Options struct {
 	MaxDiffLines        int
 	MaxFileContextLines int
 	MaxCommitHistory    int
+	MaxReferenceResults int
+	EnableStaticChecks  bool
+	StaticCheckTimeout  time.Duration
+	StaticCheckWorkDir  string
+	StaticCheckGoProxy  string
 }
 
 type Toolkit struct {
@@ -44,6 +53,12 @@ type Toolkit struct {
 	maxDiffLines        int
 	maxFileContextLines int
 	maxCommitHistory    int
+	maxReferenceResults int
+	enableStaticChecks  bool
+	staticCheckTimeout  time.Duration
+	staticCheckWorkDir  string
+	staticCheckGoProxy  string
+	staticCheckRunner   staticCheckRunner
 
 	mu          sync.Mutex
 	cachedPR    *github.PullRequest
@@ -55,8 +70,20 @@ func NewToolkit(client Client, owner, repo string, number int, options Options) 
 	normalizePositive(&options.MaxDiffLines, defaultMaxDiffLines)
 	normalizePositive(&options.MaxFileContextLines, defaultMaxFileContextLines)
 	normalizePositive(&options.MaxCommitHistory, defaultMaxCommitHistory)
+	normalizePositive(&options.MaxReferenceResults, defaultMaxReferenceResults)
 	if options.MaxCommitHistory > 100 {
 		options.MaxCommitHistory = 100
+	}
+	if options.MaxReferenceResults > defaultMaxReferenceResults {
+		options.MaxReferenceResults = defaultMaxReferenceResults
+	}
+	if options.StaticCheckTimeout <= 0 {
+		options.StaticCheckTimeout = defaultStaticCheckTimeout
+	}
+	options.StaticCheckWorkDir = strings.TrimSpace(options.StaticCheckWorkDir)
+	options.StaticCheckGoProxy = strings.TrimSpace(options.StaticCheckGoProxy)
+	if options.StaticCheckGoProxy == "" {
+		options.StaticCheckGoProxy = "off"
 	}
 
 	return &Toolkit{
@@ -67,21 +94,36 @@ func NewToolkit(client Client, owner, repo string, number int, options Options) 
 		maxDiffLines:        options.MaxDiffLines,
 		maxFileContextLines: options.MaxFileContextLines,
 		maxCommitHistory:    options.MaxCommitHistory,
+		maxReferenceResults: options.MaxReferenceResults,
+		enableStaticChecks:  options.EnableStaticChecks,
+		staticCheckTimeout:  options.StaticCheckTimeout,
+		staticCheckWorkDir:  options.StaticCheckWorkDir,
+		staticCheckGoProxy:  options.StaticCheckGoProxy,
+		staticCheckRunner:   runStaticCheckCommand,
 	}
 }
 
 func (t *Toolkit) Tools() []agent.Tool {
-	return []agent.Tool{
+	tools := []agent.Tool{
 		prMetaTool{toolkit: t},
 		changedFilesTool{toolkit: t},
 		diffTool{toolkit: t},
 		fileContextTool{toolkit: t},
+		searchReferencesTool{toolkit: t},
 		commitHistoryTool{toolkit: t},
 	}
+	if t.enableStaticChecks {
+		tools = append(tools, staticChecksTool{toolkit: t})
+	}
+	return tools
 }
 
 func (t *Toolkit) PullRequest(ctx context.Context) (*github.PullRequest, error) {
 	return t.pullRequest(ctx)
+}
+
+func (t *Toolkit) Files(ctx context.Context) ([]github.PullRequestFile, error) {
+	return t.files(ctx)
 }
 
 func (t *Toolkit) pullRequest(ctx context.Context) (*github.PullRequest, error) {

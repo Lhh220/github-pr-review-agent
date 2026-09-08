@@ -36,10 +36,13 @@ MVP 已经跑通并部署到 Railway：
 - 阶段三 Day 1 已完成 Agent 基础框架：Tool 接口、工具注册表、Agent Loop、DeepSeek tool calls、`tool_call_log` 和 `/tasks/:id/tool-calls`
 - 阶段三 Day 2 已接入真实 GitHub 工具：`get_pr_meta`、`list_changed_files`、`read_diff`、`read_file_context`、`get_commit_history`
 - 阶段三 Day 3 已接入 tree-sitter：`read_file_context` 支持 Go / Python / JavaScript 函数级上下文，其他文件回退到有界行范围
+- 阶段三 Day 4 已接入 `search_references`：下载 PR head 的仓库 tarball，流式扫描跨文件精确标识符引用
+- 阶段三 Day 5 已接入 `run_static_checks`：默认关闭，开启后可在服务端白名单内执行 `go test` / `go vet` 并把结果回传 Agent
+- 阶段三 Day 6 已完成结构化输出增强：每条 finding 携带 `evidence`，并按 `confirmed / needs_verification` 标注可信度
 - 关键状态变更与审查结果创建会同步写入 `audit_log`，任务数据和审计数据保持同一事务
 - MySQL 结构通过版本化 migration 管理，服务启动自动执行，也提供 `cmd/migrate` CLI
 
-Day 5 的审计表和观测统计已完成本地与线上验收，阶段二收官。阶段三 Day 1 的 Agent 框架、Day 2 的 5 个 GitHub 工具、Day 3 的 tree-sitter 上下文裁剪已完成本地验收；线上默认仍是 `AGENT_MODE=legacy`，把 Railway 变量改成 `AGENT_MODE=tool_calling` 后即可启用 Agent 审查链路。
+Day 5 的审计表和观测统计已完成本地与线上验收，阶段二收官。阶段三 Day 1 的 Agent 框架、Day 2 的 5 个基础 GitHub 工具、Day 3 的 tree-sitter 上下文裁剪、Day 4 的跨文件引用检索、Day 5 的受限静态检查工具、Day 6 的 evidence / confidence 结构化输出已完成本地验收；线上默认仍是 `AGENT_MODE=legacy`，把 Railway 变量改成 `AGENT_MODE=tool_calling` 后即可启用 Agent 审查链路。
 
 当前线上示例：
 
@@ -119,6 +122,11 @@ AGENT_MODE=legacy
 AGENT_MAX_STEPS=8
 AGENT_TOOL_TIMEOUT=20s
 AGENT_MAX_COMMIT_HISTORY=20
+AGENT_MAX_REFERENCE_RESULTS=100
+AGENT_ENABLE_STATIC_CHECKS=false
+AGENT_STATIC_CHECK_TIMEOUT=2m
+AGENT_STATIC_CHECK_WORK_DIR=.static-checks
+AGENT_STATIC_CHECK_GOPROXY=off
 ```
 
 说明：
@@ -150,6 +158,11 @@ AGENT_MAX_COMMIT_HISTORY=20
 - `AGENT_MAX_STEPS`：Agent 最大工具调用轮次，默认 8。
 - `AGENT_TOOL_TIMEOUT`：单个工具执行超时，默认 20s。
 - `AGENT_MAX_COMMIT_HISTORY`：`get_commit_history` 最多返回多少个 commit，默认 20，工具内部最大会限制到 100。
+- `AGENT_MAX_REFERENCE_RESULTS`：`search_references` 最多返回多少条引用，默认 100；工具内部还会限制扫描文件数和解压后字节数。
+- `AGENT_ENABLE_STATIC_CHECKS`：是否向 Agent 注册 `run_static_checks`，默认 `false`。只有同时设置 `AGENT_MODE=tool_calling` 才会生效。
+- `AGENT_STATIC_CHECK_TIMEOUT`：一次 `run_static_checks` 工具调用的总超时，默认 `2m`；同时要把 `AGENT_TOOL_TIMEOUT` 设置为不小于该值，例如 `3m`。
+- `AGENT_STATIC_CHECK_WORK_DIR`：静态检查工作目录。Docker 默认使用 `/workspace/.static-checks`，本地建议显式配置到 D 盘项目目录下。
+- `AGENT_STATIC_CHECK_GOPROXY`：静态检查下载依赖使用的 Go proxy，默认 `off` 表示禁止下载新依赖。线上需要首次下载依赖时可配置为 `https://goproxy.cn,direct`，这表示明确允许该网络访问。
 
 注意：阶段二接入 RabbitMQ 后，Railway 部署必须提供可达的 `RABBITMQ_URL`，否则服务启动会失败。
 
@@ -191,11 +204,7 @@ GITHUB_TOKEN=...
 
    服务启动时也会自动执行 migration。
 
-   当前包含两个 migration：version 1 `init` 和 version 2 `audit_log`。Railway 部署新版本后，启动日志应出现：
-
-   ```text
-   applied mysql migration: version=2 name=audit_log
-   ```
+   当前包含三个 migration：version 1 `init`、version 2 `audit_log` 和 version 3 `tool_call_log`。首次部署新数据库时，启动日志会依次出现应用记录；已执行过则显示 up to date。
 
    如果本地数据库已经执行过，则只会看到 `mysql migrations are up to date`。
 
@@ -254,7 +263,7 @@ go test ./...
 go vet ./...
 ```
 
-Railway / Docker 生产构建使用仓库根目录的 `Dockerfile`。构建阶段会安装 `gcc` 和 `musl-dev`，并强制 `CGO_ENABLED=1`；运行阶段使用同 Alpine 基础镜像，避免 CGO 二进制和运行时 C 库不匹配。
+Railway / Docker 生产构建使用仓库根目录的 `Dockerfile`。构建阶段会安装 `gcc` 和 `musl-dev`，并强制 `CGO_ENABLED=1`；运行阶段使用同 Alpine 基础镜像，并带 Go 工具链和编译器，保证 CGO 二进制运行一致，也让 `run_static_checks` 开启后可以执行 `go test` / `go vet`。
 
 ## 任务状态查询
 
@@ -341,7 +350,20 @@ Authorization: Bearer <ADMIN_TOKEN>
         "severity": "medium",
         "comment": "Example finding.",
         "suggestion": "Example suggestion.",
-        "confidence": "confirmed"
+        "confidence": "confirmed",
+        "evidence": [
+          {
+            "type": "reference",
+            "file": "cmd/server/main.go",
+            "line": 42,
+            "text": "cfg.MaxDiffLines"
+          },
+          {
+            "type": "static_check",
+            "command": "go test ./...",
+            "excerpt": "undefined: cfg.MaxDiffLines"
+          }
+        ]
       }
     ],
     "model": "deepseek-chat",
@@ -355,7 +377,7 @@ Authorization: Bearer <ADMIN_TOKEN>
 
 说明：
 
-- `findings` 是结构化问题列表，字段包括 `category / file / line / severity / comment / suggestion / confidence`。
+- `findings` 是结构化问题列表，字段包括 `category / file / line / severity / comment / suggestion / confidence / evidence`。
 - `raw_response` 保留模型原始输出，方便排查模型偶发不按 JSON 返回的情况。
 - `input_tokens / output_tokens / total_tokens` 来自 DeepSeek 返回的 usage，用于成本统计。
 - `llm_duration_ms` 是单次 LLM 调用耗时。
@@ -457,7 +479,7 @@ GET /admin
 Day 2 Agent 模式线上验收步骤：
 
 1. push 代码到 `main`，等待 Railway 部署完成。
-2. 在 Railway 中把 `AGENT_MODE` 改成 `tool_calling`，保留 `AGENT_MAX_STEPS=8`、`AGENT_TOOL_TIMEOUT=20s`、`AGENT_MAX_COMMIT_HISTORY=20`。
+2. 在 Railway 中把 `AGENT_MODE` 改成 `tool_calling`，保留 `AGENT_MAX_STEPS=8`、`AGENT_TOOL_TIMEOUT=20s`、`AGENT_MAX_COMMIT_HISTORY=20`、`AGENT_MAX_REFERENCE_RESULTS=100`。
 3. 提一个包含代码改动的测试 PR。
 4. 日志应出现 `agent review mode enabled`，bot 评论后记录评论里的 Task ID。
 5. 请求 `/tasks/<task_id>/tool-calls`，应能看到模型调用 GitHub 工具的输入、输出和耗时。
@@ -470,6 +492,14 @@ Day 5 线上验收步骤：
 3. 请求 `/healthz`、`/audit-logs?limit=5`、`/stats`，三者都应返回 200。
 4. 提一个测试 PR，等 bot 评论后，用评论里的 Task ID 调 `/audit-logs?task_id=<id>`，应能看到 `task_created`、多次 `task_status_changed` 和 `review_result_created`。
 
+阶段三 Day 5 静态检查线上验收步骤：
+
+1. push 代码到 `main`，等待 Railway 部署完成。
+2. 设置 `AGENT_MODE=tool_calling`、`AGENT_ENABLE_STATIC_CHECKS=true`、`AGENT_TOOL_TIMEOUT=3m`、`AGENT_STATIC_CHECK_TIMEOUT=2m`。
+3. 如需下载依赖，设置 `AGENT_STATIC_CHECK_GOPROXY=https://goproxy.cn,direct`；如果保持 `off`，依赖必须在本地 Go module cache 中已存在。
+4. 提一个会引入编译错误的 PR。
+5. bot 评论应引用 `go test ./...` 或 `go vet ./...` 的失败输出；在 `/tasks/<task_id>/tool-calls` 中应能看到 `run_static_checks` 的输入、输出和耗时。
+
 ## 当前能力边界
 
 默认 `legacy` 审查能力是 **diff + changed-file-context reviewer**：
@@ -477,22 +507,16 @@ Day 5 线上验收步骤：
 - 会把 PR diff 和变更文件内容交给 LLM
 - 还看不到改动文件之外的关联代码
 - 无法确认被删除的字段、函数、类型是否仍被其他文件引用
-- 无法验证 PR 是否能通过编译、测试或静态检查
+- 默认不执行编译、测试或静态检查；显式开启 `run_static_checks` 后，可以回传服务端白名单内的 `go test` / `go vet` 结果
 
-代码库已经具备 Tool Calling 基础框架、5 个 GitHub 工具和工具调用日志；线上启用 `AGENT_MODE=tool_calling` 后，模型可以多轮读取 PR 信息、diff、指定文件上下文和提交历史。`read_file_context` 会从 diff 推断变更行，并用 tree-sitter 提取 Go / Python / JavaScript 的函数、方法或类上下文；TypeScript、Java 等其他语言暂回退到有界行范围。跨文件引用检索和静态检查仍在后续阶段。
+代码库已经具备 Tool Calling 基础框架、6 个基础 GitHub 工具和工具调用日志；线上启用 `AGENT_MODE=tool_calling` 后，模型可以多轮读取 PR 信息、diff、指定文件上下文、提交历史和跨文件引用。`read_file_context` 会从 diff 推断变更行，并用 tree-sitter 提取 Go / Python / JavaScript 的函数、方法或类上下文；TypeScript、Java 等其他语言暂回退到有界行范围。`search_references` 会以 PR head 为准扫描仓库 tarball，用标识符边界匹配剩余引用，并返回文件、行号和上下文片段。开启 `AGENT_ENABLE_STATIC_CHECKS` 后，模型还可以调用第 7 个工具 `run_static_checks` 获取确定性检查结果。审查结果会输出 `confidence` 和 `evidence`；只有具备工具证据的确定性问题才标记为 `confirmed`，推测性问题标记为 `needs_verification`。
 
-下一阶段计划升级为 **code-aware agent**，增加：
-
-- `search_references`
-- `run_static_checks`
-- `confirmed / needs_verification` 结论分级
+`run_static_checks` 是“受限本地静态检查模式”，不是强隔离沙箱：命令和参数由服务端固定为 `go test ./...` / `go vet ./...`，环境变量不包含 GitHub 和 LLM 密钥，解压限制文件数和大小并拒绝链接条目；但 PR 中的测试代码本身仍会被执行，也可能通过网络访问外部服务。个人仓库演示可用，公开多租户服务应改为独立容器或专用 runner，并禁网、限 CPU / 内存。
 
 详细设计见 [docs/design.md](docs/design.md)。
 
 ## 后续计划
 
-- search_references 跨文件引用检索
-- run_static_checks 静态检查沙箱
 - 评测集和误报率统计
 
 开发节奏见 [docs/roadmap.md](docs/roadmap.md)。

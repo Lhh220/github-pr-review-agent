@@ -46,6 +46,15 @@ func main() {
 		if cfg.RedisURL == "" {
 			log.Fatal("REDIS_URL is required in production")
 		}
+		if cfg.DeepSeekAPIKey == "" {
+			log.Fatal("DEEPSEEK_API_KEY is required in production")
+		}
+		if cfg.GitHubToken == "" {
+			if cfg.GitHubAppID == "" || cfg.GitHubInstallationID == "" ||
+				(cfg.GitHubAppPrivateKey == "" && cfg.GitHubAppPrivateKeyPath == "") {
+				log.Fatal("GitHub App credentials are required in production when GITHUB_TOKEN is not set")
+			}
+		}
 	}
 	if cfg.MySQLDSN == "" {
 		log.Fatal("MYSQL_DSN is required")
@@ -136,8 +145,16 @@ func startServer(
 			MaxDiffLines:        cfg.MaxDiffLines,
 			MaxFileContextLines: cfg.MaxFileContextLines,
 			MaxCommitHistory:    cfg.AgentMaxCommitHistory,
+			MaxReferenceResults: cfg.AgentMaxReferenceResults,
+			EnableStaticChecks:  cfg.AgentEnableStaticChecks,
+			StaticCheckTimeout:  cfg.AgentStaticCheckTimeout,
+			StaticCheckWorkDir:  cfg.AgentStaticCheckWorkDir,
+			StaticCheckGoProxy:  cfg.AgentStaticCheckGoProxy,
 		})
-		log.Printf("agent review mode enabled: max_steps=%d tool_timeout=%s", cfg.AgentMaxSteps, cfg.AgentToolTimeout)
+		log.Printf(
+			"agent review mode enabled: max_steps=%d tool_timeout=%s static_checks=%t static_check_timeout=%s",
+			cfg.AgentMaxSteps, cfg.AgentToolTimeout, cfg.AgentEnableStaticChecks, cfg.AgentStaticCheckTimeout,
+		)
 	default:
 		return fmt.Errorf("unsupported AGENT_MODE %q: use legacy or tool_calling", cfg.AgentMode)
 	}

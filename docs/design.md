@@ -14,7 +14,7 @@
 
 ## 3. 整体架构
 
-当前实现已接入 RabbitMQ 延迟重试、死信队列、Worker Pool、Redis PR 级分布式锁、外部 API 限流、阶段三 Day 1 的 Tool Calling 基础框架、Day 2 的 5 个真实 GitHub 工具，以及 Day 3 的 tree-sitter 函数级上下文裁剪。默认链路仍是 `AGENT_MODE=legacy` 固定上下文审查；设置 `AGENT_MODE=tool_calling` 后启用 Agent 链路。跨文件引用检索和静态检查沙箱还未实现。
+当前实现已接入 RabbitMQ 延迟重试、死信队列、Worker Pool、Redis PR 级分布式锁、外部 API 限流、阶段三 Day 1 的 Tool Calling 基础框架、Day 2 的 5 个基础 GitHub 工具、Day 3 的 tree-sitter 函数级上下文裁剪、Day 4 的 `search_references` 跨文件引用检索，以及 Day 5 默认关闭的 `run_static_checks` 受限静态检查工具。默认链路仍是 `AGENT_MODE=legacy` 固定上下文审查；设置 `AGENT_MODE=tool_calling` 后启用 Agent 链路。
 
 ```text
 GitHub PR Event
@@ -44,7 +44,7 @@ MySQL review_task + review_result
 GitHub PR Review API
 ```
 
-下图是 `AGENT_MODE=tool_calling` 的当前 Agent 架构；`read_file_context` 内部使用 tree-sitter 做上下文裁剪，`search_references` 和静态检查仍是后续增强：
+下图是 `AGENT_MODE=tool_calling` 的当前 Agent 架构；`run_static_checks` 只有在 `AGENT_ENABLE_STATIC_CHECKS=true` 时才会注册：
 
 ```text
 GitHub PR Event
@@ -64,7 +64,9 @@ Agent Loop
    |-- Tool: list_changed_files
    |-- Tool: read_diff
    |-- Tool: read_file_context
+   |-- Tool: search_references
    |-- Tool: get_commit_history
+   |-- Tool: run_static_checks (optional)
    |  read_file_context -> tree-sitter / line fallback
    v
    |
@@ -135,13 +137,16 @@ MySQL (任务/结果/审计) + Redis (锁 / API 限流)
 - Day 1 已实现基础 Agent Loop：构造 system/user 消息、发送工具定义、接收模型 `tool_calls`、调度注册表执行工具、把 tool result 回传模型、聚合 usage，并在工具预算耗尽后强制模型输出最终 JSON。
 - 每轮工具调用有独立超时；未知工具、参数错误和工具执行错误会作为 tool result 回传给模型，避免一次工具选择错误直接导致任务失败。
 - Day 2 已接入 5 个只读 GitHub 工具：`get_pr_meta`、`list_changed_files`、`read_diff`、`read_file_context`、`get_commit_history`。
+- Day 4 已接入第 6 个只读工具 `search_references`，用于检索被删除、改名或影响面不明确的符号引用。
+- Day 5 已接入第 7 个可选工具 `run_static_checks`，默认不注册；开启后把服务端白名单内的 `go test` / `go vet` 结果回传 Agent。
 - Agent 执行多步推理：
   1. 调 `get_pr_meta` 了解 PR 标题、描述、改动文件列表。
   2. 调 `read_diff` 读取完整 diff。
   3. 对关注文件调 `read_file_context`，取函数、方法或类级上下文。
-  4. 必要时调 `get_commit_history` 理解修改动机。
-  5. 输出结构化审查意见。
-  6. `search_references` 和 `run_static_checks` 是后续增强，当前还未注册为工具。
+  4. 删除、改名或修改符号、字段、类型和配置键时，调 `search_references` 检查剩余引用。
+  5. 必要时调 `get_commit_history` 理解修改动机。
+  6. 工具可用且改动可能影响编译、测试或静态分析时，调 `run_static_checks` 获取确定性证据。
+  7. 输出结构化审查意见。
 - 每一步工具调用记录到 `tool_call_log`。
 
 ### 4.5 工具注册
@@ -157,7 +162,7 @@ type Tool interface {
 ```
 工具注册表 `Registry` 负责校验工具名、描述和 JSON Schema，避免重复注册，并输出稳定的工具定义列表。Agent 根据模型返回的 tool_call 调度。DeepSeek Provider 使用 OpenAI 兼容的 tools / tool_calls / tool 消息格式。
 
-Day 2 的 GitHub Toolkit 绑定当前任务的 owner / repo / PR number，模型不能指定其他仓库或 PR。PR meta 和 changed files 在同一次任务内缓存，避免模型多轮工具调用时重复请求 GitHub。所有工具输出都是 JSON，并受 diff 行数、文件行范围、commit 数量和输出字符数限制。`CreatePullRequestReview` 不注册为工具；写评论仍由服务端在 Agent 输出结构化结果后统一执行。
+Day 2 的 GitHub Toolkit 绑定当前任务的 owner / repo / PR number，模型不能指定其他仓库或 PR。PR meta 和 changed files 在同一次任务内缓存，避免模型多轮工具调用时重复请求 GitHub。所有工具输出都是 JSON，并受 diff 行数、文件行范围、commit 数量、引用结果数量和输出字符数限制。`CreatePullRequestReview` 不注册为工具；写评论仍由服务端在 Agent 输出结构化结果后统一执行。前 6 个工具是只读工具；`run_static_checks` 是显式开启后才注册的受限执行工具。
 
 ### 4.6 上下文裁剪
 
@@ -169,50 +174,52 @@ Day 2 的 GitHub Toolkit 绑定当前任务的 owner / repo / PR number，模型
 
 工具输出包含 `context_mode`（`tree_sitter` / `line_fallback`）、`language`、`symbols`、带行号的 `content`、截断标记和最终行范围。所有片段继续受 `MAX_FILE_CONTEXT_LINES` 与工具输出字符上限约束，避免超长上下文抬高 token 成本。
 
-### 4.7 当前能力边界与增强方向
+### 4.7 跨文件引用检索
 
-当前 MVP 是 **diff + changed-file-context reviewer**：
+`search_references` 的输入是一个精确标识符，例如 `MaxDiffLines`、`ValidateToken`，可选传入仓库相对路径前缀和最大结果数。它的执行流程如下：
 
-- PR 无变更文件时短路处理，直接回固定评论，不调用 LLM。
-- 把 PR diff 交给 LLM。
-- 额外读取部分变更文件的完整内容，并按行数裁剪后一起送给 LLM。
-- `AGENT_MODE=tool_calling` 已能按需读取当前仓库指定文件上下文；Go / Python / JavaScript 支持函数级 tree-sitter 裁剪，但还没有跨文件符号引用检索。
-- 无法确认被删除的字段、函数、类型是否仍被其他文件引用。
-- 无法验证 PR 是否能通过编译、测试或静态检查。
+1. 获取当前 PR head SHA，下载对应 commit 的 gzip tarball，保证扫描的是 PR 最新代码，而不是默认分支。
+2. 流式遍历 tar 包，只扫描常见源码、配置和文档文件，跳过 `vendor/`、`node_modules/` 和 `.git/`。
+3. 对每一行做标识符边界匹配，避免把 `MaxDiffLinesExtra` 误判成 `MaxDiffLines`。
+4. 返回引用路径、行号、上下文片段，并标记该文件是否属于本次 PR 的变更文件。
+5. 工具层限制最多 2000 个文件、128MB 解压后内容、单文件 2MB 和默认 100 条结果，最终输出继续受工具输出字符上限保护。
 
-因此它只能给出“可能存在风险”的提示，不能把跨文件引用问题定位成确定的编译错误。
+选择 tarball 而不是 GitHub Code Search，是因为 Code Search 主要面向默认分支索引，不能稳定检索 PR head；逐个读取 Git tree 文件则会消耗大量 GitHub API 配额。tarball 是一次下载、可流式处理、可严格限额的方案。
 
-下一阶段要把它升级成 **code-aware agent**：
+### 4.8 静态检查与能力边界
 
-1. `read_file_context`
-   - 读取变更文件及关联文件的完整上下文。
-   - 优先读取被改动函数、结构体、接口的定义和使用位置。
-2. `search_references`
-   - 对被删除或改名的符号做引用检索。
-   - 输出引用文件、行号和上下文片段。
-3. `run_static_checks`
-   - 在隔离环境中执行 `go test`、`go vet` 或编译检查。
-   - 把失败信息回传给 Agent，作为确定性证据。
-4. 结论分级
-   - `confirmed`：有代码上下文或静态检查证据。
-   - `needs_verification`：仅有 diff 推理，缺少跨文件证据。
+`run_static_checks` 的执行流程：
+
+1. 获取 PR head SHA，下载对应 commit 的仓库 tarball。
+2. 解压到 `AGENT_STATIC_CHECK_WORK_DIR` 下的临时目录；限制最多 2000 个文件、128MB 解压内容、单文件 2MB，拒绝路径穿越和 symlink / hardlink。
+3. 根仓库没有 `go.mod` 时返回 `supported=false`，不执行命令。
+4. 模型只能选择 `go_test` 或 `go_vet`；实际命令固定为 `go test ./...` / `go vet ./...`，不能传任意 shell。
+5. 子进程使用独立的最小 Go 环境，只包含固定 `PATH`、`HOME`、Go cache / module cache / tmp 目录、`GOTOOLCHAIN=local`、`GOPROXY` 等白名单变量，不继承 GitHub App 私钥、LLM Key 或数据库密码。
+6. 每次工具调用有总超时，单个命令输出最多 16KB，工具总输出继续受 40KB JSON 上限约束；临时仓库执行完删除。
+7. `GOPROXY` 默认 `off`，禁止静态检查阶段下载新依赖；显式配置代理时表示接受该网络访问。
+
+它目前是“受限本地静态检查模式”，不是强隔离沙箱：测试代码会被真实执行，也可能访问网络。个人项目和可信仓库演示可用；公开多租户场景应升级为独立容器、专用 runner 或 Firecracker / gVisor，并进一步禁网、限制 CPU / 内存。
+
+当前能力：
+
+- `AGENT_MODE=tool_calling` 能按需读取 PR 信息、diff、函数上下文、提交历史和跨文件引用。
+- 开启 `AGENT_ENABLE_STATIC_CHECKS=true` 后，能把 `go test` / `go vet` 的确定性失败信息交给模型。
+- 静态检查结果同样记录在 `tool_call_log`，可查询输入、输出、状态和耗时。
+- 每条 finding 都要求携带工具返回的 `evidence`；确定性问题标记 `confirmed`，推测性问题标记 `needs_verification`。
+
+后续增强：
+
+- 评测集和误报率统计。
 
 目标示例：
 
 ```text
 internal/config/config.go 删除了 MaxDiffLines 字段，
 但 cmd/server/main.go:40 仍在引用 cfg.MaxDiffLines，
-go test ./... 会编译失败。
+go test ./... 输出编译失败。
 ```
 
-静态检查安全要求：
-
-- 在一次性容器或临时目录中执行。
-- 不注入 GitHub App 私钥、LLM Key 等敏感环境变量。
-- 限制 CPU、内存、执行时长和网络访问。
-- 只允许执行白名单命令，避免把 PR 中的代码当成任意命令执行。
-
-### 4.8 审查结果
+### 4.9 审查结果
 
 结构化输出：
 ```json
@@ -226,7 +233,20 @@ go test ./... 会编译失败。
       "severity": "high|medium|low",
       "comment": "具体问题",
       "suggestion": "修改建议",
-      "confidence": "confirmed|needs_verification"
+      "confidence": "confirmed|needs_verification",
+      "evidence": [
+        {
+          "type": "reference",
+          "file": "cmd/server/main.go",
+          "line": 42,
+          "text": "cfg.MaxDiffLines"
+        },
+        {
+          "type": "static_check",
+          "command": "go test ./...",
+          "excerpt": "undefined: cfg.MaxDiffLines"
+        }
+      ]
     }
   ]
 }
@@ -235,7 +255,9 @@ go test ./... 会编译失败。
 当前实现：
 
 - DeepSeek 被要求只返回上述 JSON。
-- `review.Service` 解析 JSON，先写入 `review_result`，再回写 PR Review。
+- `review.Service` 解析 JSON，过滤没有文件、行号或 evidence 的 finding，并把非法 confidence 归一化为 `needs_verification`。
+- 无 diff 和纯文档 PR 直接返回空 findings，不调用 LLM。
+- 解析结果先写入 `review_result`，再回写 PR Review。
 - `payload_json` 保存 findings，`raw_response` 保存模型原文。
 - `model / input_tokens / output_tokens / total_tokens / llm_duration_ms` 同时落库。
 - 如果模型偶发不按 JSON 返回，则降级为：summary 使用原文、findings 为空，避免整条任务失败。
@@ -243,7 +265,7 @@ go test ./... 会编译失败。
 
 查询接口：`GET /tasks/:id/result`，返回任务状态和完整结构化结果。
 
-### 4.9 存储设计
+### 4.10 存储设计
 
 MySQL 表：
 - `review_task`：id, repo, pr_number, commit_sha, status, attempt_count, max_attempts, next_retry_at, created_at, updated_at, error。
@@ -280,7 +302,7 @@ Redis Key：
 - `ratelimit:llm:deepseek`：DeepSeek 固定窗口限流。
 - 事件去重当前由 MySQL `delivery_id` 唯一约束实现，不依赖 Redis。
 
-### 4.10 状态机
+### 4.11 状态机
 
 ```text
 received -> queued -> running -> done
@@ -294,7 +316,7 @@ running -> failed
 
 `failed` 保留给队列发布失败等不可重试的基础设施错误；业务审查失败优先走 `retrying`，达到最大次数后进入 `dead_letter`。
 
-### 4.11 开发者后台
+### 4.12 开发者后台
 
 `internal/adminui` 提供轻量 Admin Console，静态 HTML / CSS / JS 通过 `go:embed` 打进服务二进制，路由为 `/admin`。
 
@@ -356,7 +378,7 @@ type Provider interface {
 7. Review Service 回写 GitHub PR Review，随后释放 PR 锁。
 8. Worker 将任务标记为 `done` 并 ack 消息，同时写状态审计；可重试失败进入 `retrying`，达到最大次数后进入 `dead_letter`。
 
-后续引入 Tool Calling 和静态检查后，再扩展为多步工具调用、审计链路和代码级验证。
+`AGENT_MODE=tool_calling` 时，第 5 步会扩展为多步工具调用；开启静态检查后，Agent 可把工具输出作为代码级验证证据。
 
 ## 7. 安全与成本
 
@@ -364,7 +386,7 @@ type Provider interface {
 - `APP_ENV=production` 时启动强制要求 `GITHUB_WEBHOOK_SECRET` 和 `ADMIN_TOKEN`，避免生产环境误配置。
 - 任务查询接口使用 Bearer Token 鉴权。
 - Webhook 通过 `delivery_id` 唯一约束做幂等，GitHub 重发事件不会重复执行审查。
-- 工具调用只读，不执行写操作（除回写评论）。
+- GitHub 工具只读；`run_static_checks` 默认关闭，开启后只执行服务端白名单命令，且不继承敏感环境变量。
 - Redis 限流保护 GitHub API 和 DeepSeek API，避免异常流量放大到上游。
 - token 成本统计：每次 LLM 调用记录 input/output tokens，落库。
 - 超时控制：每个任务最大执行时间，防止卡死。

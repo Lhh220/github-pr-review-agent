@@ -52,13 +52,103 @@ func TestBuildFileContextTruncates(t *testing.T) {
 
 func TestBuildReviewComment(t *testing.T) {
 	result := store.ReviewResult{
-		Summary:  "No issues.",
-		Findings: []store.Finding{},
+		Summary: "One issue.",
+		Findings: []store.Finding{{
+			Category:   "bug",
+			File:       "cmd/server/main.go",
+			Line:       42,
+			Severity:   "high",
+			Comment:    "Field is still referenced.",
+			Confidence: "confirmed",
+			Evidence: []store.Evidence{{
+				Type: "reference",
+				File: "cmd/server/main.go",
+				Line: 42,
+				Text: "cfg.MaxDiffLines",
+			}},
+		}},
 	}
 	got := buildReviewComment(result, 1, "291ac5aedc5fd96c5030a6c18e91923140677591")
 	if !strings.Contains(got, "## Automated Code Review") ||
-		!strings.Contains(got, "No issues.") ||
+		!strings.Contains(got, "One issue.") ||
+		!strings.Contains(got, "bug / high / confirmed") ||
+		!strings.Contains(got, "Evidence: `cmd/server/main.go:42`: cfg.MaxDiffLines") ||
 		!strings.Contains(got, "Task ID: 1 | commit 291ac5a") {
 		t.Fatalf("unexpected review comment: %s", got)
+	}
+}
+
+func TestParseReviewResponseRequiresEvidence(t *testing.T) {
+	content := `{
+		"summary": "Two useful findings and one unsupported finding.",
+		"findings": [
+			{
+				"category": "bug",
+				"file": "cmd/server/main.go",
+				"line": 42,
+				"severity": "high",
+				"comment": "MaxDiffLines is still referenced after removal.",
+				"suggestion": "Restore the field or remove the reference.",
+				"confidence": "confirmed",
+				"evidence": [
+					{"type": "reference", "file": "cmd/server/main.go", "line": 42, "text": "cfg.MaxDiffLines"},
+					{"type": "static_check", "command": "go test ./...", "excerpt": "undefined: cfg.MaxDiffLines"}
+				]
+			},
+			{
+				"category": "performance",
+				"file": "internal/review/service.go",
+				"line": 20,
+				"severity": "medium",
+				"comment": "The scan may become slow for large pull requests.",
+				"confidence": "needs_verification",
+				"evidence": [
+					{"type": "reference", "file": "internal/review/service.go", "line": 20, "text": "for _, file := range files"}
+				]
+			},
+			{
+				"category": "bug",
+				"file": "internal/missing/missing.go",
+				"line": 1,
+				"severity": "low",
+				"comment": "No evidence was supplied.",
+				"confidence": "confirmed",
+				"evidence": []
+			}
+		]
+	}`
+
+	parsed := parseReviewResponse(content)
+	if len(parsed.Findings) != 2 {
+		t.Fatalf("findings length = %d, want 2: %+v", len(parsed.Findings), parsed.Findings)
+	}
+	confirmed := parsed.Findings[0]
+	if confirmed.Confidence != "confirmed" || len(confirmed.Evidence) != 2 ||
+		confirmed.Evidence[0].Text != "cfg.MaxDiffLines" ||
+		confirmed.Evidence[1].Command != "go test ./..." {
+		t.Fatalf("unexpected confirmed finding: %+v", confirmed)
+	}
+	performance := parsed.Findings[1]
+	if performance.Confidence != "needs_verification" || len(performance.Evidence) != 1 {
+		t.Fatalf("unexpected performance finding: %+v", performance)
+	}
+}
+
+func TestIsDocsOnlyPR(t *testing.T) {
+	tests := []struct {
+		name  string
+		files []github.PullRequestFile
+		want  bool
+	}{
+		{name: "markdown only", files: []github.PullRequestFile{{Filename: "README.md"}}, want: true},
+		{name: "mixed code", files: []github.PullRequestFile{{Filename: "README.md"}, {Filename: "main.go"}}, want: false},
+		{name: "no files", files: nil, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isDocsOnlyPR(test.files); got != test.want {
+				t.Fatalf("isDocsOnlyPR() = %t, want %t", got, test.want)
+			}
+		})
 	}
 }
