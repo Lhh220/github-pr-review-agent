@@ -1,0 +1,24 @@
+[
+  {
+    "tool_calls": [
+      {
+        "id": "read-nil-map",
+        "name": "read_file_context",
+        "arguments": "{\"path\":\"internal/metrics/metrics.go\"}"
+      }
+    ],
+    "input_tokens": 150,
+    "output_tokens": 14,
+    "total_tokens": 164,
+    "duration_ms": 12,
+    "model": "fixture"
+  },
+  {
+    "content": "{\"summary\":\"The new code writes to a nil map.\",\"findings\":[{\"category\":\"bug\",\"file\":\"internal/metrics/metrics.go\",\"line\":5,\"severity\":\"high\",\"comment\":\"Writing to the nil map will panic at runtime.\",\"suggestion\":\"Initialize counts with make(map[string]int) before writing.\",\"confidence\":\"confirmed\",\"evidence\":[{\"type\":\"reference\",\"file\":\"internal/metrics/metrics.go\",\"line\":5,\"text\":\"counts[\\\"requests\\\"] = 1\"}]}]}",
+    "input_tokens": 210,
+    "output_tokens": 80,
+    "total_tokens": 290,
+    "duration_ms": 28,
+    "model": "fixture"
+  }
+]

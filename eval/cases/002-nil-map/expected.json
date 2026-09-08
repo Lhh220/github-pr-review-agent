@@ -1,0 +1,11 @@
+{
+  "findings": [
+    {
+      "category": "bug",
+      "file": "internal/metrics/metrics.go",
+      "line": 5,
+      "severity": "high",
+      "confidence": "confirmed"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "title": "Remove unused diff limit",
+  "body": "Remove MaxDiffLines from the public config.",
+  "head_sha": "1111111111111111111111111111111111111111",
+  "files": [
+    {
+      "filename": "internal/config/config.go",
+      "status": "modified",
+      "additions": 0,
+      "deletions": 1,
+      "changes": 1,
+      "patch": "@@ -3,4 +3,3 @@\n type Config struct {\n \tRepo string\n-\tMaxDiffLines int\n \tToken string\n }"
+    }
+  ],
+  "file_contents": {
+    "internal/config/config.go": "package config\n\ntype Config struct {\n\tRepo string\n\tToken string\n}\n"
+  },
+  "repository": {
+    "cmd/server/main.go": "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tcfg := LoadConfig()\n\tfmt.Println(cfg.Repo)\n\tfmt.Println(cfg.MaxDiffLines)\n}\n"
+  }
+}

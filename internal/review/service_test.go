@@ -118,7 +118,12 @@ func TestParseReviewResponseRequiresEvidence(t *testing.T) {
 		]
 	}`
 
-	parsed := parseReviewResponse(content)
+	parsed := parseReviewResponse(
+		content,
+		"cfg.MaxDiffLines",
+		`{"checks":[{"command":"go test ./...","output":"undefined: cfg.MaxDiffLines"}]}`,
+		"for _, file := range files",
+	)
 	if len(parsed.Findings) != 2 {
 		t.Fatalf("findings length = %d, want 2: %+v", len(parsed.Findings), parsed.Findings)
 	}
@@ -131,6 +136,44 @@ func TestParseReviewResponseRequiresEvidence(t *testing.T) {
 	performance := parsed.Findings[1]
 	if performance.Confidence != "needs_verification" || len(performance.Evidence) != 1 {
 		t.Fatalf("unexpected performance finding: %+v", performance)
+	}
+}
+
+func TestParseReviewResponseDropsFabricatedEvidence(t *testing.T) {
+	content := `{
+		"summary": "Fabricated evidence is not retained.",
+		"findings": [
+			{
+				"category": "bug",
+				"file": "cmd/server/main.go",
+				"line": 42,
+				"severity": "high",
+				"comment": "Fabricated source line.",
+				"confidence": "confirmed",
+				"evidence": [
+					{"type": "reference", "file": "cmd/server/main.go", "line": 42, "text": "not in the tool output"}
+				]
+			},
+			{
+				"category": "performance",
+				"file": "internal/review/service.go",
+				"line": 20,
+				"severity": "medium",
+				"comment": "Performance findings remain speculative without a benchmark.",
+				"confidence": "confirmed",
+				"evidence": [
+					{"type": "reference", "file": "internal/review/service.go", "line": 20, "text": "for _, file := range files"}
+				]
+			}
+		]
+	}`
+
+	parsed := parseReviewResponse(content, "for _, file := range files")
+	if len(parsed.Findings) != 1 {
+		t.Fatalf("findings length = %d, want 1: %+v", len(parsed.Findings), parsed.Findings)
+	}
+	if parsed.Findings[0].Confidence != "needs_verification" {
+		t.Fatalf("performance confidence = %s, want needs_verification", parsed.Findings[0].Confidence)
 	}
 }
 

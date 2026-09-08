@@ -127,14 +127,14 @@ func (t staticChecksTool) Execute(ctx context.Context, input map[string]any) (st
 	}
 
 	env := staticCheckEnvironment(baseDir, t.toolkit.staticCheckGoProxy)
-	runCtx, cancel := context.WithTimeout(ctx, t.toolkit.staticCheckTimeout)
-	defer cancel()
 
 	results := make([]staticCheckCommandResult, 0, len(checks))
 	for _, check := range checks {
 		args := staticCheckCommands[check]
 		started := time.Now()
+		runCtx, cancel := context.WithTimeout(ctx, t.toolkit.staticCheckTimeout)
 		result, runErr := t.toolkit.staticCheckRunner(runCtx, args, repoDir, env)
+		cancel()
 		result.Name = check
 		result.Command = "go " + strings.Join(args, " ")
 		result.DurationMS = time.Since(started).Milliseconds()

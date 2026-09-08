@@ -1,0 +1,11 @@
+{
+  "findings": [
+    {
+      "category": "bug",
+      "file": "cmd/server/main.go",
+      "line": 8,
+      "severity": "high",
+      "confidence": "confirmed"
+    }
+  ]
+}
