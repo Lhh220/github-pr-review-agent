@@ -291,7 +291,7 @@ $env:DEEPSEEK_API_KEY="你的 key"
 go run ./cmd/eval -live -report eval/report-live.json
 ```
 
-Day 8 的验收状态、剩余线上操作、简历表述和面试问答见 [docs/day8.md](docs/day8.md)。
+交付验收状态、剩余线上操作、简历表述和面试问答见 [docs/delivery.md](docs/delivery.md)。
 
 ## 任务状态查询
 
