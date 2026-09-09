@@ -54,8 +54,10 @@
 - [x] Day 4：search_references，检索被删除或改名符号的跨文件引用（线上 tool_calling 验收完成）
 - [x] Day 5：run_static_checks，执行 go test / go vet 并回传结果（本地完成，待线上验收）
 - [x] Day 6：结构化输出、evidence 与 confirmed / needs_verification 分级（本地完成）
-- [ ] Day 7：基础评测集 + 准确率/误报率统计
-- [ ] Day 8：线上验收、文档和简历收尾
+- [x] Day 7：基础评测集 + 准确率/误报率统计（本地完成）
+- [x] Day 8：线上健康与 PR #23 冒烟验收、文档和简历收尾
+- [x] Day 8 本地补强：异常模型输出重试、静态检查证据状态校验、正常代码负样本、类别与过度确认指标、逐样本保存评测失败与结果
+- [ ] Day 8 专项补充：live 模型评测、静态检查线上专项验收
 
 验收：
 - Agent 能多步调工具

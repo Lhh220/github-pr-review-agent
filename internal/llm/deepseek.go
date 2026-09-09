@@ -73,6 +73,7 @@ func New(apiKey, baseURL, model string) *Client {
 		baseURL: baseURL,
 		model:   model,
 		http:    &http.Client{Timeout: 120 * time.Second},
+		limiter: limiter.NoopLimiter{},
 	}
 }
 
@@ -198,7 +199,7 @@ func (c *Client) ReviewCode(ctx context.Context, title, body, diff, fileContext 
       "confidence": "confirmed|needs_verification",
       "evidence": [
         {
-          "type": "reference",
+          "type": "reference|static_check",
           "file": "path/to/file.go",
           "line": 12,
           "text": "exact source line from the supplied diff or file context"
@@ -218,6 +219,9 @@ Rules:
 - Treat architectural concerns, performance risks, and concurrency concerns that need human confirmation as needs_verification.
 - Do not report pure formatting or style preferences.
 - Do not invent files, line numbers, commands, or output.
+- Reference evidence must use the same file and line as the finding and quote the source exactly.
+- Static-check evidence must quote the failed command and output exactly. If evidence cannot be quoted exactly, omit the finding.
+- Report at most five findings, and only report issues introduced or directly triggered by this pull request.
 - Prioritize bugs, security risks, and performance issues over style.
 - If every changed file is documentation-only, return an empty findings array.
 - If the code looks good, return an empty findings array.
@@ -253,10 +257,11 @@ Be concise and specific.`
 }
 
 func (c *Client) chat(ctx context.Context, request chatRequest) (chatResponse, int64, error) {
-	if c.limiter == nil {
-		c.limiter = limiter.NoopLimiter{}
+	limiterInstance := c.limiter
+	if limiterInstance == nil {
+		limiterInstance = limiter.NoopLimiter{}
 	}
-	if err := c.limiter.Wait(ctx, "llm:deepseek"); err != nil {
+	if err := limiterInstance.Wait(ctx, "llm:deepseek"); err != nil {
 		return chatResponse{}, 0, fmt.Errorf("wait llm rate limit: %w", err)
 	}
 

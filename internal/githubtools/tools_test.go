@@ -401,6 +401,45 @@ func TestStaticChecksRunServerDefinedCommandsAndCleanTemporaryRepository(t *test
 	}
 }
 
+func TestStaticChecksUseSeparateTimeoutPerCheck(t *testing.T) {
+	client := newFakeClient()
+	client.tarball = gzipTarballForTest(t, map[string]string{
+		"go.mod":  "module example.test/repo\n\ngo 1.25\n",
+		"main.go": "package main\n\nfunc main() {}\n",
+	})
+	toolkit := NewToolkit(client, "owner", "repo", 12, Options{
+		EnableStaticChecks: true,
+		StaticCheckWorkDir: t.TempDir(),
+	})
+
+	var contexts []context.Context
+	toolkit.staticCheckRunner = func(
+		ctx context.Context,
+		args []string,
+		dir string,
+		env []string,
+	) (staticCheckCommandResult, error) {
+		contexts = append(contexts, ctx)
+		return staticCheckCommandResult{Success: true, Output: "ok"}, nil
+	}
+
+	output, err := toolByName(t, toolkit, "run_static_checks").Execute(context.Background(), map[string]any{})
+	if err != nil {
+		t.Fatalf("run_static_checks: %v", err)
+	}
+	var result struct {
+		Checks []struct {
+			Name string `json:"name"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+	if len(result.Checks) != 2 || len(contexts) != 2 || contexts[0] == contexts[1] {
+		t.Fatalf("checks=%d contexts=%d distinct=%t", len(result.Checks), len(contexts), contexts[0] != contexts[1])
+	}
+}
+
 func TestStaticChecksReturnUnsupportedWithoutGoMod(t *testing.T) {
 	client := newFakeClient()
 	client.tarball = gzipTarballForTest(t, map[string]string{

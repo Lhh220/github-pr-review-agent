@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/liaohonghui/github-pr-review-agent/internal/github"
@@ -93,7 +94,10 @@ func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int, 
 	if err != nil {
 		return fmt.Errorf("review code: %w", err)
 	}
-	parsed := parseReviewResponse(response.Content)
+	parsed, err := parseReviewResponse(response.Content, diff, fileContext)
+	if err != nil {
+		return err
+	}
 	result, err := s.Results.CreateReviewResult(ctx, store.NewReviewResult{
 		TaskID:        taskID,
 		Summary:       parsed.Summary,
@@ -120,34 +124,267 @@ type parsedReviewResponse struct {
 	Findings []store.Finding `json:"findings"`
 }
 
-func parseReviewResponse(content string) parsedReviewResponse {
+func parseReviewResponse(content string, evidenceCorpus ...string) (parsedReviewResponse, error) {
 	cleaned := extractJSONObject(content)
 	var parsed parsedReviewResponse
-	if err := json.Unmarshal([]byte(cleaned), &parsed); err != nil || strings.TrimSpace(parsed.Summary) == "" {
-		return parsedReviewResponse{
-			Summary:  content,
-			Findings: []store.Finding{},
-		}
+	if err := json.Unmarshal([]byte(cleaned), &parsed); err != nil {
+		return parsedReviewResponse{}, fmt.Errorf("parse review response: %w", err)
 	}
-	if parsed.Findings == nil {
-		parsed.Findings = []store.Finding{}
+	if strings.TrimSpace(parsed.Summary) == "" || parsed.Findings == nil {
+		return parsedReviewResponse{}, fmt.Errorf("parse review response: summary and findings array are required")
 	}
-	parsed.Findings = normalizeFindings(parsed.Findings)
-	return parsed
+	parsed.Findings = normalizeFindings(parsed.Findings, evidenceCorpus...)
+	return parsed, nil
 }
 
-func normalizeFindings(findings []store.Finding) []store.Finding {
+func normalizeFindings(findings []store.Finding, evidenceCorpus ...string) []store.Finding {
 	normalized := make([]store.Finding, 0, len(findings))
+	corpusStrings := evidenceStrings(evidenceCorpus)
 	for _, finding := range findings {
-		if finding.File == "" || finding.Line <= 0 || len(finding.Evidence) == 0 {
+		evidence := supportedEvidence(finding, evidenceCorpus, corpusStrings)
+		if finding.File == "" || finding.Line <= 0 || len(evidence) == 0 {
 			continue
 		}
-		if finding.Confidence != "confirmed" {
+		if finding.Confidence != "confirmed" || finding.Category == "performance" {
 			finding.Confidence = "needs_verification"
 		}
+		finding.Evidence = evidence
 		normalized = append(normalized, finding)
 	}
 	return normalized
+}
+
+func supportedEvidence(finding store.Finding, corpus, corpusStrings []string) []store.Evidence {
+	supported := make([]store.Evidence, 0, len(finding.Evidence))
+	for _, evidence := range finding.Evidence {
+		switch evidence.Type {
+		case "reference":
+			if strings.TrimSpace(evidence.Text) == "" || evidence.File != finding.File || evidence.Line != finding.Line ||
+				!referenceEvidenceInCorpus(evidence, corpus) {
+				continue
+			}
+		case "static_check":
+			if evidence.Command == "" || !containsString(corpusStrings, evidence.Command) ||
+				!staticCheckEvidenceInCorpus(evidence, corpus) {
+				continue
+			}
+		default:
+			continue
+		}
+		supported = append(supported, evidence)
+	}
+	return supported
+}
+
+func referenceEvidenceInCorpus(evidence store.Evidence, corpus []string) bool {
+	for _, source := range corpus {
+		var output struct {
+			Path    string `json:"path"`
+			Content string `json:"content"`
+			Matches []struct {
+				Path    string `json:"path"`
+				Line    int    `json:"line"`
+				Snippet string `json:"snippet"`
+			} `json:"matches"`
+		}
+		if json.Unmarshal([]byte(source), &output) == nil {
+			if output.Path == evidence.File {
+				prefix := fmt.Sprintf("%d:", evidence.Line)
+				target := strings.TrimSpace(evidence.Text)
+				for _, contentLine := range strings.Split(output.Content, "\n") {
+					contentLine = strings.TrimSpace(contentLine)
+					code := strings.TrimSpace(strings.TrimPrefix(contentLine, prefix))
+					if strings.HasPrefix(contentLine, prefix) && code == target {
+						return true
+					}
+				}
+			}
+			for _, match := range output.Matches {
+				if match.Path == evidence.File && match.Line == evidence.Line &&
+					match.Snippet == strings.TrimSpace(evidence.Text) {
+					return true
+				}
+			}
+			continue
+		}
+		if rawReferenceEvidence(source, evidence) {
+			return true
+		}
+	}
+	return false
+}
+
+func rawReferenceEvidence(source string, evidence store.Evidence) bool {
+	for path, section := range rawSections(source) {
+		if path != evidence.File {
+			continue
+		}
+		if isUnifiedDiff(section) {
+			if diffReferenceEvidence(section, evidence) {
+				return true
+			}
+			continue
+		}
+		if plainReferenceEvidence(section, evidence) {
+			return true
+		}
+	}
+	return false
+}
+
+func rawSections(source string) map[string]string {
+	sections := map[string]string{}
+	var path string
+	var section []string
+	flush := func() {
+		if path != "" {
+			sections[path] = strings.Join(section, "\n")
+		}
+	}
+	for _, line := range strings.Split(source, "\n") {
+		if strings.HasPrefix(line, "### ") {
+			flush()
+			path = strings.TrimSpace(strings.TrimPrefix(line, "### "))
+			section = nil
+			continue
+		}
+		if path != "" {
+			section = append(section, line)
+		}
+	}
+	flush()
+	return sections
+}
+
+func isUnifiedDiff(section string) bool {
+	for _, line := range strings.Split(section, "\n") {
+		if strings.HasPrefix(line, "@@ ") {
+			return true
+		}
+	}
+	return false
+}
+
+func diffReferenceEvidence(section string, evidence store.Evidence) bool {
+	target := strings.TrimSpace(evidence.Text)
+	newLineNumber := 0
+	for _, line := range strings.Split(section, "\n") {
+		if strings.HasPrefix(line, "@@ ") {
+			newLineNumber = parseDiffHunkStart(line)
+			continue
+		}
+		if newLineNumber <= 0 || line == "" ||
+			strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---") ||
+			strings.HasPrefix(line, "\\") {
+			continue
+		}
+		if strings.HasPrefix(line, "+") || strings.HasPrefix(line, " ") {
+			if newLineNumber == evidence.Line && strings.TrimSpace(line[1:]) == target {
+				return true
+			}
+			newLineNumber++
+		}
+	}
+	return false
+}
+
+func parseDiffHunkStart(header string) int {
+	plusIndex := strings.Index(header, "+")
+	if plusIndex < 0 {
+		return 0
+	}
+	value := header[plusIndex+1:]
+	if endIndex := strings.IndexAny(value, ", "); endIndex >= 0 {
+		value = value[:endIndex]
+	}
+	number, err := strconv.Atoi(value)
+	if err != nil || number <= 0 {
+		return 0
+	}
+	return number
+}
+
+func plainReferenceEvidence(section string, evidence store.Evidence) bool {
+	lines := strings.Split(section, "\n")
+	if evidence.Line <= 0 || evidence.Line > len(lines) {
+		return false
+	}
+	return strings.TrimSpace(lines[evidence.Line-1]) == strings.TrimSpace(evidence.Text)
+}
+
+func staticCheckEvidenceInCorpus(evidence store.Evidence, corpus []string) bool {
+	excerpt := strings.TrimSpace(evidence.Excerpt)
+	if excerpt == "" {
+		return false
+	}
+	for _, source := range corpus {
+		var output struct {
+			Checks []struct {
+				Command  string `json:"command"`
+				Output   string `json:"output"`
+				Error    string `json:"error"`
+				Success  *bool  `json:"success"`
+				ExitCode int    `json:"exit_code"`
+				TimedOut bool   `json:"timed_out"`
+			} `json:"checks"`
+		}
+		if json.Unmarshal([]byte(source), &output) != nil {
+			continue
+		}
+		for _, check := range output.Checks {
+			if check.Command != evidence.Command || check.Success == nil || *check.Success ||
+				check.ExitCode <= 0 || check.TimedOut || check.Error != "" {
+				continue
+			}
+			if strings.Contains(check.Output, excerpt) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func evidenceStrings(corpus []string) []string {
+	values := make([]string, 0, len(corpus))
+	for _, source := range corpus {
+		var decoded any
+		if err := json.Unmarshal([]byte(source), &decoded); err == nil {
+			values = append(values, jsonStrings(decoded)...)
+			continue
+		}
+		values = append(values, source)
+	}
+	return values
+}
+
+func jsonStrings(value any) []string {
+	var values []string
+	switch typed := value.(type) {
+	case string:
+		values = append(values, typed)
+	case []any:
+		for _, item := range typed {
+			values = append(values, jsonStrings(item)...)
+		}
+	case map[string]any:
+		for _, item := range typed {
+			values = append(values, jsonStrings(item)...)
+		}
+	}
+	return values
+}
+
+func containsString(values []string, target string) bool {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return false
+	}
+	for _, value := range values {
+		if strings.Contains(value, target) {
+			return true
+		}
+	}
+	return false
 }
 
 func isDocsOnlyPR(files []github.PullRequestFile) bool {

@@ -132,7 +132,16 @@ func (s *AgentService) ReviewPR(ctx context.Context, owner, repo string, number 
 		return fmt.Errorf("run review agent: %w", err)
 	}
 
-	parsed := parseReviewResponse(result.Content)
+	toolOutputs := make([]string, 0, len(result.ToolCalls))
+	for _, invocation := range result.ToolCalls {
+		if invocation.Error == "" {
+			toolOutputs = append(toolOutputs, invocation.Output)
+		}
+	}
+	parsed, err := parseReviewResponse(result.Content, toolOutputs...)
+	if err != nil {
+		return err
+	}
 	stored, err := s.Store.CreateReviewResult(ctx, store.NewReviewResult{
 		TaskID:        taskID,
 		Summary:       parsed.Summary,
@@ -193,7 +202,7 @@ Return only a valid JSON object matching this schema:
       "confidence": "confirmed|needs_verification",
       "evidence": [
         {
-          "type": "reference",
+          "type": "reference|static_check",
           "file": "path/to/file.go",
           "line": 12,
           "text": "exact source line from a tool result"
@@ -214,6 +223,9 @@ Rules:
 - Treat architectural concerns, performance risks, and concurrency concerns that need human confirmation as needs_verification.
 - Do not report pure formatting or style preferences.
 - Do not invent files, line numbers, commands, or output.
+- Reference evidence must use the same file and line as the finding and quote the source exactly.
+- Static-check evidence must quote the failed command and output exactly. If evidence cannot be quoted exactly, omit the finding.
+- Report at most five findings, and only report issues introduced or directly triggered by this pull request.
 - Prioritize bugs, security risks, and performance issues over style.
 - If every changed file is documentation-only, return an empty findings array.
 - If the code looks good, return an empty findings array.

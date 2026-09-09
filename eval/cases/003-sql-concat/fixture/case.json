@@ -1,0 +1,19 @@
+{
+  "title": "Look up user by name",
+  "body": "Add a direct user lookup query.",
+  "head_sha": "3333333333333333333333333333333333333333",
+  "files": [
+    {
+      "filename": "internal/store/users.go",
+      "status": "modified",
+      "additions": 3,
+      "deletions": 0,
+      "changes": 3,
+      "patch": "@@ -4,3 +4,6 @@\n func FindUser(db *sql.DB, name string) (*User, error) {\n+\tquery := \"SELECT id FROM users WHERE name = '\" + name + \"'\"\n+\trows, err := db.Query(query)\n+\tdefer rows.Close()"
+    }
+  ],
+  "file_contents": {
+    "internal/store/users.go": "package store\n\nimport \"database/sql\"\n\nfunc FindUser(db *sql.DB, name string) (*User, error) {\n\tquery := \"SELECT id FROM users WHERE name = '\" + name + \"'\"\n\trows, err := db.Query(query)\n\tdefer rows.Close()\n\treturn nil, nil\n}\n"
+  },
+  "repository": {}
+}
