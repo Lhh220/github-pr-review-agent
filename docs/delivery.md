@@ -4,36 +4,80 @@
 
 | 项目 | 状态 | 结果 |
 | --- | --- | --- |
-| 本地全量回归 | 已完成 | `go test -p 1 ./...` 通过 |
+| 本地全量回归 | 已完成 | `go test -p 1 ./...` 通过；当前未配置 MYSQL_DSN，数据库集成测试跳过 |
 | 本地静态检查 | 已完成 | `go vet ./...` 通过 |
-| 离线评测 | 已完成 | 5 cases，precision / recall / confirmed precision 均为 1.0 |
+| 离线评测 | 已完成 | 7 cases × 3 轮，precision / recall / confirmed precision 均为 1.0；仅代表脚本回归 |
 | 线上健康检查 | 已完成 | 2026-09-09 `GET /healthz` 返回 `{"status":"ok"}` |
 | Day 7 线上冒烟 | 已完成 | PR #23 / Task 24 生成结构化 review，4 条 finding 均带 evidence 并标记 `needs_verification` |
 | Evidence 精确校验 | 已完成 | raw diff / file context / JSON 工具输出均按 file + line + exact line 校验 |
+| 收尾代码补强 | 本地完成，待部署 | 无效模型输出报错重试；静态证据拒绝空摘录、成功、超时与启动错误；新增正常代码负样本、评测失败记录与逐样本报告 |
 | Live 模型评测 | 待执行 | 本地未配置 `DEEPSEEK_API_KEY`，不能伪造统计结果 |
 | 静态检查线上专项 | 待执行 | 需要在 Railway 开启配置并提交编译错误 PR |
 
-## 剩余线上操作
+## 剩余验收操作
 
-1. 配置本地环境变量后运行 live 评测：
+### 1. 本机运行 live 评测
 
-   ```powershell
-   $env:DEEPSEEK_API_KEY="..."
-   go run ./cmd/eval -live -report eval/report-live.json
-   ```
+Windows PowerShell 在项目根目录执行。当前机器可用的 C 编译器如下；其他机器替换 CC 路径：
 
-2. 在 Railway 设置：
+```powershell
+$env:GOCACHE="$PWD\.gocache"
+$env:GOMODCACHE="$PWD\.gomodcache"
+$env:GOPATH="$PWD\.gopath"
+$env:CGO_ENABLED="1"
+$env:CC="D:\Dev-Cpp\TDM-GCC-64\bin\gcc.exe"
+$evalKey = Read-Host "DeepSeek API Key" -AsSecureString
+$env:DEEPSEEK_API_KEY = [System.Net.NetworkCredential]::new("", $evalKey).Password
+go run ./cmd/eval -live -runs 3 -timeout 30m -report eval/report-live.json
+Remove-Item Env:DEEPSEEK_API_KEY
+```
 
-   ```text
-   AGENT_MODE=tool_calling
-   AGENT_ENABLE_STATIC_CHECKS=true
-   AGENT_TOOL_TIMEOUT=3m
-   AGENT_STATIC_CHECK_TIMEOUT=2m
-   AGENT_STATIC_CHECK_GOPROXY=https://goproxy.cn,direct
-   ```
+这一步消耗模型额度，使用本地模拟 PR，不会向 GitHub 发评论。默认不运行静态检查，静态检查单独在线上验收。
 
-3. 提交一个引入编译错误的 PR，确认 bot 评论引用 `go test ./...` 或 `go vet ./...` 的失败输出。
-4. 用任务 ID 请求 `/tasks/<task_id>/tool-calls`，确认 `run_static_checks` 的输入、输出和耗时已落库。
+查看报告：
+
+```powershell
+$report = Get-Content eval/report-live.json -Raw | ConvertFrom-Json
+$report | Select-Object mode,model,cases,planned_cases,failed_cases,negative_cases,precision,recall,false_positive_rate,confirmed_precision,overconfirmed_findings
+$report.case_results | Where-Object error | Select-Object name,run,error
+```
+
+本次应执行 21 次，`mode=live`、`cases=planned_cases=21`、`failed_cases=0`、`negative_cases=6`。先排除运行失败，再逐条核对 `findings / false_positive_findings / missed_findings`；不能把位置、类别吻合当作语义正确。记录真实指标及误报/漏报例子；有问题则修复后重跑，不要求伪造满分。失败调用的费用不包含在平均 token 中。命令失败时先看报告中的 error，已完成结果仍保留，重新运行建议使用新报告文件名。
+
+### 2. 部署修复并验收静态检查
+
+先提交本地修复、推送到部署分支，等待 Railway 完成构建；本轮仅本地验证，尚未部署。在 Railway 设置：
+
+```text
+AGENT_MODE=tool_calling
+AGENT_ENABLE_STATIC_CHECKS=true
+AGENT_TOOL_TIMEOUT=3m
+AGENT_STATIC_CHECK_TIMEOUT=2m
+AGENT_STATIC_CHECK_GOPROXY=https://goproxy.cn,direct
+```
+
+在已安装 GitHub App 的个人测试仓库，新建测试分支及 PR。例如新增 `phase3_probe.go`（package 与所在目录一致）：
+
+```go
+package main
+
+var phase3Probe = phase3UndefinedSymbol
+```
+
+PR 描述说明“请调用 run_static_checks，使用 go_test 验证编译结果”。不要合并此 PR。若用独立测试仓库，仓库根目录须有兼容 Go 1.25 的 go.mod。
+
+bot 回评后，在 `/admin` 根据评论里的 Task ID 查看任务详情：
+
+1. 任务为 done，并有 `run_static_checks` 工具日志；需要检查日志内部 output JSON，而非只看外层工具 status。
+2. `checks` 中对应命令为 `go test ./...` 或 `go vet ./...`，`success=false`、`exit_code>0`、`timed_out=false`、无 error，output 含 undefined 编译错误。
+3. review finding 的 `evidence.type=static_check`，command 和非空 excerpt 对应上述真实失败输出。
+4. 修正测试分支（例如改为 `var phase3Probe = 1`）再推送，确认新的任务不再报告该编译错误，最后关闭测试 PR。
+
+依赖下载失败、超时或未调用工具都不算通过。首次下载慢可在个人测试仓库重试；本工具仍是受限本地执行，不能视为强隔离沙箱。验收完可将 `AGENT_ENABLE_STATIC_CHECKS=false`，保留 tool_calling；需要整体回滚时将 `AGENT_MODE=legacy`。
+
+### 3. 保存验收证据后收官
+
+记录 live 报告文件、实际模型、指标、测试 PR、前后两个 Task ID、静态检查 output 和 review evidence，然后更新本页状态并勾选 roadmap 的 Day 8 专项补充。历史 PR #23 冒烟不代表这次新增修复已上线。
 
 ## 简历表述
 

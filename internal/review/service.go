@@ -94,7 +94,10 @@ func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int, 
 	if err != nil {
 		return fmt.Errorf("review code: %w", err)
 	}
-	parsed := parseReviewResponse(response.Content, diff, fileContext)
+	parsed, err := parseReviewResponse(response.Content, diff, fileContext)
+	if err != nil {
+		return err
+	}
 	result, err := s.Results.CreateReviewResult(ctx, store.NewReviewResult{
 		TaskID:        taskID,
 		Summary:       parsed.Summary,
@@ -121,20 +124,17 @@ type parsedReviewResponse struct {
 	Findings []store.Finding `json:"findings"`
 }
 
-func parseReviewResponse(content string, evidenceCorpus ...string) parsedReviewResponse {
+func parseReviewResponse(content string, evidenceCorpus ...string) (parsedReviewResponse, error) {
 	cleaned := extractJSONObject(content)
 	var parsed parsedReviewResponse
-	if err := json.Unmarshal([]byte(cleaned), &parsed); err != nil || strings.TrimSpace(parsed.Summary) == "" {
-		return parsedReviewResponse{
-			Summary:  content,
-			Findings: []store.Finding{},
-		}
+	if err := json.Unmarshal([]byte(cleaned), &parsed); err != nil {
+		return parsedReviewResponse{}, fmt.Errorf("parse review response: %w", err)
 	}
-	if parsed.Findings == nil {
-		parsed.Findings = []store.Finding{}
+	if strings.TrimSpace(parsed.Summary) == "" || parsed.Findings == nil {
+		return parsedReviewResponse{}, fmt.Errorf("parse review response: summary and findings array are required")
 	}
 	parsed.Findings = normalizeFindings(parsed.Findings, evidenceCorpus...)
-	return parsed
+	return parsed, nil
 }
 
 func normalizeFindings(findings []store.Finding, evidenceCorpus ...string) []store.Finding {
@@ -159,7 +159,7 @@ func supportedEvidence(finding store.Finding, corpus, corpusStrings []string) []
 	for _, evidence := range finding.Evidence {
 		switch evidence.Type {
 		case "reference":
-			if evidence.File != finding.File || evidence.Line != finding.Line ||
+			if strings.TrimSpace(evidence.Text) == "" || evidence.File != finding.File || evidence.Line != finding.Line ||
 				!referenceEvidenceInCorpus(evidence, corpus) {
 				continue
 			}
@@ -313,23 +313,30 @@ func plainReferenceEvidence(section string, evidence store.Evidence) bool {
 }
 
 func staticCheckEvidenceInCorpus(evidence store.Evidence, corpus []string) bool {
+	excerpt := strings.TrimSpace(evidence.Excerpt)
+	if excerpt == "" {
+		return false
+	}
 	for _, source := range corpus {
 		var output struct {
 			Checks []struct {
-				Command string `json:"command"`
-				Output  string `json:"output"`
-				Error   string `json:"error"`
+				Command  string `json:"command"`
+				Output   string `json:"output"`
+				Error    string `json:"error"`
+				Success  *bool  `json:"success"`
+				ExitCode int    `json:"exit_code"`
+				TimedOut bool   `json:"timed_out"`
 			} `json:"checks"`
 		}
 		if json.Unmarshal([]byte(source), &output) != nil {
 			continue
 		}
 		for _, check := range output.Checks {
-			if check.Command != evidence.Command {
+			if check.Command != evidence.Command || check.Success == nil || *check.Success ||
+				check.ExitCode <= 0 || check.TimedOut || check.Error != "" {
 				continue
 			}
-			if strings.Contains(check.Output, strings.TrimSpace(evidence.Excerpt)) ||
-				strings.Contains(check.Error, strings.TrimSpace(evidence.Excerpt)) {
+			if strings.Contains(check.Output, excerpt) {
 				return true
 			}
 		}

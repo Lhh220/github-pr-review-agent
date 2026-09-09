@@ -134,9 +134,14 @@ func (s *AgentService) ReviewPR(ctx context.Context, owner, repo string, number 
 
 	toolOutputs := make([]string, 0, len(result.ToolCalls))
 	for _, invocation := range result.ToolCalls {
-		toolOutputs = append(toolOutputs, invocation.Output)
+		if invocation.Error == "" {
+			toolOutputs = append(toolOutputs, invocation.Output)
+		}
 	}
-	parsed := parseReviewResponse(result.Content, toolOutputs...)
+	parsed, err := parseReviewResponse(result.Content, toolOutputs...)
+	if err != nil {
+		return err
+	}
 	stored, err := s.Store.CreateReviewResult(ctx, store.NewReviewResult{
 		TaskID:        taskID,
 		Summary:       parsed.Summary,

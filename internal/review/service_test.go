@@ -1,12 +1,48 @@
 package review
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/liaohonghui/github-pr-review-agent/internal/github"
 	"github.com/liaohonghui/github-pr-review-agent/internal/store"
 )
+
+func TestStaticEvidenceRequiresCompletedFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name, excerpt    string
+		success, timeout bool
+		code             int
+		err              string
+		want             bool
+	}{
+		{name: "failure", excerpt: "undefined: x", code: 1, want: true},
+		{name: "empty", code: 1},
+		{name: "whitespace", excerpt: "  ", code: 1},
+		{name: "success", excerpt: "undefined: x", success: true},
+		{name: "timeout", excerpt: "undefined: x", timeout: true, code: 1},
+		{name: "start failure", excerpt: "undefined: x", code: 1, err: "start failed"},
+		{name: "no exit status", excerpt: "undefined: x"},
+		{name: "fabricated", excerpt: "other failure", code: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			output, err := json.Marshal(map[string]any{"checks": []any{map[string]any{
+				"command": "go test ./...", "output": "undefined: x", "success": tc.success,
+				"exit_code": tc.code, "timed_out": tc.timeout, "error": tc.err,
+			}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			finding := store.Finding{File: "a.go", Line: 1, Category: "bug", Confidence: "confirmed",
+				Evidence: []store.Evidence{{Type: "static_check", Command: "go test ./...", Excerpt: tc.excerpt}}}
+			got := normalizeFindings([]store.Finding{finding}, string(output))
+			if (len(got) == 1) != tc.want {
+				t.Fatalf("findings = %+v, want accepted=%v", got, tc.want)
+			}
+		})
+	}
+}
 
 func TestBuildDiff(t *testing.T) {
 	files := []github.PullRequestFile{
@@ -118,12 +154,15 @@ func TestParseReviewResponseRequiresEvidence(t *testing.T) {
 		]
 	}`
 
-	parsed := parseReviewResponse(
+	parsed, err := parseReviewResponse(
 		content,
 		`{"path":"cmd/server/main.go","content":"42: cfg.MaxDiffLines"}`,
-		`{"checks":[{"command":"go test ./...","output":"undefined: cfg.MaxDiffLines"}]}`,
+		`{"checks":[{"command":"go test ./...","success":false,"exit_code":1,"output":"undefined: cfg.MaxDiffLines"}]}`,
 		`{"path":"internal/review/service.go","content":"20: for _, file := range files"}`,
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(parsed.Findings) != 2 {
 		t.Fatalf("findings length = %d, want 2: %+v", len(parsed.Findings), parsed.Findings)
 	}
@@ -168,10 +207,13 @@ func TestParseReviewResponseDropsFabricatedEvidence(t *testing.T) {
 		]
 	}`
 
-	parsed := parseReviewResponse(
+	parsed, err := parseReviewResponse(
 		content,
 		`{"path":"internal/review/service.go","content":"20: for _, file := range files"}`,
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(parsed.Findings) != 1 {
 		t.Fatalf("findings length = %d, want 1: %+v", len(parsed.Findings), parsed.Findings)
 	}
@@ -232,11 +274,14 @@ func TestParseReviewResponseValidatesRawEvidenceByFileAndLine(t *testing.T) {
 		]
 	}`
 
-	parsed := parseReviewResponse(
+	parsed, err := parseReviewResponse(
 		content,
 		"\n### cmd/server/main.go\n@@ -1,2 +1,2 @@\n package main\n-cfg.MaxDiffLimits\n+cfg.MaxDiffLines\n\n### cmd/server/removed.go\n@@ -1,2 +1,2 @@\n package main\n-removed line\n+replacement\n",
 		"\n### internal/metrics/metrics.go\npackage metrics\n\nfunc Record() {\n\tcounts[\"requests\"] = 1\n}\n",
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(parsed.Findings) != 2 {
 		t.Fatalf("findings length = %d, want 2: %+v", len(parsed.Findings), parsed.Findings)
 	}

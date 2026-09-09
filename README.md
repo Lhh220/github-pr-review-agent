@@ -39,7 +39,7 @@ MVP 已经跑通并部署到 Railway：
 - 阶段三 Day 4 已接入 `search_references`：下载 PR head 的仓库 tarball，流式扫描跨文件精确标识符引用
 - 阶段三 Day 5 已接入 `run_static_checks`：默认关闭，开启后可在服务端白名单内执行 `go test` / `go vet` 并把结果回传 Agent
 - 阶段三 Day 6 已完成结构化输出增强：每条 finding 携带 `evidence`，并按 `confirmed / needs_verification` 标注可信度
-- 阶段三 Day 7 已完成基础评测集：5 个离线 PR fixture，统计 precision / recall / 误报率 / 分类准确率 / confidence 校准 / token / 延迟 / 工具轨迹
+- 阶段三评测集已扩展为 7 个离线 PR fixture，包含 2 个正常代码负样本，统计 precision / recall / 误报率 / 分类准确率 / confidence 校准 / token / 延迟 / 工具轨迹
 - 关键状态变更与审查结果创建会同步写入 `audit_log`，任务数据和审计数据保持同一事务
 - MySQL 结构通过版本化 migration 管理，服务启动自动执行，也提供 `cmd/migrate` CLI
 
@@ -268,13 +268,15 @@ Railway / Docker 生产构建使用仓库根目录的 `Dockerfile`。构建阶�
 
 ## 评测
 
-Day 7 评测集位于 `eval/cases`，当前包含 5 个离线可回归样本：
+评测集位于 `eval/cases`，当前包含 7 个离线可回归样本：
 
 - `001-delete-field`：删除配置字段后仍被跨文件引用，期望 `bug / confirmed`
 - `002-nil-map`：写入 nil map，期望 `bug / confirmed`
 - `003-sql-concat`：拼接 SQL，期望 `security / confirmed`
 - `004-goroutine-leak`：无退出条件的后台 goroutine，期望 `performance / needs_verification`
 - `005-docs-only`：纯文档 PR，期望 0 findings 且不调用工具
+- `006-initialized-map`：先初始化 map 再写入，期望 0 findings，经过模型和工具审查
+- `007-parameterized-sql`：SQL 使用参数绑定，期望 0 findings，经过模型和工具审查
 
 离线模式使用 fixture script 驱动真实 Agent Loop 和 GitHub 工具，不访问外网、不消耗模型 token，适合作为回归测试：
 
@@ -288,8 +290,14 @@ go run ./cmd/eval
 
 ```powershell
 $env:DEEPSEEK_API_KEY="你的 key"
-go run ./cmd/eval -live -report eval/report-live.json
+go run ./cmd/eval -live -runs 3 -timeout 30m -report eval/report-live.json
 ```
+
+`-runs` 会让每个样本重复执行，并在 `case_results[].run` 中记录轮次。live 模型输出存在波动，建议至少跑 3 轮后再解读 precision / recall 和 confirmed precision；报告里的 `cases` 是总执行次数。
+
+每个样本完成或失败后都会保存报告；个别失败会记录 `error` 并继续，总超时则保留已有结果后退出。失败或未完成时退出码非零。验收先检查 `failed_cases=0` 且 `cases=planned_cases`，再看质量指标和完整 `case_results[].findings`。误报率排除直接跳过的文档样本，`confirmed_precision` 要求命中类别且人工标注也为 confirmed。位置、类别匹配仍不能代替人工核对结论语义。报告的 `mode` 区分离线脚本回归与真实模型评测。
+
+审查链路遇到非法 JSON、空 summary 或缺失/null findings 数组会返回错误并进入任务重试；不会把格式错误发布为“未发现问题”。静态检查证据要求非空摘录，命令已结束、退出码大于零且没有超时或启动错误。引用文本的真实性校验不等于缺陷语义证明，模型结论仍需通过 live 评测确认质量。
 
 交付验收状态、剩余线上操作、简历表述和面试问答见 [docs/delivery.md](docs/delivery.md)。
 

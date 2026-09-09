@@ -12,6 +12,33 @@ import (
 	"github.com/liaohonghui/github-pr-review-agent/internal/store"
 )
 
+func TestInvalidOutputDoesNotPublishOrPersistReview(t *testing.T) {
+	for _, content := range []string{"not JSON", `{"summary":"fine"}`, `{"summary":"fine","findings":null}`, `{"summary":"","findings":[]}`, `{"summary":"fine","findings":{}}`} {
+		t.Run(content, func(t *testing.T) {
+			pr := &github.PullRequest{Head: github.Ref{SHA: "head"}}
+			files := []github.PullRequestFile{{Filename: "a.go", Patch: "@@ -1 +1 @@\n+x"}}
+			legacyGH := &fakeGitHubClient{pr: pr, files: files}
+			legacyStore := &fakeResultStore{}
+			legacy := New(legacyGH, &fakeLLMClient{response: llm.ReviewResponse{Content: content}}, legacyStore, 100, 0, 100)
+			if err := legacy.ReviewPR(context.Background(), "o", "r", 1, 1); err == nil {
+				t.Fatal("legacy accepted invalid output")
+			}
+			if legacyGH.reviewBody != "" || legacyStore.input.TaskID != 0 {
+				t.Fatal("legacy published or persisted invalid review")
+			}
+			agentGH := &fakeAgentGitHubClient{pr: pr, files: files}
+			agentStore := &fakeAgentStore{}
+			service := NewAgent(agentGH, &scriptedAgentProvider{responses: []llm.ChatResponse{{Content: content}}}, agentStore, AgentOptions{})
+			if err := service.ReviewPR(context.Background(), "o", "r", 1, 1); err == nil {
+				t.Fatal("agent accepted invalid output")
+			}
+			if agentGH.reviewBody != "" || agentStore.result.TaskID != 0 {
+				t.Fatal("agent published or persisted invalid review")
+			}
+		})
+	}
+}
+
 type fakeAgentGitHubClient struct {
 	pr          *github.PullRequest
 	files       []github.PullRequestFile

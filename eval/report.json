@@ -1,18 +1,45 @@
 {
-  "cases": 5,
-  "generated_at": "2026-09-08T12:27:11.990654315Z",
+  "mode": "offline",
+  "planned_cases": 21,
+  "failed_cases": 0,
+  "scored_cases": 21,
+  "negative_cases": 6,
+  "overconfirmed_findings": 0,
+  "cases": 21,
+  "runs": 3,
+  "generated_at": "2026-09-09T06:39:53.6634496Z",
   "precision": 1,
   "recall": 1,
   "false_positive_rate": 0,
   "category_accuracy": 1,
   "confirmed_precision": 1,
-  "avg_input_tokens": 316,
-  "avg_output_tokens": 81.2,
-  "avg_total_tokens": 397.2,
-  "avg_latency_ms": 35.8,
+  "avg_input_tokens": 225.71428571428572,
+  "avg_output_tokens": 58,
+  "avg_total_tokens": 283.7142857142857,
+  "avg_latency_ms": 25.571428571428573,
   "case_results": [
     {
+      "findings": [
+        {
+          "category": "bug",
+          "file": "cmd/server/main.go",
+          "line": 8,
+          "severity": "high",
+          "comment": "MaxDiffLines was removed from Config, but main.go still reads it.",
+          "suggestion": "Restore the field or remove this reference.",
+          "confidence": "confirmed",
+          "evidence": [
+            {
+              "type": "reference",
+              "file": "cmd/server/main.go",
+              "line": 8,
+              "text": "fmt.Println(cfg.MaxDiffLines)"
+            }
+          ]
+        }
+      ],
       "name": "001-delete-field",
+      "run": 1,
       "expected_finding_count": 1,
       "predicted_finding_count": 1,
       "true_positives": 1,
@@ -32,7 +59,27 @@
       "missed_findings": []
     },
     {
+      "findings": [
+        {
+          "category": "bug",
+          "file": "internal/metrics/metrics.go",
+          "line": 5,
+          "severity": "high",
+          "comment": "Writing to the nil map will panic at runtime.",
+          "suggestion": "Initialize counts with make(map[string]int) before writing.",
+          "confidence": "confirmed",
+          "evidence": [
+            {
+              "type": "reference",
+              "file": "internal/metrics/metrics.go",
+              "line": 5,
+              "text": "counts[\"requests\"] = 1"
+            }
+          ]
+        }
+      ],
       "name": "002-nil-map",
+      "run": 1,
       "expected_finding_count": 1,
       "predicted_finding_count": 1,
       "true_positives": 1,
@@ -52,7 +99,27 @@
       "missed_findings": []
     },
     {
+      "findings": [
+        {
+          "category": "security",
+          "file": "internal/store/users.go",
+          "line": 6,
+          "severity": "high",
+          "comment": "The SQL query concatenates user input and is vulnerable to injection.",
+          "suggestion": "Use a parameterized query with a placeholder.",
+          "confidence": "confirmed",
+          "evidence": [
+            {
+              "type": "reference",
+              "file": "internal/store/users.go",
+              "line": 6,
+              "text": "query := \"SELECT id FROM users WHERE name = '\" + name + \"'\""
+            }
+          ]
+        }
+      ],
       "name": "003-sql-concat",
+      "run": 1,
       "expected_finding_count": 1,
       "predicted_finding_count": 1,
       "true_positives": 1,
@@ -72,7 +139,27 @@
       "missed_findings": []
     },
     {
+      "findings": [
+        {
+          "category": "performance",
+          "file": "internal/worker/worker.go",
+          "line": 6,
+          "severity": "medium",
+          "comment": "These goroutines run an unbounded loop and may leak workers after Start returns.",
+          "suggestion": "Pass a context and select on ctx.Done with a bounded work loop.",
+          "confidence": "needs_verification",
+          "evidence": [
+            {
+              "type": "reference",
+              "file": "internal/worker/worker.go",
+              "line": 6,
+              "text": "for {"
+            }
+          ]
+        }
+      ],
       "name": "004-goroutine-leak",
+      "run": 1,
       "expected_finding_count": 1,
       "predicted_finding_count": 1,
       "true_positives": 1,
@@ -92,7 +179,10 @@
       "missed_findings": []
     },
     {
+      "skipped_reason": "This pull request only changes documentation; code review skipped.",
+      "findings": [],
       "name": "005-docs-only",
+      "run": 1,
       "expected_finding_count": 0,
       "predicted_finding_count": 0,
       "true_positives": 0,
@@ -103,6 +193,494 @@
       "total_tokens": 0,
       "latency_ms": 0,
       "tools": [],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "findings": [],
+      "name": "006-initialized-map",
+      "run": 1,
+      "expected_finding_count": 0,
+      "predicted_finding_count": 0,
+      "true_positives": 0,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 0,
+      "tools": [
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        }
+      ],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "findings": [],
+      "name": "007-parameterized-sql",
+      "run": 1,
+      "expected_finding_count": 0,
+      "predicted_finding_count": 0,
+      "true_positives": 0,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 0,
+      "tools": [
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        }
+      ],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "findings": [
+        {
+          "category": "bug",
+          "file": "cmd/server/main.go",
+          "line": 8,
+          "severity": "high",
+          "comment": "MaxDiffLines was removed from Config, but main.go still reads it.",
+          "suggestion": "Restore the field or remove this reference.",
+          "confidence": "confirmed",
+          "evidence": [
+            {
+              "type": "reference",
+              "file": "cmd/server/main.go",
+              "line": 8,
+              "text": "fmt.Println(cfg.MaxDiffLines)"
+            }
+          ]
+        }
+      ],
+      "name": "001-delete-field",
+      "run": 2,
+      "expected_finding_count": 1,
+      "predicted_finding_count": 1,
+      "true_positives": 1,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 420,
+      "output_tokens": 108,
+      "total_tokens": 528,
+      "latency_ms": 50,
+      "tools": [
+        {
+          "name": "search_references",
+          "duration_ms": 0
+        }
+      ],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "findings": [
+        {
+          "category": "bug",
+          "file": "internal/metrics/metrics.go",
+          "line": 5,
+          "severity": "high",
+          "comment": "Writing to the nil map will panic at runtime.",
+          "suggestion": "Initialize counts with make(map[string]int) before writing.",
+          "confidence": "confirmed",
+          "evidence": [
+            {
+              "type": "reference",
+              "file": "internal/metrics/metrics.go",
+              "line": 5,
+              "text": "counts[\"requests\"] = 1"
+            }
+          ]
+        }
+      ],
+      "name": "002-nil-map",
+      "run": 2,
+      "expected_finding_count": 1,
+      "predicted_finding_count": 1,
+      "true_positives": 1,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 360,
+      "output_tokens": 94,
+      "total_tokens": 454,
+      "latency_ms": 40,
+      "tools": [
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        }
+      ],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "findings": [
+        {
+          "category": "security",
+          "file": "internal/store/users.go",
+          "line": 6,
+          "severity": "high",
+          "comment": "The SQL query concatenates user input and is vulnerable to injection.",
+          "suggestion": "Use a parameterized query with a placeholder.",
+          "confidence": "confirmed",
+          "evidence": [
+            {
+              "type": "reference",
+              "file": "internal/store/users.go",
+              "line": 6,
+              "text": "query := \"SELECT id FROM users WHERE name = '\" + name + \"'\""
+            }
+          ]
+        }
+      ],
+      "name": "003-sql-concat",
+      "run": 2,
+      "expected_finding_count": 1,
+      "predicted_finding_count": 1,
+      "true_positives": 1,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 390,
+      "output_tokens": 100,
+      "total_tokens": 490,
+      "latency_ms": 43,
+      "tools": [
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        }
+      ],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "findings": [
+        {
+          "category": "performance",
+          "file": "internal/worker/worker.go",
+          "line": 6,
+          "severity": "medium",
+          "comment": "These goroutines run an unbounded loop and may leak workers after Start returns.",
+          "suggestion": "Pass a context and select on ctx.Done with a bounded work loop.",
+          "confidence": "needs_verification",
+          "evidence": [
+            {
+              "type": "reference",
+              "file": "internal/worker/worker.go",
+              "line": 6,
+              "text": "for {"
+            }
+          ]
+        }
+      ],
+      "name": "004-goroutine-leak",
+      "run": 2,
+      "expected_finding_count": 1,
+      "predicted_finding_count": 1,
+      "true_positives": 1,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 410,
+      "output_tokens": 104,
+      "total_tokens": 514,
+      "latency_ms": 46,
+      "tools": [
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        }
+      ],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "skipped_reason": "This pull request only changes documentation; code review skipped.",
+      "findings": [],
+      "name": "005-docs-only",
+      "run": 2,
+      "expected_finding_count": 0,
+      "predicted_finding_count": 0,
+      "true_positives": 0,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 0,
+      "tools": [],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "findings": [],
+      "name": "006-initialized-map",
+      "run": 2,
+      "expected_finding_count": 0,
+      "predicted_finding_count": 0,
+      "true_positives": 0,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 0,
+      "tools": [
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        }
+      ],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "findings": [],
+      "name": "007-parameterized-sql",
+      "run": 2,
+      "expected_finding_count": 0,
+      "predicted_finding_count": 0,
+      "true_positives": 0,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 0,
+      "tools": [
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        }
+      ],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "findings": [
+        {
+          "category": "bug",
+          "file": "cmd/server/main.go",
+          "line": 8,
+          "severity": "high",
+          "comment": "MaxDiffLines was removed from Config, but main.go still reads it.",
+          "suggestion": "Restore the field or remove this reference.",
+          "confidence": "confirmed",
+          "evidence": [
+            {
+              "type": "reference",
+              "file": "cmd/server/main.go",
+              "line": 8,
+              "text": "fmt.Println(cfg.MaxDiffLines)"
+            }
+          ]
+        }
+      ],
+      "name": "001-delete-field",
+      "run": 3,
+      "expected_finding_count": 1,
+      "predicted_finding_count": 1,
+      "true_positives": 1,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 420,
+      "output_tokens": 108,
+      "total_tokens": 528,
+      "latency_ms": 50,
+      "tools": [
+        {
+          "name": "search_references",
+          "duration_ms": 0
+        }
+      ],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "findings": [
+        {
+          "category": "bug",
+          "file": "internal/metrics/metrics.go",
+          "line": 5,
+          "severity": "high",
+          "comment": "Writing to the nil map will panic at runtime.",
+          "suggestion": "Initialize counts with make(map[string]int) before writing.",
+          "confidence": "confirmed",
+          "evidence": [
+            {
+              "type": "reference",
+              "file": "internal/metrics/metrics.go",
+              "line": 5,
+              "text": "counts[\"requests\"] = 1"
+            }
+          ]
+        }
+      ],
+      "name": "002-nil-map",
+      "run": 3,
+      "expected_finding_count": 1,
+      "predicted_finding_count": 1,
+      "true_positives": 1,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 360,
+      "output_tokens": 94,
+      "total_tokens": 454,
+      "latency_ms": 40,
+      "tools": [
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        }
+      ],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "findings": [
+        {
+          "category": "security",
+          "file": "internal/store/users.go",
+          "line": 6,
+          "severity": "high",
+          "comment": "The SQL query concatenates user input and is vulnerable to injection.",
+          "suggestion": "Use a parameterized query with a placeholder.",
+          "confidence": "confirmed",
+          "evidence": [
+            {
+              "type": "reference",
+              "file": "internal/store/users.go",
+              "line": 6,
+              "text": "query := \"SELECT id FROM users WHERE name = '\" + name + \"'\""
+            }
+          ]
+        }
+      ],
+      "name": "003-sql-concat",
+      "run": 3,
+      "expected_finding_count": 1,
+      "predicted_finding_count": 1,
+      "true_positives": 1,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 390,
+      "output_tokens": 100,
+      "total_tokens": 490,
+      "latency_ms": 43,
+      "tools": [
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        }
+      ],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "findings": [
+        {
+          "category": "performance",
+          "file": "internal/worker/worker.go",
+          "line": 6,
+          "severity": "medium",
+          "comment": "These goroutines run an unbounded loop and may leak workers after Start returns.",
+          "suggestion": "Pass a context and select on ctx.Done with a bounded work loop.",
+          "confidence": "needs_verification",
+          "evidence": [
+            {
+              "type": "reference",
+              "file": "internal/worker/worker.go",
+              "line": 6,
+              "text": "for {"
+            }
+          ]
+        }
+      ],
+      "name": "004-goroutine-leak",
+      "run": 3,
+      "expected_finding_count": 1,
+      "predicted_finding_count": 1,
+      "true_positives": 1,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 410,
+      "output_tokens": 104,
+      "total_tokens": 514,
+      "latency_ms": 46,
+      "tools": [
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        }
+      ],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "skipped_reason": "This pull request only changes documentation; code review skipped.",
+      "findings": [],
+      "name": "005-docs-only",
+      "run": 3,
+      "expected_finding_count": 0,
+      "predicted_finding_count": 0,
+      "true_positives": 0,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 0,
+      "tools": [],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "findings": [],
+      "name": "006-initialized-map",
+      "run": 3,
+      "expected_finding_count": 0,
+      "predicted_finding_count": 0,
+      "true_positives": 0,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 0,
+      "tools": [
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        }
+      ],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "findings": [],
+      "name": "007-parameterized-sql",
+      "run": 3,
+      "expected_finding_count": 0,
+      "predicted_finding_count": 0,
+      "true_positives": 0,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 0,
+      "tools": [
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        }
+      ],
       "false_positive_findings": [],
       "missed_findings": []
     }
