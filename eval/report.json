@@ -1,22 +1,22 @@
 {
   "mode": "offline",
-  "planned_cases": 21,
+  "planned_cases": 27,
   "failed_cases": 0,
-  "scored_cases": 21,
-  "negative_cases": 6,
+  "scored_cases": 27,
+  "negative_cases": 12,
   "overconfirmed_findings": 0,
-  "cases": 21,
+  "cases": 27,
   "runs": 3,
-  "generated_at": "2026-09-09T06:39:53.6634496Z",
+  "generated_at": "2026-09-09T06:53:24.497658Z",
   "precision": 1,
   "recall": 1,
   "false_positive_rate": 0,
   "category_accuracy": 1,
   "confirmed_precision": 1,
-  "avg_input_tokens": 225.71428571428572,
-  "avg_output_tokens": 58,
-  "avg_total_tokens": 283.7142857142857,
-  "avg_latency_ms": 25.571428571428573,
+  "avg_input_tokens": 175.55555555555554,
+  "avg_output_tokens": 45.111111111111114,
+  "avg_total_tokens": 220.66666666666666,
+  "avg_latency_ms": 19.962962962962962,
   "case_results": [
     {
       "findings": [
@@ -241,6 +241,58 @@
       "missed_findings": []
     },
     {
+      "findings": [],
+      "name": "008-diff-section-contract",
+      "run": 1,
+      "expected_finding_count": 0,
+      "predicted_finding_count": 0,
+      "true_positives": 0,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 0,
+      "tools": [
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        },
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        }
+      ],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "findings": [],
+      "name": "009-review-output-policy",
+      "run": 1,
+      "expected_finding_count": 0,
+      "predicted_finding_count": 0,
+      "true_positives": 0,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 1,
+      "tools": [
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        },
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        }
+      ],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
       "findings": [
         {
           "category": "bug",
@@ -274,7 +326,7 @@
       "tools": [
         {
           "name": "search_references",
-          "duration_ms": 0
+          "duration_ms": 1
         }
       ],
       "false_positive_findings": [],
@@ -463,6 +515,58 @@
       "missed_findings": []
     },
     {
+      "findings": [],
+      "name": "008-diff-section-contract",
+      "run": 2,
+      "expected_finding_count": 0,
+      "predicted_finding_count": 0,
+      "true_positives": 0,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 1,
+      "tools": [
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        },
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        }
+      ],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "findings": [],
+      "name": "009-review-output-policy",
+      "run": 2,
+      "expected_finding_count": 0,
+      "predicted_finding_count": 0,
+      "true_positives": 0,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 0,
+      "tools": [
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        },
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        }
+      ],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
       "findings": [
         {
           "category": "bug",
@@ -676,6 +780,58 @@
       "total_tokens": 0,
       "latency_ms": 0,
       "tools": [
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        }
+      ],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "findings": [],
+      "name": "008-diff-section-contract",
+      "run": 3,
+      "expected_finding_count": 0,
+      "predicted_finding_count": 0,
+      "true_positives": 0,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 0,
+      "tools": [
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        },
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        }
+      ],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "findings": [],
+      "name": "009-review-output-policy",
+      "run": 3,
+      "expected_finding_count": 0,
+      "predicted_finding_count": 0,
+      "true_positives": 0,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 0,
+      "tools": [
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        },
         {
           "name": "read_file_context",
           "duration_ms": 0

@@ -1,0 +1,22 @@
+{
+  "files": [
+    {
+      "patch": "@@ -0,0 +1,16 @@\n+package review\n+\n+import \"strings\"\n+\n+func BuildDiff(path, patch string) string {\n+\treturn \"### \" + path + \"\\n\" + patch\n+}\n+\n+func Section(source, path string) string {\n+\theader := \"### \" + path + \"\\n\"\n+\tstart := strings.Index(source, header)\n+\tif start < 0 { return \"\" }\n+\tcontent := source[start+len(header):]\n+\tif end := strings.Index(content, \"\\n### \"); end >= 0 { return content[:end] }\n+\treturn content\n+}",
+      "filename": "review.go",
+      "status": "added",
+      "additions": 16,
+      "changes": 16,
+      "deletions": 0
+    }
+  ],
+  "repository": {
+    "review_test.go": "package review\n\nimport \"testing\"\n\nfunc TestSectionRoundTrip(t *testing.T) {\n\tpatch := \"@@ -1 +1 @@\\n-old\\n+new\"\n\tsource := BuildDiff(\"a.go\", patch)\n\tif got := Section(source, \"a.go\"); got != patch { t.Fatalf(\"section = %q\", got) }\n\tif got := Section(source, \"missing.go\"); got != \"\" { t.Fatalf(\"unexpected section %q\", got) }\n}",
+    "go.mod": "module example.com/review\n\ngo 1.25\n"
+  },
+  "body": "Review the implementation and its callers and tests for introduced defects.",
+  "file_contents": {
+    "review.go": "package review\n\nimport \"strings\"\n\nfunc BuildDiff(path, patch string) string {\n\treturn \"### \" + path + \"\\n\" + patch\n}\n\nfunc Section(source, path string) string {\n\theader := \"### \" + path + \"\\n\"\n\tstart := strings.Index(source, header)\n\tif start < 0 { return \"\" }\n\tcontent := source[start+len(header):]\n\tif end := strings.Index(content, \"\\n### \"); end >= 0 { return content[:end] }\n\treturn content\n}"
+  },
+  "head_sha": "8888888888888888888888888888888888888888",
+  "title": "Extract file sections from generated diffs"
+}

@@ -1,0 +1,22 @@
+{
+  "files": [
+    {
+      "patch": "@@ -0,0 +1,33 @@\n+package review\n+\n+import (\n+\t\"encoding/json\"\n+\t\"errors\"\n+)\n+\n+type Finding struct {\n+\tCategory string `json:\"category\"`\n+\tConfidence string `json:\"confidence\"`\n+}\n+\n+type Response struct {\n+\tSummary string `json:\"summary\"`\n+\tFindings []Finding `json:\"findings\"`\n+}\n+\n+// Parse requires a summary and an explicit findings array; [] is a valid clean review.\n+func Parse(raw string) (Response, error) {\n+\tvar result Response\n+\tif err := json.Unmarshal([]byte(raw), &result); err != nil { return Response{}, err }\n+\tif result.Summary == \"\" || result.Findings == nil { return Response{}, errors.New(\"invalid review schema\") }\n+\tfor i := range result.Findings {\n+\t\t// Without benchmark evidence, performance findings always require verification.\n+\t\tif result.Findings[i].Category == \"performance\" { result.Findings[i].Confidence = \"needs_verification\" }\n+\t}\n+\treturn result, nil\n+}\n+\n+// Overconfirmed counts a confirmed prediction only when its label requires verification.\n+func Overconfirmed(actual, expected Finding) bool {\n+\treturn actual.Confidence == \"confirmed\" && expected.Confidence == \"needs_verification\"\n+}",
+      "filename": "review.go",
+      "status": "added",
+      "additions": 33,
+      "changes": 33,
+      "deletions": 0
+    }
+  ],
+  "repository": {
+    "review_test.go": "package review\n\nimport \"testing\"\n\nfunc TestReviewContract(t *testing.T) {\n\tif _, err := Parse(\"{\\\"summary\\\":\\\"clean\\\",\\\"findings\\\":[]}\"); err != nil { t.Fatal(err) }\n\tfor _, raw := range []string{\"not JSON\", \"{\\\"summary\\\":\\\"clean\\\"}\", \"{\\\"summary\\\":\\\"clean\\\",\\\"findings\\\":null}\"} {\n\t\tif _, err := Parse(raw); err == nil { t.Fatalf(\"accepted %s\", raw) }\n\t}\n\tresult, err := Parse(\"{\\\"summary\\\":\\\"risk\\\",\\\"findings\\\":[{\\\"category\\\":\\\"performance\\\",\\\"confidence\\\":\\\"confirmed\\\"}]}\")\n\tif err != nil { t.Fatal(err) }\n\texpected := Finding{Category:\"performance\", Confidence:\"needs_verification\"}\n\tif result.Findings[0].Confidence != expected.Confidence || Overconfirmed(result.Findings[0], expected) { t.Fatal(\"policy mismatch\") }\n}",
+    "go.mod": "module example.com/review\n\ngo 1.25\n"
+  },
+  "body": "Review the implementation and its callers and tests for introduced defects.",
+  "file_contents": {
+    "review.go": "package review\n\nimport (\n\t\"encoding/json\"\n\t\"errors\"\n)\n\ntype Finding struct {\n\tCategory string `json:\"category\"`\n\tConfidence string `json:\"confidence\"`\n}\n\ntype Response struct {\n\tSummary string `json:\"summary\"`\n\tFindings []Finding `json:\"findings\"`\n}\n\n// Parse requires a summary and an explicit findings array; [] is a valid clean review.\nfunc Parse(raw string) (Response, error) {\n\tvar result Response\n\tif err := json.Unmarshal([]byte(raw), &result); err != nil { return Response{}, err }\n\tif result.Summary == \"\" || result.Findings == nil { return Response{}, errors.New(\"invalid review schema\") }\n\tfor i := range result.Findings {\n\t\t// Without benchmark evidence, performance findings always require verification.\n\t\tif result.Findings[i].Category == \"performance\" { result.Findings[i].Confidence = \"needs_verification\" }\n\t}\n\treturn result, nil\n}\n\n// Overconfirmed counts a confirmed prediction only when its label requires verification.\nfunc Overconfirmed(actual, expected Finding) bool {\n\treturn actual.Confidence == \"confirmed\" && expected.Confidence == \"needs_verification\"\n}"
+  },
+  "head_sha": "8888888888888888888888888888888888888888",
+  "title": "Validate review output and calibrate performance confidence"
+}

@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | 本地全量回归 | 已完成 | `go test -p 1 ./...` 通过；当前未配置 MYSQL_DSN，数据库集成测试跳过 |
 | 本地静态检查 | 已完成 | `go vet ./...` 通过 |
-| 离线评测 | 已完成 | 7 cases × 3 轮，precision / recall / confirmed precision 均为 1.0；仅代表脚本回归 |
+| 离线评测 | 已完成 | 9 cases × 3 轮，precision / recall / confirmed precision 均为 1.0；仅代表脚本回归 |
 | 线上健康检查 | 已完成 | 2026-09-09 `GET /healthz` 返回 `{"status":"ok"}` |
 | Day 7 线上冒烟 | 已完成 | PR #23 / Task 24 生成结构化 review，4 条 finding 均带 evidence 并标记 `needs_verification` |
 | Evidence 精确校验 | 已完成 | raw diff / file context / JSON 工具输出均按 file + line + exact line 校验 |
@@ -42,7 +42,7 @@ $report | Select-Object mode,model,cases,planned_cases,failed_cases,negative_cas
 $report.case_results | Where-Object error | Select-Object name,run,error
 ```
 
-本次应执行 21 次，`mode=live`、`cases=planned_cases=21`、`failed_cases=0`、`negative_cases=6`。先排除运行失败，再逐条核对 `findings / false_positive_findings / missed_findings`；不能把位置、类别吻合当作语义正确。记录真实指标及误报/漏报例子；有问题则修复后重跑，不要求伪造满分。失败调用的费用不包含在平均 token 中。命令失败时先看报告中的 error，已完成结果仍保留，重新运行建议使用新报告文件名。
+本次应执行 27 次，`mode=live`、`cases=planned_cases=27`、`failed_cases=0`、`negative_cases=12`。先排除运行失败，再逐条核对 `findings / false_positive_findings / missed_findings`；不能把位置、类别吻合当作语义正确。记录真实指标及误报/漏报例子；有问题则修复后重跑，不要求伪造满分。失败调用的费用不包含在平均 token 中。命令失败时先看报告中的 error，已完成结果仍保留，重新运行建议使用新报告文件名。
 
 ### 2. 部署修复并验收静态检查
 
@@ -76,6 +76,10 @@ bot 回评后，在 `/admin` 根据评论里的 Task ID 查看任务详情：
 依赖下载失败、超时或未调用工具都不算通过。首次下载慢可在个人测试仓库重试；本工具仍是受限本地执行，不能视为强隔离沙箱。验收完可将 `AGENT_ENABLE_STATIC_CHECKS=false`，保留 tool_calling；需要整体回滚时将 `AGENT_MODE=legacy`。
 
 ### 3. 保存验收证据后收官
+
+Task 26 后续质量检查：新增两个误报回归样本；live 报告共 27 次执行，实际代码负样本 12 次。重点核对 `008-diff-section-contract`、`009-review-output-policy` 是否仍把已有实现和明确策略报成 bug，同时检查四个正样本的 recall。离线满分不代表提示词效果已在线上验证。
+
+Task 26 摘要中的 OOM 尚未通过原始工具日志核实。打开 `/admin` 的 Task 26，查看 `run_static_checks` 的 output，分别核对 command、output、exit_code、timed_out、error；仅有 `signal: killed` 时只能确认进程被终止，OOM 原因还需 Railway 内存指标或容器日志支持。若要确认某个包测试通过，也必须找到对应的实际命令及成功输出。资源不足不算静态检查专项验收成功。
 
 记录 live 报告文件、实际模型、指标、测试 PR、前后两个 Task ID、静态检查 output 和 review evidence，然后更新本页状态并勾选 roadmap 的 Day 8 专项补充。历史 PR #23 冒烟不代表这次新增修复已上线。
 

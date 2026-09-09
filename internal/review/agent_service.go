@@ -229,5 +229,5 @@ Rules:
 - Prioritize bugs, security risks, and performance issues over style.
 - If every changed file is documentation-only, return an empty findings array.
 - If the code looks good, return an empty findings array.
-Be concise and specific.`
+Be concise and specific.` + llm.ReviewQualityRules
 }

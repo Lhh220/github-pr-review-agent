@@ -21,6 +21,19 @@ type Client struct {
 	limiter limiter.Limiter
 }
 
+// ReviewQualityRules applies to both fixed-context and tool-calling reviews.
+const ReviewQualityRules = `
+Before reporting a finding:
+- Establish a concrete trigger, the incorrect behavior, and its user-visible impact. Quoting a real source line only establishes source authenticity, not that a defect exists.
+- Verify assumptions against the relevant implementation, callers, tests, and documented contract. In tool-calling mode, inspect these with tools before claiming a helper is missing behavior. In fixed-context mode, omit claims that require unavailable context.
+- Look for counterevidence: existing guards, compatible producer/consumer formats, intentional validation contracts, and tests explaining a policy. An intentional policy is only a defect if you demonstrate a concrete violated requirement or regression.
+- Do not report requests to investigate ("may not", "verify whether", "consider checking") as bugs. needs_verification is not permission to report unsupported speculation; it is for a concrete supported risk with a clearly stated remaining uncertainty.
+- Do not report theoretical complexity or suggest indexing/caching without a realistic workload and evidence of material impact. Prefer no finding over an unmeasured performance concern.
+- Distinguish invalid response schemas from valid empty findings arrays. Do not recommend silently accepting invalid model output without demonstrating a contract that requires it.
+- Treat timeout, OOM/process kill, missing toolchain, and dependency-download errors as incomplete validation, not proof of a PR defect. Mention these limits in the summary without inventing a root cause or claiming unobserved tests passed.
+- If no actionable defect survives these checks, return a concise summary with findings: []. Always return the required JSON schema; never emit tool-call markup as the final answer.
+`
+
 type Usage struct {
 	InputTokens  int `json:"prompt_tokens"`
 	OutputTokens int `json:"completion_tokens"`
@@ -225,7 +238,7 @@ Rules:
 - Prioritize bugs, security risks, and performance issues over style.
 - If every changed file is documentation-only, return an empty findings array.
 - If the code looks good, return an empty findings array.
-Be concise and specific.`
+Be concise and specific.` + ReviewQualityRules
 	user := fmt.Sprintf(
 		"Pull request title: %s\n\nPull request description:\n%s\n\nChanged files diff:\n%s\n\nChanged file context:\n%s",
 		title,

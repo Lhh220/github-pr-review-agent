@@ -40,8 +40,8 @@ func TestOfflineCasesRunThroughAgentTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadCases() error = %v", err)
 	}
-	if len(cases) != 7 {
-		t.Fatalf("case count = %d, want 7", len(cases))
+	if len(cases) != 9 {
+		t.Fatalf("case count = %d, want 9", len(cases))
 	}
 
 	inputs := make([]CaseInput, 0, len(cases))
@@ -82,7 +82,7 @@ func TestOfflineCasesRunThroughAgentTools(t *testing.T) {
 	assertFloat(t, report.CategoryAccuracy, 1)
 	assertFloat(t, report.ConfirmedPrecision, 1)
 	assertFloat(t, report.FalsePositiveRate, 0)
-	if report.NegativeCases != 2 {
+	if report.NegativeCases != 4 {
 		t.Fatalf("negative cases = %d", report.NegativeCases)
 	}
 }

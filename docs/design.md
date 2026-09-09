@@ -427,9 +427,13 @@ go run ./cmd/eval -live -runs 3 -timeout 30m -report eval/report-live.json
 
 离线报告输出到 `eval/report.json`，适合提交为回归基线；live 模式复用 fixture GitHub 客户端，只调用真实模型，不回写 GitHub 评论。live 支持 `-runs` 重复执行并记录轮次，用于观察模型输出波动。评测集随项目迭代，优先补充真实 MR 中出现过的误报和漏报样本。
 
-每个 case 完成或失败后立即保存报告；单个错误记录在 `case_results[].error` 后继续后续样本，总超时后停止。存在失败或未完成样本时 CLI 返回非零状态。`mode` 区分 offline/live，live 报告记录配置的 `model`。平均 token 与延迟仅统计成功执行，失败调用的费用不包含在内。7 个样本中有 2 个正常代码负样本（已初始化 map、参数化 SQL），会经过模型和工具链；文档样本只验证跳过逻辑。
+每个 case 完成或失败后立即保存报告；单个错误记录在 `case_results[].error` 后继续后续样本，总超时后停止。存在失败或未完成样本时 CLI 返回非零状态。`mode` 区分 offline/live，live 报告记录配置的 `model`。平均 token 与延迟仅统计成功执行，失败调用的费用不包含在内。9 个样本中有 4 个正常代码负样本（已初始化 map、参数化 SQL、diff 格式契约、审查输出策略），会经过模型和工具链；文档样本只验证跳过逻辑。
 
 ## 9. 后续可选扩展
+
+审查质量回归：Task 26 的误报被整理为 `008-diff-section-contract` 和 `009-review-output-policy` 两个精简样本，保留相关实现与测试。两种模式共用 `ReviewQualityRules`：报错前核对实现、调用方、测试和契约，陈述具体触发条件与影响；needs_verification 不用于包装无依据的猜测。超时、OOM、依赖下载或工具链问题在 summary 中说明验证限制，不能据此断定 PR 有缺陷或声称未观察到的测试通过。
+
+离线脚本只验证这些样本能经过真实工具链并产生预期报告，不能证明提示词降低了模型误报。需要使用 live 模式对这两个样本做人工复核，并确认原有正样本仍能检出，避免通过过度压制 finding 降低召回率。
 
 - 支持 GitLab / Gitea。
 - 支持增量审查：只审查相对上次审查的新 commit。

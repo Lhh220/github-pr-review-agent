@@ -39,7 +39,7 @@ MVP 已经跑通并部署到 Railway：
 - 阶段三 Day 4 已接入 `search_references`：下载 PR head 的仓库 tarball，流式扫描跨文件精确标识符引用
 - 阶段三 Day 5 已接入 `run_static_checks`：默认关闭，开启后可在服务端白名单内执行 `go test` / `go vet` 并把结果回传 Agent
 - 阶段三 Day 6 已完成结构化输出增强：每条 finding 携带 `evidence`，并按 `confirmed / needs_verification` 标注可信度
-- 阶段三评测集已扩展为 7 个离线 PR fixture，包含 2 个正常代码负样本，统计 precision / recall / 误报率 / 分类准确率 / confidence 校准 / token / 延迟 / 工具轨迹
+- 阶段三评测集已扩展为 9 个离线 PR fixture，包含 4 个正常代码负样本，统计 precision / recall / 误报率 / 分类准确率 / confidence 校准 / token / 延迟 / 工具轨迹
 - 关键状态变更与审查结果创建会同步写入 `audit_log`，任务数据和审计数据保持同一事务
 - MySQL 结构通过版本化 migration 管理，服务启动自动执行，也提供 `cmd/migrate` CLI
 
@@ -268,7 +268,7 @@ Railway / Docker 生产构建使用仓库根目录的 `Dockerfile`。构建阶�
 
 ## 评测
 
-评测集位于 `eval/cases`，当前包含 7 个离线可回归样本：
+评测集位于 `eval/cases`，当前包含 9 个离线可回归样本：
 
 - `001-delete-field`：删除配置字段后仍被跨文件引用，期望 `bug / confirmed`
 - `002-nil-map`：写入 nil map，期望 `bug / confirmed`
@@ -277,6 +277,8 @@ Railway / Docker 生产构建使用仓库根目录的 `Dockerfile`。构建阶�
 - `005-docs-only`：纯文档 PR，期望 0 findings 且不调用工具
 - `006-initialized-map`：先初始化 map 再写入，期望 0 findings，经过模型和工具审查
 - `007-parameterized-sql`：SQL 使用参数绑定，期望 0 findings，经过模型和工具审查
+- `008-diff-section-contract`：生成器与解析器使用兼容的文件标题格式，期望 0 findings
+- `009-review-output-policy`：明确的 JSON 校验和 performance 降级约定，与测试和评测逻辑一致，期望 0 findings
 
 离线模式使用 fixture script 驱动真实 Agent Loop 和 GitHub 工具，不访问外网、不消耗模型 token，适合作为回归测试：
 
