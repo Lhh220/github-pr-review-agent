@@ -43,7 +43,7 @@ MVP 已经跑通并部署到 Railway：
 - 关键状态变更与审查结果创建会同步写入 `audit_log`，任务数据和审计数据保持同一事务
 - MySQL 结构通过版本化 migration 管理，服务启动自动执行，也提供 `cmd/migrate` CLI
 
-Day 5 的审计表和观测统计已完成本地与线上验收，阶段二收官。阶段三 Day 1 的 Agent 框架、Day 2 的 5 个基础 GitHub 工具、Day 3 的 tree-sitter 上下文裁剪、Day 4 的跨文件引用检索、Day 5 的受限静态检查工具、Day 6 的 evidence / confidence 结构化输出、Day 7 的基础评测集已完成本地验收；线上默认仍是 `AGENT_MODE=legacy`，把 Railway 变量改成 `AGENT_MODE=tool_calling` 后即可启用 Agent 审查链路。
+Day 5 的审计表和观测统计已完成本地与线上验收，阶段二收官。阶段三 Day 1 的 Agent 框架、Day 2 的 5 个基础 GitHub 工具、Day 3 的 tree-sitter 上下文裁剪、Day 4 的跨文件引用检索、Day 5 的受限静态检查工具、Day 6 的 evidence / confidence 结构化输出、Day 7 的基础评测集已完成本地验收；Day 7 已部署并通过 PR #23 线上冒烟，`/healthz` 返回正常。线上默认仍是 `AGENT_MODE=legacy`，把 Railway 变量改成 `AGENT_MODE=tool_calling` 后即可启用 Agent 审查链路。
 
 当前线上示例：
 
@@ -291,6 +291,8 @@ $env:DEEPSEEK_API_KEY="你的 key"
 go run ./cmd/eval -live -report eval/report-live.json
 ```
 
+Day 8 的验收状态、剩余线上操作、简历表述和面试问答见 [docs/day8.md](docs/day8.md)。
+
 ## 任务状态查询
 
 服务启动后会自动创建 `review_task` 表。任务状态流转：
@@ -535,7 +537,7 @@ Day 5 线上验收步骤：
 - 无法确认被删除的字段、函数、类型是否仍被其他文件引用
 - 默认不执行编译、测试或静态检查；显式开启 `run_static_checks` 后，可以回传服务端白名单内的 `go test` / `go vet` 结果
 
-代码库已经具备 Tool Calling 基础框架、6 个基础 GitHub 工具和工具调用日志；线上启用 `AGENT_MODE=tool_calling` 后，模型可以多轮读取 PR 信息、diff、指定文件上下文、提交历史和跨文件引用。`read_file_context` 会从 diff 推断变更行，并用 tree-sitter 提取 Go / Python / JavaScript 的函数、方法或类上下文；TypeScript、Java 等其他语言暂回退到有界行范围。`search_references` 会以 PR head 为准扫描仓库 tarball，用标识符边界匹配剩余引用，并返回文件、行号和上下文片段。开启 `AGENT_ENABLE_STATIC_CHECKS` 后，模型还可以调用第 7 个工具 `run_static_checks` 获取确定性检查结果。审查结果会输出 `confidence` 和 `evidence`；只有具备工具证据的确定性问题才标记为 `confirmed`，推测性问题标记为 `needs_verification`。
+代码库已经具备 Tool Calling 基础框架、6 个基础 GitHub 工具和工具调用日志；线上启用 `AGENT_MODE=tool_calling` 后，模型可以多轮读取 PR 信息、diff、指定文件上下文、提交历史和跨文件引用。`read_file_context` 会从 diff 推断变更行，并用 tree-sitter 提取 Go / Python / JavaScript 的函数、方法或类上下文；TypeScript、Java 等其他语言暂回退到有界行范围。`search_references` 会以 PR head 为准扫描仓库 tarball，用标识符边界匹配剩余引用，并返回文件、行号和上下文片段。开启 `AGENT_ENABLE_STATIC_CHECKS` 后，模型还可以调用第 7 个工具 `run_static_checks` 获取确定性检查结果。审查结果会输出 `confidence` 和 `evidence`；服务端会按文件、行号和整行内容校验引用证据，只有具备工具证据的确定性问题才标记为 `confirmed`，推测性问题标记为 `needs_verification`。
 
 `run_static_checks` 是“受限本地静态检查模式”，不是强隔离沙箱：命令和参数由服务端固定为 `go test ./...` / `go vet ./...`，环境变量不包含 GitHub 和 LLM 密钥，解压限制文件数和大小并拒绝链接条目；但 PR 中的测试代码本身仍会被执行，也可能通过网络访问外部服务。个人仓库演示可用，公开多租户服务应改为独立容器或专用 runner，并禁网、限 CPU / 内存。
 
@@ -543,6 +545,8 @@ Day 5 线上验收步骤：
 
 ## 后续计划
 
-- Day 8：Day 6 / Day 7 线上验收、文档和简历收尾
+- 执行 live 评测和静态检查线上专项验收
+- 扩充真实 MR 中的误报 / 漏报样本
+- 公开多租户场景升级独立沙箱 runner
 
 开发节奏见 [docs/roadmap.md](docs/roadmap.md)。
