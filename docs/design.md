@@ -255,7 +255,7 @@ go test ./... 输出编译失败。
 当前实现：
 
 - DeepSeek 被要求只返回上述 JSON。
-- `review.Service` 解析 JSON，过滤没有文件、行号或 evidence 的 finding，并把非法 confidence 归一化为 `needs_verification`。
+- `review.Service` 解析 JSON，过滤没有文件、行号或 evidence 的 finding；引用证据必须匹配同一文件的指定行和整行内容，静态检查证据必须来自对应命令输出。非法 confidence 会归一化为 `needs_verification`。
 - 无 diff 和纯文档 PR 直接返回空 findings，不调用 LLM。
 - 解析结果先写入 `review_result`，再回写 PR Review。
 - `payload_json` 保存 findings，`raw_response` 保存模型原文。

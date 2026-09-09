@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/liaohonghui/github-pr-review-agent/internal/github"
@@ -192,7 +193,8 @@ func referenceEvidenceInCorpus(evidence store.Evidence, corpus []string) bool {
 				target := strings.TrimSpace(evidence.Text)
 				for _, contentLine := range strings.Split(output.Content, "\n") {
 					contentLine = strings.TrimSpace(contentLine)
-					if strings.HasPrefix(contentLine, prefix) && strings.HasSuffix(contentLine, target) {
+					code := strings.TrimSpace(strings.TrimPrefix(contentLine, prefix))
+					if strings.HasPrefix(contentLine, prefix) && code == target {
 						return true
 					}
 				}
@@ -205,11 +207,109 @@ func referenceEvidenceInCorpus(evidence store.Evidence, corpus []string) bool {
 			}
 			continue
 		}
-		if containsString([]string{source}, evidence.Text) {
+		if rawReferenceEvidence(source, evidence) {
 			return true
 		}
 	}
 	return false
+}
+
+func rawReferenceEvidence(source string, evidence store.Evidence) bool {
+	for path, section := range rawSections(source) {
+		if path != evidence.File {
+			continue
+		}
+		if isUnifiedDiff(section) {
+			if diffReferenceEvidence(section, evidence) {
+				return true
+			}
+			continue
+		}
+		if plainReferenceEvidence(section, evidence) {
+			return true
+		}
+	}
+	return false
+}
+
+func rawSections(source string) map[string]string {
+	sections := map[string]string{}
+	var path string
+	var section []string
+	flush := func() {
+		if path != "" {
+			sections[path] = strings.Join(section, "\n")
+		}
+	}
+	for _, line := range strings.Split(source, "\n") {
+		if strings.HasPrefix(line, "### ") {
+			flush()
+			path = strings.TrimSpace(strings.TrimPrefix(line, "### "))
+			section = nil
+			continue
+		}
+		if path != "" {
+			section = append(section, line)
+		}
+	}
+	flush()
+	return sections
+}
+
+func isUnifiedDiff(section string) bool {
+	for _, line := range strings.Split(section, "\n") {
+		if strings.HasPrefix(line, "@@ ") {
+			return true
+		}
+	}
+	return false
+}
+
+func diffReferenceEvidence(section string, evidence store.Evidence) bool {
+	target := strings.TrimSpace(evidence.Text)
+	newLineNumber := 0
+	for _, line := range strings.Split(section, "\n") {
+		if strings.HasPrefix(line, "@@ ") {
+			newLineNumber = parseDiffHunkStart(line)
+			continue
+		}
+		if newLineNumber <= 0 || line == "" ||
+			strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---") ||
+			strings.HasPrefix(line, "\\") {
+			continue
+		}
+		if strings.HasPrefix(line, "+") || strings.HasPrefix(line, " ") {
+			if newLineNumber == evidence.Line && strings.TrimSpace(line[1:]) == target {
+				return true
+			}
+			newLineNumber++
+		}
+	}
+	return false
+}
+
+func parseDiffHunkStart(header string) int {
+	plusIndex := strings.Index(header, "+")
+	if plusIndex < 0 {
+		return 0
+	}
+	value := header[plusIndex+1:]
+	if endIndex := strings.IndexAny(value, ", "); endIndex >= 0 {
+		value = value[:endIndex]
+	}
+	number, err := strconv.Atoi(value)
+	if err != nil || number <= 0 {
+		return 0
+	}
+	return number
+}
+
+func plainReferenceEvidence(section string, evidence store.Evidence) bool {
+	lines := strings.Split(section, "\n")
+	if evidence.Line <= 0 || evidence.Line > len(lines) {
+		return false
+	}
+	return strings.TrimSpace(lines[evidence.Line-1]) == strings.TrimSpace(evidence.Text)
 }
 
 func staticCheckEvidenceInCorpus(evidence store.Evidence, corpus []string) bool {

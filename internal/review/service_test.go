@@ -120,9 +120,9 @@ func TestParseReviewResponseRequiresEvidence(t *testing.T) {
 
 	parsed := parseReviewResponse(
 		content,
-		"cfg.MaxDiffLines",
+		`{"path":"cmd/server/main.go","content":"42: cfg.MaxDiffLines"}`,
 		`{"checks":[{"command":"go test ./...","output":"undefined: cfg.MaxDiffLines"}]}`,
-		"for _, file := range files",
+		`{"path":"internal/review/service.go","content":"20: for _, file := range files"}`,
 	)
 	if len(parsed.Findings) != 2 {
 		t.Fatalf("findings length = %d, want 2: %+v", len(parsed.Findings), parsed.Findings)
@@ -168,12 +168,80 @@ func TestParseReviewResponseDropsFabricatedEvidence(t *testing.T) {
 		]
 	}`
 
-	parsed := parseReviewResponse(content, "for _, file := range files")
+	parsed := parseReviewResponse(
+		content,
+		`{"path":"internal/review/service.go","content":"20: for _, file := range files"}`,
+	)
 	if len(parsed.Findings) != 1 {
 		t.Fatalf("findings length = %d, want 1: %+v", len(parsed.Findings), parsed.Findings)
 	}
 	if parsed.Findings[0].Confidence != "needs_verification" {
 		t.Fatalf("performance confidence = %s, want needs_verification", parsed.Findings[0].Confidence)
+	}
+}
+
+func TestParseReviewResponseValidatesRawEvidenceByFileAndLine(t *testing.T) {
+	content := `{
+		"summary": "Only exact raw references survive.",
+		"findings": [
+			{
+				"category": "bug",
+				"file": "cmd/server/main.go",
+				"line": 2,
+				"severity": "high",
+				"comment": "Valid diff evidence.",
+				"confidence": "confirmed",
+				"evidence": [{"type": "reference", "file": "cmd/server/main.go", "line": 2, "text": "cfg.MaxDiffLines"}]
+			},
+			{
+				"category": "bug",
+				"file": "cmd/server/removed.go",
+				"line": 2,
+				"severity": "medium",
+				"comment": "Removed diff lines are not current evidence.",
+				"confidence": "confirmed",
+				"evidence": [{"type": "reference", "file": "cmd/server/removed.go", "line": 2, "text": "removed line"}]
+			},
+			{
+				"category": "bug",
+				"file": "cmd/server/main.go",
+				"line": 1,
+				"severity": "medium",
+				"comment": "Wrong line is not evidence.",
+				"confidence": "confirmed",
+				"evidence": [{"type": "reference", "file": "cmd/server/main.go", "line": 1, "text": "cfg.MaxDiffLines"}]
+			},
+			{
+				"category": "bug",
+				"file": "internal/metrics/metrics.go",
+				"line": 4,
+				"severity": "medium",
+				"comment": "Valid file-context evidence.",
+				"confidence": "confirmed",
+				"evidence": [{"type": "reference", "file": "internal/metrics/metrics.go", "line": 4, "text": "counts[\"requests\"] = 1"}]
+			},
+			{
+				"category": "bug",
+				"file": "internal/metrics/metrics.go",
+				"line": 4,
+				"severity": "medium",
+				"comment": "Partial lines are not exact evidence.",
+				"confidence": "confirmed",
+				"evidence": [{"type": "reference", "file": "internal/metrics/metrics.go", "line": 3, "text": "counts"}]
+			}
+		]
+	}`
+
+	parsed := parseReviewResponse(
+		content,
+		"\n### cmd/server/main.go\n@@ -1,2 +1,2 @@\n package main\n-cfg.MaxDiffLimits\n+cfg.MaxDiffLines\n\n### cmd/server/removed.go\n@@ -1,2 +1,2 @@\n package main\n-removed line\n+replacement\n",
+		"\n### internal/metrics/metrics.go\npackage metrics\n\nfunc Record() {\n\tcounts[\"requests\"] = 1\n}\n",
+	)
+	if len(parsed.Findings) != 2 {
+		t.Fatalf("findings length = %d, want 2: %+v", len(parsed.Findings), parsed.Findings)
+	}
+	if parsed.Findings[0].File != "cmd/server/main.go" || parsed.Findings[1].File != "internal/metrics/metrics.go" {
+		t.Fatalf("unexpected surviving findings: %+v", parsed.Findings)
 	}
 }
 
