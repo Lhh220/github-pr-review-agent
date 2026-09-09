@@ -16,6 +16,7 @@ func main() {
 		caseRoot           = flag.String("cases", "eval/cases", "evaluation case directory")
 		reportPath         = flag.String("report", "eval/report.json", "report output path")
 		live               = flag.Bool("live", false, "call DeepSeek instead of using fixture scripts")
+		runs               = flag.Int("runs", 1, "times to run each case")
 		apiKey             = flag.String("api-key", os.Getenv("DEEPSEEK_API_KEY"), "DeepSeek API key")
 		baseURL            = flag.String("base-url", envOrDefault("DEEPSEEK_BASE_URL", "https://api.deepseek.com"), "DeepSeek API base URL")
 		model              = flag.String("model", envOrDefault("DEEPSEEK_MODEL", "deepseek-chat"), "DeepSeek model")
@@ -28,6 +29,9 @@ func main() {
 		staticGoProxy      = flag.String("static-check-go-proxy", "off", "Go proxy for static checks")
 	)
 	flag.Parse()
+	if *runs <= 0 {
+		fatal(fmt.Errorf("-runs must be positive"))
+	}
 
 	cases, err := eval.LoadCases(*caseRoot)
 	if err != nil {
@@ -37,43 +41,64 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	inputs := make([]eval.CaseInput, 0, len(cases))
-	for _, evaluationCase := range cases {
-		var provider interface {
-			ChatWithTools(context.Context, llm.ChatRequest) (llm.ChatResponse, error)
-		}
-		if *live {
-			if *apiKey == "" {
-				fatal(fmt.Errorf("-live requires DEEPSEEK_API_KEY or -api-key"))
-			}
-			provider = llm.New(*apiKey, *baseURL, *model)
-		} else {
-			provider = eval.NewScriptProvider(evaluationCase)
-		}
-		result, err := eval.RunCase(ctx, evaluationCase, provider, eval.RunnerOptions{
-			MaxSteps:           *maxSteps,
-			ToolTimeout:        *toolTimeout,
-			EnableStaticChecks: *enableStaticChecks,
-			StaticCheckTimeout: *staticTimeout,
-			StaticCheckWorkDir: *staticWorkDir,
-			StaticCheckGoProxy: *staticGoProxy,
-		})
-		if err != nil {
-			fatal(err)
-		}
-		inputs = append(inputs, eval.CaseInput{
-			Name:     evaluationCase.Name,
-			Expected: evaluationCase.Expected.Findings,
-			Actual:   result,
-		})
+	if *live && *apiKey == "" {
+		fatal(fmt.Errorf("-live requires DEEPSEEK_API_KEY or -api-key"))
 	}
 
-	report := eval.Evaluate(inputs)
-	if err := eval.WriteReport(*reportPath, report); err != nil {
-		fatal(err)
+	liveProvider := llm.New(*apiKey, *baseURL, *model)
+	inputs := make([]eval.CaseInput, 0, len(cases)**runs)
+	var report eval.Report
+	// Checkpoint after every case, including errors; retain completed runs on timeout.
+evaluation:
+	for run := 1; run <= *runs; run++ {
+		for _, evaluationCase := range cases {
+			var provider interface {
+				ChatWithTools(context.Context, llm.ChatRequest) (llm.ChatResponse, error)
+			}
+			if *live {
+				provider = liveProvider
+			} else {
+				provider = eval.NewScriptProvider(evaluationCase)
+			}
+			result, err := eval.RunCase(ctx, evaluationCase, provider, eval.RunnerOptions{
+				MaxSteps:           *maxSteps,
+				ToolTimeout:        *toolTimeout,
+				EnableStaticChecks: *enableStaticChecks,
+				StaticCheckTimeout: *staticTimeout,
+				StaticCheckWorkDir: *staticWorkDir,
+				StaticCheckGoProxy: *staticGoProxy,
+			})
+			input := eval.CaseInput{
+				Name:     evaluationCase.Name,
+				Run:      run,
+				Expected: evaluationCase.Expected.Findings,
+				Actual:   result,
+			}
+			if err != nil {
+				input.Error = err.Error()
+				fmt.Fprintf(os.Stderr, "run=%d case=%s: %v\n", run, evaluationCase.Name, err)
+			}
+			inputs = append(inputs, input)
+			report = eval.Evaluate(inputs)
+			report.Runs = *runs
+			report.PlannedCases = len(cases) * *runs
+			report.Mode = "offline"
+			if *live {
+				report.Mode = "live"
+				report.Model = *model
+			}
+			if err := eval.WriteReport(*reportPath, report); err != nil {
+				fatal(err)
+			}
+			if ctx.Err() != nil {
+				break evaluation
+			}
+		}
 	}
+
 	fmt.Printf(
-		"cases=%d precision=%.2f recall=%.2f false_positive_rate=%.2f confirmed_precision=%.2f report=%s\n",
+		"runs=%d cases=%d precision=%.2f recall=%.2f false_positive_rate=%.2f confirmed_precision=%.2f report=%s\n",
+		report.Runs,
 		report.Cases,
 		report.Precision,
 		report.Recall,
@@ -81,6 +106,9 @@ func main() {
 		report.ConfirmedPrecision,
 		*reportPath,
 	)
+	if report.FailedCases > 0 || report.Cases < report.PlannedCases {
+		fatal(fmt.Errorf("evaluation incomplete: failed=%d attempted=%d planned=%d; saved %s", report.FailedCases, report.Cases, report.PlannedCases, *reportPath))
+	}
 }
 
 func envOrDefault(key, fallback string) string {

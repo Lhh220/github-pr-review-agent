@@ -68,13 +68,19 @@ type RunResult struct {
 }
 
 type CaseInput struct {
+	Error    string
 	Name     string
+	Run      int
 	Expected []ExpectedFinding
 	Actual   RunResult
 }
 
 type CaseResult struct {
+	Error                 string            `json:"error,omitempty"`
+	SkippedReason         string            `json:"skipped_reason,omitempty"`
+	Findings              []store.Finding   `json:"findings"`
 	Name                  string            `json:"name"`
+	Run                   int               `json:"run"`
 	ExpectedFindingCount  int               `json:"expected_finding_count"`
 	PredictedFindingCount int               `json:"predicted_finding_count"`
 	TruePositives         int               `json:"true_positives"`
@@ -90,18 +96,26 @@ type CaseResult struct {
 }
 
 type Report struct {
-	Cases              int          `json:"cases"`
-	GeneratedAt        time.Time    `json:"generated_at"`
-	Precision          float64      `json:"precision"`
-	Recall             float64      `json:"recall"`
-	FalsePositiveRate  float64      `json:"false_positive_rate"`
-	CategoryAccuracy   float64      `json:"category_accuracy"`
-	ConfirmedPrecision float64      `json:"confirmed_precision"`
-	AvgInputTokens     float64      `json:"avg_input_tokens"`
-	AvgOutputTokens    float64      `json:"avg_output_tokens"`
-	AvgTotalTokens     float64      `json:"avg_total_tokens"`
-	AvgLatencyMS       float64      `json:"avg_latency_ms"`
-	CaseResults        []CaseResult `json:"case_results"`
+	Mode                  string       `json:"mode"`
+	Model                 string       `json:"model,omitempty"`
+	PlannedCases          int          `json:"planned_cases"`
+	FailedCases           int          `json:"failed_cases"`
+	ScoredCases           int          `json:"scored_cases"`
+	NegativeCases         int          `json:"negative_cases"`
+	OverconfirmedFindings int          `json:"overconfirmed_findings"`
+	Cases                 int          `json:"cases"`
+	Runs                  int          `json:"runs"`
+	GeneratedAt           time.Time    `json:"generated_at"`
+	Precision             float64      `json:"precision"`
+	Recall                float64      `json:"recall"`
+	FalsePositiveRate     float64      `json:"false_positive_rate"`
+	CategoryAccuracy      float64      `json:"category_accuracy"`
+	ConfirmedPrecision    float64      `json:"confirmed_precision"`
+	AvgInputTokens        float64      `json:"avg_input_tokens"`
+	AvgOutputTokens       float64      `json:"avg_output_tokens"`
+	AvgTotalTokens        float64      `json:"avg_total_tokens"`
+	AvgLatencyMS          float64      `json:"avg_latency_ms"`
+	CaseResults           []CaseResult `json:"case_results"`
 }
 
 func Evaluate(inputs []CaseInput) Report {
@@ -115,6 +129,7 @@ func Evaluate(inputs []CaseInput) Report {
 		noIssueCaseCount       int
 		falsePositiveCaseCount int
 		correctCategoryCount   int
+		locationMatchCount     int
 		inputTokens            int
 		outputTokens           int
 		totalTokens            int
@@ -123,7 +138,11 @@ func Evaluate(inputs []CaseInput) Report {
 
 	for _, input := range inputs {
 		result := CaseResult{
+			Error:                 input.Error,
+			SkippedReason:         input.Actual.SkippedReason,
+			Findings:              input.Actual.Findings,
 			Name:                  input.Name,
+			Run:                   input.Run,
 			ExpectedFindingCount:  len(input.Expected),
 			PredictedFindingCount: len(input.Actual.Findings),
 			InputTokens:           input.Actual.InputTokens,
@@ -134,6 +153,12 @@ func Evaluate(inputs []CaseInput) Report {
 			FalsePositiveFindings: []store.Finding{},
 			MissedFindings:        []ExpectedFinding{},
 		}
+		if input.Error != "" {
+			report.FailedCases++
+			report.CaseResults = append(report.CaseResults, result)
+			continue
+		}
+		report.ScoredCases++
 		matchedExpected := make([]bool, len(input.Expected))
 		for _, predicted := range input.Actual.Findings {
 			predictedCount++
@@ -147,20 +172,27 @@ func Evaluate(inputs []CaseInput) Report {
 					continue
 				}
 				matchIndex = i
-				break
+				if expected.Category == predicted.Category {
+					break
+				}
 			}
 			if matchIndex < 0 {
+				result.FalsePositiveFindings = append(result.FalsePositiveFindings, predicted)
+				continue
+			}
+			locationMatchCount++
+			if input.Expected[matchIndex].Category != predicted.Category {
 				result.FalsePositiveFindings = append(result.FalsePositiveFindings, predicted)
 				continue
 			}
 			matchedExpected[matchIndex] = true
 			result.TruePositives++
 			truePositiveCount++
-			if input.Expected[matchIndex].Category == predicted.Category {
-				correctCategoryCount++
-			}
-			if predicted.Confidence == "confirmed" {
+			correctCategoryCount++
+			if predicted.Confidence == "confirmed" && input.Expected[matchIndex].Confidence == "confirmed" {
 				confirmedTruePositive++
+			} else if predicted.Confidence == "confirmed" && input.Expected[matchIndex].Confidence == "needs_verification" {
+				report.OverconfirmedFindings++
 			}
 		}
 		for i, expected := range input.Expected {
@@ -176,7 +208,7 @@ func Evaluate(inputs []CaseInput) Report {
 		outputTokens += input.Actual.OutputTokens
 		totalTokens += input.Actual.TotalTokens
 		latencyMS += input.Actual.LatencyMS
-		if len(input.Expected) == 0 {
+		if len(input.Expected) == 0 && input.Actual.SkippedReason == "" {
 			noIssueCaseCount++
 			if len(input.Actual.Findings) > 0 {
 				falsePositiveCaseCount++
@@ -186,15 +218,16 @@ func Evaluate(inputs []CaseInput) Report {
 	}
 
 	report.Cases = len(inputs)
+	report.NegativeCases = noIssueCaseCount
 	report.Precision = ratio(truePositiveCount, predictedCount)
 	report.Recall = ratio(truePositiveCount, expectedCount)
 	report.FalsePositiveRate = ratio(falsePositiveCaseCount, noIssueCaseCount)
-	report.CategoryAccuracy = ratio(correctCategoryCount, truePositiveCount)
+	report.CategoryAccuracy = ratio(correctCategoryCount, locationMatchCount)
 	report.ConfirmedPrecision = ratio(confirmedTruePositive, confirmedPredicted)
-	report.AvgInputTokens = floatRatio(inputTokens, len(inputs))
-	report.AvgOutputTokens = floatRatio(outputTokens, len(inputs))
-	report.AvgTotalTokens = floatRatio(totalTokens, len(inputs))
-	report.AvgLatencyMS = floatRatio(int(latencyMS), len(inputs))
+	report.AvgInputTokens = floatRatio(inputTokens, report.ScoredCases)
+	report.AvgOutputTokens = floatRatio(outputTokens, report.ScoredCases)
+	report.AvgTotalTokens = floatRatio(totalTokens, report.ScoredCases)
+	report.AvgLatencyMS = floatRatio(int(latencyMS), report.ScoredCases)
 	return report
 }
 
