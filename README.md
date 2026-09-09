@@ -39,10 +39,11 @@ MVP 已经跑通并部署到 Railway：
 - 阶段三 Day 4 已接入 `search_references`：下载 PR head 的仓库 tarball，流式扫描跨文件精确标识符引用
 - 阶段三 Day 5 已接入 `run_static_checks`：默认关闭，开启后可在服务端白名单内执行 `go test` / `go vet` 并把结果回传 Agent
 - 阶段三 Day 6 已完成结构化输出增强：每条 finding 携带 `evidence`，并按 `confirmed / needs_verification` 标注可信度
+- 阶段三 Day 7 已完成基础评测集：5 个离线 PR fixture，统计 precision / recall / 误报率 / 分类准确率 / confidence 校准 / token / 延迟 / 工具轨迹
 - 关键状态变更与审查结果创建会同步写入 `audit_log`，任务数据和审计数据保持同一事务
 - MySQL 结构通过版本化 migration 管理，服务启动自动执行，也提供 `cmd/migrate` CLI
 
-Day 5 的审计表和观测统计已完成本地与线上验收，阶段二收官。阶段三 Day 1 的 Agent 框架、Day 2 的 5 个基础 GitHub 工具、Day 3 的 tree-sitter 上下文裁剪、Day 4 的跨文件引用检索、Day 5 的受限静态检查工具、Day 6 的 evidence / confidence 结构化输出已完成本地验收；线上默认仍是 `AGENT_MODE=legacy`，把 Railway 变量改成 `AGENT_MODE=tool_calling` 后即可启用 Agent 审查链路。
+Day 5 的审计表和观测统计已完成本地与线上验收，阶段二收官。阶段三 Day 1 的 Agent 框架、Day 2 的 5 个基础 GitHub 工具、Day 3 的 tree-sitter 上下文裁剪、Day 4 的跨文件引用检索、Day 5 的受限静态检查工具、Day 6 的 evidence / confidence 结构化输出、Day 7 的基础评测集已完成本地验收；线上默认仍是 `AGENT_MODE=legacy`，把 Railway 变量改成 `AGENT_MODE=tool_calling` 后即可启用 Agent 审查链路。
 
 当前线上示例：
 
@@ -160,7 +161,7 @@ AGENT_STATIC_CHECK_GOPROXY=off
 - `AGENT_MAX_COMMIT_HISTORY`：`get_commit_history` 最多返回多少个 commit，默认 20，工具内部最大会限制到 100。
 - `AGENT_MAX_REFERENCE_RESULTS`：`search_references` 最多返回多少条引用，默认 100；工具内部还会限制扫描文件数和解压后字节数。
 - `AGENT_ENABLE_STATIC_CHECKS`：是否向 Agent 注册 `run_static_checks`，默认 `false`。只有同时设置 `AGENT_MODE=tool_calling` 才会生效。
-- `AGENT_STATIC_CHECK_TIMEOUT`：一次 `run_static_checks` 工具调用的总超时，默认 `2m`；同时要把 `AGENT_TOOL_TIMEOUT` 设置为不小于该值，例如 `3m`。
+- `AGENT_STATIC_CHECK_TIMEOUT`：`go_test` / `go_vet` 每个命令的独立超时，默认 `2m`；整个工具调用还受 `AGENT_TOOL_TIMEOUT` 限制。
 - `AGENT_STATIC_CHECK_WORK_DIR`：静态检查工作目录。Docker 默认使用 `/workspace/.static-checks`，本地建议显式配置到 D 盘项目目录下。
 - `AGENT_STATIC_CHECK_GOPROXY`：静态检查下载依赖使用的 Go proxy，默认 `off` 表示禁止下载新依赖。线上需要首次下载依赖时可配置为 `https://goproxy.cn,direct`，这表示明确允许该网络访问。
 
@@ -264,6 +265,31 @@ go vet ./...
 ```
 
 Railway / Docker 生产构建使用仓库根目录的 `Dockerfile`。构建阶段会安装 `gcc` 和 `musl-dev`，并强制 `CGO_ENABLED=1`；运行阶段使用同 Alpine 基础镜像，并带 Go 工具链和编译器，保证 CGO 二进制运行一致，也让 `run_static_checks` 开启后可以执行 `go test` / `go vet`。
+
+## 评测
+
+Day 7 评测集位于 `eval/cases`，当前包含 5 个离线可回归样本：
+
+- `001-delete-field`：删除配置字段后仍被跨文件引用，期望 `bug / confirmed`
+- `002-nil-map`：写入 nil map，期望 `bug / confirmed`
+- `003-sql-concat`：拼接 SQL，期望 `security / confirmed`
+- `004-goroutine-leak`：无退出条件的后台 goroutine，期望 `performance / needs_verification`
+- `005-docs-only`：纯文档 PR，期望 0 findings 且不调用工具
+
+离线模式使用 fixture script 驱动真实 Agent Loop 和 GitHub 工具，不访问外网、不消耗模型 token，适合作为回归测试：
+
+```powershell
+go run ./cmd/eval
+```
+
+报告输出到 `eval/report.json`，包含 `precision`、`recall`、`false_positive_rate`、`category_accuracy`、`confirmed_precision`、平均 token、平均耗时和每个 case 的工具调用轨迹。
+
+如需测试真实 DeepSeek 输出，使用同一批 fixture 和真实工具链，但不会向 GitHub 发评论：
+
+```powershell
+$env:DEEPSEEK_API_KEY="你的 key"
+go run ./cmd/eval -live -report eval/report-live.json
+```
 
 ## 任务状态查询
 
@@ -517,6 +543,6 @@ Day 5 线上验收步骤：
 
 ## 后续计划
 
-- 评测集和误报率统计
+- Day 8：Day 6 / Day 7 线上验收、文档和简历收尾
 
 开发节奏见 [docs/roadmap.md](docs/roadmap.md)。

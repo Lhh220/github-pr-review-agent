@@ -1,0 +1,19 @@
+{
+  "title": "Collect request metrics",
+  "body": "Record request counts in a map.",
+  "head_sha": "2222222222222222222222222222222222222222",
+  "files": [
+    {
+      "filename": "internal/metrics/metrics.go",
+      "status": "modified",
+      "additions": 3,
+      "deletions": 0,
+      "changes": 3,
+      "patch": "@@ -3,3 +3,6 @@\n func Record() map[string]int {\n+\tvar counts map[string]int\n+\tcounts[\"requests\"] = 1\n+\treturn counts\n }"
+    }
+  ],
+  "file_contents": {
+    "internal/metrics/metrics.go": "package metrics\n\nfunc Record() map[string]int {\n\tvar counts map[string]int\n\tcounts[\"requests\"] = 1\n\treturn counts\n}\n"
+  },
+  "repository": {}
+}

@@ -1,0 +1,19 @@
+{
+  "title": "Process tasks in background",
+  "body": "Start one goroutine per task.",
+  "head_sha": "4444444444444444444444444444444444444444",
+  "files": [
+    {
+      "filename": "internal/worker/worker.go",
+      "status": "modified",
+      "additions": 6,
+      "deletions": 0,
+      "changes": 6,
+      "patch": "@@ -4,3 +4,9 @@\n func Start(tasks []Task) error {\n+\tfor _, task := range tasks {\n+\t\tgo func() {\n+\t\t\tfor {\n+\t\t\t\tprocess(task)\n+\t\t\t}\n+\t\t}()\n+\t}\n+\treturn nil"
+    }
+  ],
+  "file_contents": {
+    "internal/worker/worker.go": "package worker\n\nfunc Start(tasks []Task) error {\n\tfor _, task := range tasks {\n\t\tgo func() {\n\t\t\tfor {\n\t\t\t\tprocess(task)\n\t\t\t}\n\t\t}()\n\t}\n\treturn nil\n}\n"
+  },
+  "repository": {}
+}

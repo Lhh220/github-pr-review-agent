@@ -1,0 +1,11 @@
+{
+  "findings": [
+    {
+      "category": "security",
+      "file": "internal/store/users.go",
+      "line": 6,
+      "severity": "high",
+      "confidence": "confirmed"
+    }
+  ]
+}

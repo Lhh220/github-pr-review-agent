@@ -1,0 +1,11 @@
+{
+  "findings": [
+    {
+      "category": "performance",
+      "file": "internal/worker/worker.go",
+      "line": 6,
+      "severity": "medium",
+      "confidence": "needs_verification"
+    }
+  ]
+}

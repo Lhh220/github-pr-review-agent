@@ -1,0 +1,19 @@
+{
+  "title": "Update deployment notes",
+  "body": "Clarify local setup.",
+  "head_sha": "5555555555555555555555555555555555555555",
+  "files": [
+    {
+      "filename": "README.md",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 1,
+      "changes": 2,
+      "patch": "@@ -1 +1 @@\n-Run the server locally.\n+Run the server locally with Docker Compose."
+    }
+  ],
+  "file_contents": {
+    "README.md": "# Eval fixture\n\nRun the server locally with Docker Compose.\n"
+  },
+  "repository": {}
+}

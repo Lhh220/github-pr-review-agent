@@ -1,0 +1,110 @@
+{
+  "cases": 5,
+  "generated_at": "2026-09-08T12:27:11.990654315Z",
+  "precision": 1,
+  "recall": 1,
+  "false_positive_rate": 0,
+  "category_accuracy": 1,
+  "confirmed_precision": 1,
+  "avg_input_tokens": 316,
+  "avg_output_tokens": 81.2,
+  "avg_total_tokens": 397.2,
+  "avg_latency_ms": 35.8,
+  "case_results": [
+    {
+      "name": "001-delete-field",
+      "expected_finding_count": 1,
+      "predicted_finding_count": 1,
+      "true_positives": 1,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 420,
+      "output_tokens": 108,
+      "total_tokens": 528,
+      "latency_ms": 50,
+      "tools": [
+        {
+          "name": "search_references",
+          "duration_ms": 0
+        }
+      ],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "name": "002-nil-map",
+      "expected_finding_count": 1,
+      "predicted_finding_count": 1,
+      "true_positives": 1,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 360,
+      "output_tokens": 94,
+      "total_tokens": 454,
+      "latency_ms": 40,
+      "tools": [
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        }
+      ],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "name": "003-sql-concat",
+      "expected_finding_count": 1,
+      "predicted_finding_count": 1,
+      "true_positives": 1,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 390,
+      "output_tokens": 100,
+      "total_tokens": 490,
+      "latency_ms": 43,
+      "tools": [
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        }
+      ],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "name": "004-goroutine-leak",
+      "expected_finding_count": 1,
+      "predicted_finding_count": 1,
+      "true_positives": 1,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 410,
+      "output_tokens": 104,
+      "total_tokens": 514,
+      "latency_ms": 46,
+      "tools": [
+        {
+          "name": "read_file_context",
+          "duration_ms": 0
+        }
+      ],
+      "false_positive_findings": [],
+      "missed_findings": []
+    },
+    {
+      "name": "005-docs-only",
+      "expected_finding_count": 0,
+      "predicted_finding_count": 0,
+      "true_positives": 0,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 0,
+      "tools": [],
+      "false_positive_findings": [],
+      "missed_findings": []
+    }
+  ]
+}
