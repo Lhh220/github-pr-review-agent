@@ -15,6 +15,7 @@ import (
 )
 
 type GitHubClient interface {
+	ReviewPublisher
 	GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error)
 	GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, error)
 	GetFileContent(ctx context.Context, owner, repo, path, ref string) (string, error)
@@ -26,6 +27,10 @@ type LLMClient interface {
 }
 
 type ResultStore interface {
+	GetReviewResultByTaskID(context.Context, uint64) (*store.ReviewResult, error)
+	GetReviewDelivery(context.Context, uint64) (*store.ReviewDelivery, error)
+	PrepareReviewDelivery(context.Context, uint64, string) (*store.ReviewDelivery, error)
+	MarkReviewDelivered(context.Context, uint64, uint64) error
 	CreateReviewResult(ctx context.Context, input store.NewReviewResult) (*store.ReviewResult, error)
 }
 
@@ -50,9 +55,9 @@ func New(gh GitHubClient, l LLMClient, results ResultStore, maxDiffLines, maxFil
 }
 
 func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int, taskID uint64) error {
-	pr, err := s.GitHub.GetPullRequest(ctx, owner, repo, number)
-	if err != nil {
-		return fmt.Errorf("get pull request: %w", err)
+	pr, completed, err := resumeReview(ctx, s.GitHub, s.Results, owner, repo, number, taskID)
+	if err != nil || completed {
+		return err
 	}
 	files, err := s.GitHub.GetPullRequestFiles(ctx, owner, repo, number)
 	if err != nil {
@@ -65,21 +70,13 @@ func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int, 
 			summary = "This pull request only changes documentation; code review skipped."
 			rawResponse = "Documentation-only pull request; code review skipped."
 		}
-		result, err := s.Results.CreateReviewResult(ctx, store.NewReviewResult{
+		return finishReview(ctx, s.GitHub, s.Results, owner, repo, number, store.NewReviewResult{
 			TaskID:      taskID,
 			Summary:     summary,
 			Findings:    []store.Finding{},
 			RawResponse: rawResponse,
 			Model:       "none",
 		})
-		if err != nil {
-			return fmt.Errorf("create no-diff review result: %w", err)
-		}
-		comment := buildReviewComment(*result, taskID, pr.Head.SHA)
-		if err := s.GitHub.CreatePullRequestReview(ctx, owner, repo, number, comment); err != nil {
-			return fmt.Errorf("create no-diff review: %w", err)
-		}
-		return nil
 	}
 	diff := buildDiff(files, s.MaxDiffLines)
 	if strings.TrimSpace(diff) == "" {
@@ -98,7 +95,7 @@ func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int, 
 	if err != nil {
 		return err
 	}
-	result, err := s.Results.CreateReviewResult(ctx, store.NewReviewResult{
+	return finishReview(ctx, s.GitHub, s.Results, owner, repo, number, store.NewReviewResult{
 		TaskID:        taskID,
 		Summary:       parsed.Summary,
 		Findings:      parsed.Findings,
@@ -109,14 +106,6 @@ func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int, 
 		TotalTokens:   response.Usage.TotalTokens,
 		LLMDurationMS: response.DurationMS,
 	})
-	if err != nil {
-		return fmt.Errorf("create review result: %w", err)
-	}
-	comment := buildReviewComment(*result, taskID, pr.Head.SHA)
-	if err := s.GitHub.CreatePullRequestReview(ctx, owner, repo, number, comment); err != nil {
-		return fmt.Errorf("create pull request review: %w", err)
-	}
-	return nil
 }
 
 type parsedReviewResponse struct {

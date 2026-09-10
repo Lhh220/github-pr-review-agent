@@ -92,6 +92,7 @@ func (p *scriptedAgentProvider) ChatWithTools(ctx context.Context, request llm.C
 }
 
 type fakeAgentStore struct {
+	delivery  *store.ReviewDelivery
 	result    store.NewReviewResult
 	toolCalls []store.NewToolCallLog
 }

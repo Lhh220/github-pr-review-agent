@@ -205,7 +205,7 @@ GITHUB_TOKEN=...
 
    服务启动时也会自动执行 migration。
 
-   当前包含三个 migration：version 1 `init`、version 2 `audit_log` 和 version 3 `tool_call_log`。首次部署新数据库时，启动日志会依次出现应用记录；已执行过则显示 up to date。
+   当前包含四个 migration：version 1 `init`、version 2 `audit_log`、version 3 `tool_call_log`、version 4 `review_delivery`。首次部署新数据库时，启动日志会依次出现应用记录；已执行过则显示 up to date。
 
    如果本地数据库已经执行过，则只会看到 `mysql migrations are up to date`。
 
@@ -539,6 +539,14 @@ Day 5 线上验收步骤：
 5. bot 评论应引用 `go test ./...` 或 `go vet ./...` 的失败输出；在 `/tasks/<task_id>/tool-calls` 中应能看到 `run_static_checks` 的输入、输出和耗时。
 
 ## 当前能力边界
+
+### 评论回写与失败恢复
+
+`review_delivery` 在分析前保存首次执行时的 PR head 和随机发布标识。分析结果先存入 `review_result`，重试时优先复用，避免重复模型调用和结果唯一键冲突。发布前分页查询该 PR 的 reviews，用标识、commit 和已提交状态核对；已存在则补记 GitHub Review ID，否则显式指定 `commit_id` 发布。Review ID、任务 done 和审计日志在同一个 MySQL 事务中提交。`/tasks/:id/result` 返回 `delivery.commit_sha / github_review_id`；历史结果没有 delivery 时为 null。
+
+这是 PR 锁保护下的幂等恢复，不是跨 GitHub/MySQL 的严格 exactly-once。查询与发布仍非原子，远端响应不确定且列表尚未可见、锁失效或人工删除标识等边界不能被完全消除。查询失败或分页超限不会继续发布。已有结果但缺少发布记录的旧任务要求人工核对，不会自动补发；相同任务重试只补发原版本结果，不重新审查新版本。新 head 应由新的 Webhook 任务处理。首次处理前已过期的 Webhook 合并/跳过策略仍属后续版本治理。
+
+新增 `.github/workflows/ci.yml`，推送或 PR 会运行 Go 测试、MySQL 集成测试、vet 和离线评测。工作流需推送后才能确认远端运行结果。
 
 默认 `legacy` 审查能力是 **diff + changed-file-context reviewer**：
 

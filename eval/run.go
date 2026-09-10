@@ -206,6 +206,7 @@ func (p *scriptProvider) ChatWithTools(
 }
 
 type memoryStore struct {
+	delivery  *store.ReviewDelivery
 	result    *store.ReviewResult
 	toolCalls []store.ToolCallLog
 }

@@ -7,7 +7,7 @@
   "overconfirmed_findings": 0,
   "cases": 27,
   "runs": 3,
-  "generated_at": "2026-09-09T06:53:24.497658Z",
+  "generated_at": "2026-09-10T11:13:10.1322804Z",
   "precision": 1,
   "recall": 1,
   "false_positive_rate": 0,
@@ -16,7 +16,7 @@
   "avg_input_tokens": 175.55555555555554,
   "avg_output_tokens": 45.111111111111114,
   "avg_total_tokens": 220.66666666666666,
-  "avg_latency_ms": 19.962962962962962,
+  "avg_latency_ms": 19.925925925925927,
   "case_results": [
     {
       "findings": [
@@ -326,7 +326,7 @@
       "tools": [
         {
           "name": "search_references",
-          "duration_ms": 1
+          "duration_ms": 0
         }
       ],
       "false_positive_findings": [],
@@ -526,7 +526,7 @@
       "input_tokens": 0,
       "output_tokens": 0,
       "total_tokens": 0,
-      "latency_ms": 1,
+      "latency_ms": 0,
       "tools": [
         {
           "name": "read_file_context",

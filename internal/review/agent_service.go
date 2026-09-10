@@ -14,6 +14,7 @@ import (
 )
 
 type AgentGitHubClient interface {
+	ReviewPublisher
 	GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error)
 	GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, error)
 	GetPullRequestCommits(ctx context.Context, owner, repo string, number, limit int) ([]github.PullRequestCommit, error)
@@ -27,7 +28,7 @@ type AgentProvider interface {
 }
 
 type AgentStore interface {
-	CreateReviewResult(ctx context.Context, input store.NewReviewResult) (*store.ReviewResult, error)
+	ResultStore
 	CreateToolCallLog(ctx context.Context, input store.NewToolCallLog) (*store.ToolCallLog, error)
 }
 
@@ -66,6 +67,10 @@ func NewAgent(
 }
 
 func (s *AgentService) ReviewPR(ctx context.Context, owner, repo string, number int, taskID uint64) error {
+	_, completed, err := resumeReview(ctx, s.GitHub, s.Store, owner, repo, number, taskID)
+	if err != nil || completed {
+		return err
+	}
 	toolkit := githubtools.NewToolkit(s.GitHub, owner, repo, number, githubtools.Options{
 		MaxDiffLines:        s.Options.MaxDiffLines,
 		MaxFileContextLines: s.Options.MaxFileContextLines,
@@ -76,7 +81,7 @@ func (s *AgentService) ReviewPR(ctx context.Context, owner, repo string, number 
 		StaticCheckWorkDir:  s.Options.StaticCheckWorkDir,
 		StaticCheckGoProxy:  s.Options.StaticCheckGoProxy,
 	})
-	pr, err := toolkit.PullRequest(ctx)
+	_, err = toolkit.PullRequest(ctx)
 	if err != nil {
 		return fmt.Errorf("get pull request before agent review: %w", err)
 	}
@@ -91,21 +96,13 @@ func (s *AgentService) ReviewPR(ctx context.Context, owner, repo string, number 
 			summary = "This pull request only changes documentation; code review skipped."
 			rawResponse = "Documentation-only pull request; code review skipped."
 		}
-		stored, err := s.Store.CreateReviewResult(ctx, store.NewReviewResult{
+		return finishReview(ctx, s.GitHub, s.Store, owner, repo, number, store.NewReviewResult{
 			TaskID:      taskID,
 			Summary:     summary,
 			Findings:    []store.Finding{},
 			RawResponse: rawResponse,
 			Model:       "none",
 		})
-		if err != nil {
-			return fmt.Errorf("create skipped agent review result: %w", err)
-		}
-		comment := buildReviewComment(*stored, taskID, pr.Head.SHA)
-		if err := s.GitHub.CreatePullRequestReview(ctx, owner, repo, number, comment); err != nil {
-			return fmt.Errorf("create skipped pull request review: %w", err)
-		}
-		return nil
 	}
 	registry, err := agent.NewRegistry(toolkit.Tools()...)
 	if err != nil {
@@ -142,7 +139,7 @@ func (s *AgentService) ReviewPR(ctx context.Context, owner, repo string, number 
 	if err != nil {
 		return err
 	}
-	stored, err := s.Store.CreateReviewResult(ctx, store.NewReviewResult{
+	return finishReview(ctx, s.GitHub, s.Store, owner, repo, number, store.NewReviewResult{
 		TaskID:        taskID,
 		Summary:       parsed.Summary,
 		Findings:      parsed.Findings,
@@ -153,19 +150,6 @@ func (s *AgentService) ReviewPR(ctx context.Context, owner, repo string, number 
 		TotalTokens:   result.Usage.TotalTokens,
 		LLMDurationMS: result.DurationMS,
 	})
-	if err != nil {
-		return fmt.Errorf("create agent review result: %w", err)
-	}
-
-	pr, err = toolkit.PullRequest(ctx)
-	if err != nil {
-		return fmt.Errorf("get pull request after review: %w", err)
-	}
-	comment := buildReviewComment(*stored, taskID, pr.Head.SHA)
-	if err := s.GitHub.CreatePullRequestReview(ctx, owner, repo, number, comment); err != nil {
-		return fmt.Errorf("create pull request review: %w", err)
-	}
-	return nil
 }
 
 func (s *AgentService) recordToolCall(ctx context.Context, taskID uint64, invocation agent.ToolInvocation) error {

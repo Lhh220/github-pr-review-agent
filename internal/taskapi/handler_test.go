@@ -15,10 +15,11 @@ import (
 )
 
 type fakeStore struct {
-	task   *store.Task
-	tasks  []store.Task
-	result *store.ReviewResult
-	err    error
+	delivery *store.ReviewDelivery
+	task     *store.Task
+	tasks    []store.Task
+	result   *store.ReviewResult
+	err      error
 
 	getID        uint64
 	filter       store.ListFilter
@@ -33,6 +34,34 @@ type fakeStore struct {
 	auditFilter  store.AuditFilter
 	stats        *store.TaskStats
 	statsFilter  store.StatsFilter
+}
+
+func (f *fakeStore) GetReviewDelivery(context.Context, uint64) (*store.ReviewDelivery, error) {
+	if f.delivery == nil {
+		return nil, store.ErrReviewDeliveryNotFound
+	}
+	return f.delivery, nil
+}
+
+func TestResultExposesDeliveryReceipt(t *testing.T) {
+	fake := &fakeStore{task: newTestTask(), result: &store.ReviewResult{TaskID: 1}, delivery: &store.ReviewDelivery{TaskID: 1, CommitSHA: "head", GitHubReviewID: 123}}
+	router := setupRouter(fake, "secret")
+	req := httptest.NewRequest(http.MethodGet, "/tasks/1/result", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, req)
+	var body struct {
+		Delivery store.ReviewDelivery `json:"delivery"`
+	}
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Delivery.GitHubReviewID != 123 || body.Delivery.CommitSHA != "head" {
+		t.Fatalf("delivery=%+v", body.Delivery)
+	}
 }
 
 func (f *fakeStore) GetTask(ctx context.Context, id uint64) (*store.Task, error) {

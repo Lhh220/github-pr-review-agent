@@ -431,6 +431,12 @@ go run ./cmd/eval -live -runs 3 -timeout 30m -report eval/report-live.json
 
 ## 9. 后续可选扩展
 
+### 发布一致性
+
+发布状态拆为：`review_delivery` 保存首次分析的 commit 和随机标识，`review_result` 保存不可覆盖的模型结果，非零 `github_review_id` 表示已确认远端 review。两种审查模式及跳过路径复用同一套恢复流程。提交前保存结果；收到错误或重启后先查已保存结果，再分页核对 GitHub 的已提交 review，匹配标识和 commit 后仅确认本地状态。查询不完整时拒绝发布。确认 Review ID、更新 done、写入状态审计在同一 MySQL 事务执行，重复确认同一 ID 无副作用，不同 ID 被拒绝。
+
+参考 [GitHub Review API](https://docs.github.com/en/rest/pulls/reviews)：POST 显式传入 commit_id，GET 列表用于失败后对账。PR 级 Redis 锁串行化正常执行，但 GitHub 没有参与数据库事务；远端可见性延迟、失锁或外部修改等情况仍限制 exactly-once 保证。已有结果只恢复原版本发布；生成前和保存前比对 head，不能将检查结果归到重试时的新 head。旧版任务缺少可靠的发布快照时停止自动补发并要求人工核对。
+
 审查质量回归：Task 26 的误报被整理为 `008-diff-section-contract` 和 `009-review-output-policy` 两个精简样本，保留相关实现与测试。两种模式共用 `ReviewQualityRules`：报错前核对实现、调用方、测试和契约，陈述具体触发条件与影响；needs_verification 不用于包装无依据的猜测。超时、OOM、依赖下载或工具链问题在 summary 中说明验证限制，不能据此断定 PR 有缺陷或声称未观察到的测试通过。
 
 离线脚本只验证这些样本能经过真实工具链并产生预期报告，不能证明提示词降低了模型误报。需要使用 live 模式对这两个样本做人工复核，并确认原有正样本仍能检出，避免通过过度压制 finding 降低召回率。

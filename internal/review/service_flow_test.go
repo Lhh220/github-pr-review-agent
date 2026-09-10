@@ -54,8 +54,9 @@ func (f *fakeLLMClient) ReviewCode(ctx context.Context, title, body, diff, fileC
 }
 
 type fakeResultStore struct {
-	input store.NewReviewResult
-	err   error
+	delivery *store.ReviewDelivery
+	input    store.NewReviewResult
+	err      error
 }
 
 func (f *fakeResultStore) CreateReviewResult(ctx context.Context, input store.NewReviewResult) (*store.ReviewResult, error) {

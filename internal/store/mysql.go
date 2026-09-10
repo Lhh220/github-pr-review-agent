@@ -295,6 +295,10 @@ func (s *Store) UpdateTaskStatus(ctx context.Context, id uint64, status, taskErr
 	if err != nil {
 		return fmt.Errorf("lock review task for update: %w", err)
 	}
+	// Delivery confirmation already completes the task atomically with its audit log.
+	if oldStatus == "done" && status == "done" && errorMessage == nil {
+		return tx.Commit()
+	}
 
 	if _, err := tx.ExecContext(ctx, `
 UPDATE review_task

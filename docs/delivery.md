@@ -4,17 +4,29 @@
 
 | 项目 | 状态 | 结果 |
 | --- | --- | --- |
-| 本地全量回归 | 已完成 | `go test -p 1 ./...` 通过；当前未配置 MYSQL_DSN，数据库集成测试跳过 |
+| 本地全量回归 | 已完成 | `go test -p 1 ./...` 通过；2026-09-10 使用独立临时 MySQL 8.0.33 验证数据库迁移和发布事务 |
 | 本地静态检查 | 已完成 | `go vet ./...` 通过 |
 | 离线评测 | 已完成 | 9 cases × 3 轮，precision / recall / confirmed precision 均为 1.0；仅代表脚本回归 |
 | 线上健康检查 | 已完成 | 2026-09-09 `GET /healthz` 返回 `{"status":"ok"}` |
 | Day 7 线上冒烟 | 已完成 | PR #23 / Task 24 生成结构化 review，4 条 finding 均带 evidence 并标记 `needs_verification` |
 | Evidence 精确校验 | 已完成 | raw diff / file context / JSON 工具输出均按 file + line + exact line 校验 |
 | 收尾代码补强 | 本地完成，待部署 | 无效模型输出报错重试；静态证据拒绝空摘录、成功、超时与启动错误；新增正常代码负样本、评测失败记录与逐样本报告 |
+| 评论发布恢复 | 本地完成，待部署 | 20 个模式/故障组合验证不重复分析或发评；发布凭证与 done、审计同事务；migration 4 实库通过 |
+| CI | 配置已添加，远端待运行 | push / PR 运行测试、MySQL 集成、vet、离线评测；不使用模型 Key |
 | Live 模型评测 | 待执行 | 本地未配置 `DEEPSEEK_API_KEY`，不能伪造统计结果 |
 | 静态检查线上专项 | 待执行 | 需要在 Railway 开启配置并提交编译错误 PR |
 
 ## 剩余验收操作
+
+### 0. 部署本轮发布恢复修复
+
+提交并推送本轮修改，确认 CI 成功、Railway 完成部署，并在启动日志确认 migration 4 `review_delivery` 已应用。无须新增生产环境变量。然后提交一个测试 PR，在 `/tasks/<id>/result` 核对 `delivery.github_review_id` 大于零、`delivery.commit_sha` 与评论版本一致，任务为 done。
+
+本地故障注入覆盖 legacy / agent / 两种 docs-only 路径：POST 未送达、POST 已成功但响应丢失、发布后数据库写失败、结果提交回执丢失、查询评论失败。已有保存结果时，重试不再调用模型；已发出的评论通过标识和 commit 找回。固定 commit 防止将旧分析结果标成新版本；分析期间检测到 head 变化时停止，不发布混合版本结果。
+
+注意：GitHub API 与 MySQL 之间没有共同事务，查询与 POST 仍有竞态，不能声称严格 exactly-once。连续基础设施失败仍可能耗尽尝试次数进入死信；修复后重新入队会先对账。旧任务有 result 却没有 delivery 时会提示 `manual reconciliation required`，不要删除结果或随意补造标识：先人工核对历史评论，已完成的任务由管理员确认状态；确需重新审查则通过新的 PR 事件创建新任务。
+
+独立临时 MySQL 只用于本地测试，不是生产连接配置。已有线上 Key 和日志权限未配置到当前环境，因此 live 与线上专项仍按下面步骤执行，不能用本地测试代替。
 
 ### 1. 本机运行 live 评测
 
