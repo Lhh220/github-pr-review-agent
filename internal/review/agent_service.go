@@ -109,6 +109,10 @@ func (s *AgentService) ReviewPR(ctx context.Context, owner, repo string, number 
 		return fmt.Errorf("register github tools: %w", err)
 	}
 	agentRunner, err := agent.New(s.Provider, registry, agent.Options{
+		ValidateResponse: func(content string) error {
+			_, err := parseReviewResponse(content)
+			return err
+		},
 		MaxSteps:    s.Options.MaxSteps,
 		ToolTimeout: s.Options.ToolTimeout,
 		OnToolCall: func(ctx context.Context, invocation agent.ToolInvocation) error {

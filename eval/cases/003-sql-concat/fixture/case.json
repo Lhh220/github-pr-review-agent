@@ -5,15 +5,18 @@
   "files": [
     {
       "filename": "internal/store/users.go",
-      "status": "modified",
-      "additions": 3,
+      "status": "added",
+      "additions": 17,
       "deletions": 0,
-      "changes": 3,
-      "patch": "@@ -4,3 +4,6 @@\n func FindUser(db *sql.DB, name string) (*User, error) {\n+\tquery := \"SELECT id FROM users WHERE name = '\" + name + \"'\"\n+\trows, err := db.Query(query)\n+\tdefer rows.Close()"
+      "changes": 17,
+      "patch": "@@ -0,0 +1,17 @@\n+package store\n+\n+import \"database/sql\"\n+\n+func FindUser(db *sql.DB, name string) (*User, error) {\n+\tquery := \"SELECT id FROM users WHERE name = '\" + name + \"'\"\n+\trows, err := db.Query(query)\n+\tdefer rows.Close()\n+\tif err != nil { return nil, err }\n+\tvar user User\n+\tif !rows.Next() {\n+\t\tif err := rows.Err(); err != nil { return nil, err }\n+\t\treturn nil, sql.ErrNoRows\n+\t}\n+\tif err := rows.Scan(&user.ID); err != nil { return nil, err }\n+\treturn &user, nil\n+}"
     }
   ],
   "file_contents": {
-    "internal/store/users.go": "package store\n\nimport \"database/sql\"\n\nfunc FindUser(db *sql.DB, name string) (*User, error) {\n\tquery := \"SELECT id FROM users WHERE name = '\" + name + \"'\"\n\trows, err := db.Query(query)\n\tdefer rows.Close()\n\treturn nil, nil\n}\n"
+    "internal/store/users.go": "package store\n\nimport \"database/sql\"\n\nfunc FindUser(db *sql.DB, name string) (*User, error) {\n\tquery := \"SELECT id FROM users WHERE name = '\" + name + \"'\"\n\trows, err := db.Query(query)\n\tdefer rows.Close()\n\tif err != nil { return nil, err }\n\tvar user User\n\tif !rows.Next() {\n\t\tif err := rows.Err(); err != nil { return nil, err }\n\t\treturn nil, sql.ErrNoRows\n\t}\n\tif err := rows.Scan(&user.ID); err != nil { return nil, err }\n\treturn &user, nil\n}\n"
   },
-  "repository": {}
+  "repository": {
+    "go.mod": "module example.com/review\n\ngo 1.25\n",
+    "internal/store/user.go": "package store\n\ntype User struct { ID int }\n"
+  }
 }

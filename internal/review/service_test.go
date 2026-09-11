@@ -308,3 +308,27 @@ func TestIsDocsOnlyPR(t *testing.T) {
 		})
 	}
 }
+
+func TestReviewResponseEnvelope(t *testing.T) {
+	valid := `{"summary":"Code contains } and ` + "`" + ` characters","findings":[]}`
+	for _, content := range []string{valid, "```json\n" + valid + "\n```", "```\r\n" + valid + "\r\n```\r\n"} {
+		if _, err := parseReviewResponse(content); err != nil {
+			t.Fatalf("valid envelope rejected: %v", err)
+		}
+	}
+	for _, content := range []string{"Here is the review: " + valid, valid + "`", valid + valid, "```json\n" + valid, "```json\n" + valid + "\n```\ntrailing", "<tool_calls>" + valid + "</tool_calls>", "```json\n" + valid + "\n```\n```json\n" + valid + "\n```"} {
+		if _, err := parseReviewResponse(content); err == nil {
+			t.Fatalf("invalid envelope accepted: %q", content)
+		}
+	}
+}
+
+func TestRejectedFindingDiagnostics(t *testing.T) {
+	content := `{"summary":"Candidate","findings":[{"file":"a.go","line":1,"category":"bug","confidence":"confirmed","evidence":[{"type":"reference","file":"a.go","line":1,"text":"panic()"}]}]}`
+	if got := DiagnoseRejectedFindings(content, "### a.go\nreturn nil"); len(got) != 1 || got[0].Reason == "" {
+		t.Fatalf("missing rejection: %+v", got)
+	}
+	if got := DiagnoseRejectedFindings(content, "### a.go\npanic()"); len(got) != 0 {
+		t.Fatalf("valid evidence rejected: %+v", got)
+	}
+}

@@ -19,9 +19,10 @@ type Provider interface {
 }
 
 type Options struct {
-	MaxSteps    int
-	ToolTimeout time.Duration
-	OnToolCall  func(ctx context.Context, invocation ToolInvocation) error
+	ValidateResponse func(string) error
+	MaxSteps         int
+	ToolTimeout      time.Duration
+	OnToolCall       func(ctx context.Context, invocation ToolInvocation) error
 }
 
 type Request struct {
@@ -121,7 +122,7 @@ func (a *Agent) Run(ctx context.Context, request Request) (Result, error) {
 				return result, fmt.Errorf("agent provider step %d returned empty content and no tool calls", step+1)
 			}
 			result.Content = response.Content
-			return result, nil
+			return a.validateFinal(ctx, messages, result)
 		}
 
 		assistantMessage := llm.ChatMessage{
@@ -168,8 +169,11 @@ func (a *Agent) Run(ctx context.Context, request Request) (Result, error) {
 	if response.Content == "" {
 		return result, fmt.Errorf("agent final provider call returned empty content")
 	}
+	if len(response.ToolCalls) != 0 {
+		return result, fmt.Errorf("agent final provider call requested tools")
+	}
 	result.Content = response.Content
-	return result, nil
+	return a.validateFinal(ctx, messages, result)
 }
 
 func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, timeout time.Duration) ToolInvocation {
@@ -210,4 +214,36 @@ func toolResultContent(invocation ToolInvocation) string {
 		return "Tool returned an empty result."
 	}
 	return invocation.Output
+}
+
+// Retry only the final serialization, once, with the collected evidence retained.
+func (a *Agent) validateFinal(ctx context.Context, messages []llm.ChatMessage, result Result) (Result, error) {
+	if a.options.ValidateResponse == nil {
+		return result, nil
+	}
+	validationErr := a.options.ValidateResponse(result.Content)
+	if validationErr == nil {
+		return result, nil
+	}
+	messages = append(messages, llm.ChatMessage{Role: "assistant", Content: result.Content}, llm.ChatMessage{
+		Role: "user", Content: "Your final response failed validation: " + validationErr.Error() +
+			". Re-emit exactly one valid JSON object matching the required schema, with summary and findings array (use [] for no findings). No introductory explanation, Markdown, or tool calls. Fix JSON escaping. Preserve the review conclusions and quote only evidence already retrieved; do not invent new findings or tool results.",
+	})
+	response, err := a.provider.ChatWithTools(ctx, llm.ChatRequest{Messages: messages})
+	result.ProviderCalls++
+	result.Usage.InputTokens += response.Usage.InputTokens
+	result.Usage.OutputTokens += response.Usage.OutputTokens
+	result.Usage.TotalTokens += response.Usage.TotalTokens
+	result.DurationMS += response.DurationMS
+	if err != nil {
+		return result, fmt.Errorf("repair final response after %v: %w", validationErr, err)
+	}
+	result.Content = response.Content
+	if len(response.ToolCalls) != 0 {
+		return result, fmt.Errorf("final response repair requested tools")
+	}
+	if err := a.options.ValidateResponse(result.Content); err != nil {
+		return result, fmt.Errorf("final response invalid after one repair: %w", err)
+	}
+	return result, nil
 }

@@ -1,6 +1,8 @@
 package eval
 
 import (
+	"github.com/liaohonghui/github-pr-review-agent/internal/llm"
+	"github.com/liaohonghui/github-pr-review-agent/internal/review"
 	"time"
 
 	"github.com/liaohonghui/github-pr-review-agent/internal/store"
@@ -52,19 +54,29 @@ type ToolCallSpec struct {
 	Arguments string `json:"arguments"`
 }
 
+type ModelTrace struct {
+	Response llm.ChatResponse `json:"response"`
+	Error    string           `json:"error,omitempty"`
+}
+
 type ToolTrace struct {
+	Input      string `json:"input"`
+	Output     string `json:"output"`
+	Error      string `json:"error,omitempty"`
 	Name       string `json:"name"`
 	DurationMS int64  `json:"duration_ms"`
 }
 
 type RunResult struct {
-	Findings      []store.Finding
-	InputTokens   int
-	OutputTokens  int
-	TotalTokens   int
-	LatencyMS     int64
-	Tools         []ToolTrace
-	SkippedReason string
+	Responses        []ModelTrace
+	RejectedFindings []review.RejectedFinding
+	Findings         []store.Finding
+	InputTokens      int
+	OutputTokens     int
+	TotalTokens      int
+	LatencyMS        int64
+	Tools            []ToolTrace
+	SkippedReason    string
 }
 
 type CaseInput struct {
@@ -76,26 +88,31 @@ type CaseInput struct {
 }
 
 type CaseResult struct {
-	Error                 string            `json:"error,omitempty"`
-	SkippedReason         string            `json:"skipped_reason,omitempty"`
-	Findings              []store.Finding   `json:"findings"`
-	Name                  string            `json:"name"`
-	Run                   int               `json:"run"`
-	ExpectedFindingCount  int               `json:"expected_finding_count"`
-	PredictedFindingCount int               `json:"predicted_finding_count"`
-	TruePositives         int               `json:"true_positives"`
-	FalsePositives        int               `json:"false_positives"`
-	FalseNegatives        int               `json:"false_negatives"`
-	InputTokens           int               `json:"input_tokens"`
-	OutputTokens          int               `json:"output_tokens"`
-	TotalTokens           int               `json:"total_tokens"`
-	LatencyMS             int64             `json:"latency_ms"`
-	Tools                 []ToolTrace       `json:"tools"`
-	FalsePositiveFindings []store.Finding   `json:"false_positive_findings"`
-	MissedFindings        []ExpectedFinding `json:"missed_findings"`
+	Responses             []ModelTrace             `json:"responses"`
+	RejectedFindings      []review.RejectedFinding `json:"rejected_findings,omitempty"`
+	Error                 string                   `json:"error,omitempty"`
+	SkippedReason         string                   `json:"skipped_reason,omitempty"`
+	Findings              []store.Finding          `json:"findings"`
+	Name                  string                   `json:"name"`
+	Run                   int                      `json:"run"`
+	ExpectedFindingCount  int                      `json:"expected_finding_count"`
+	PredictedFindingCount int                      `json:"predicted_finding_count"`
+	TruePositives         int                      `json:"true_positives"`
+	FalsePositives        int                      `json:"false_positives"`
+	FalseNegatives        int                      `json:"false_negatives"`
+	InputTokens           int                      `json:"input_tokens"`
+	OutputTokens          int                      `json:"output_tokens"`
+	TotalTokens           int                      `json:"total_tokens"`
+	LatencyMS             int64                    `json:"latency_ms"`
+	Tools                 []ToolTrace              `json:"tools"`
+	FalsePositiveFindings []store.Finding          `json:"false_positive_findings"`
+	MissedFindings        []ExpectedFinding        `json:"missed_findings"`
 }
 
 type Report struct {
+	LocationPrecision     float64      `json:"location_precision"`
+	LocationRecall        float64      `json:"location_recall"`
+	DatasetHash           string       `json:"dataset_hash,omitempty"`
 	Mode                  string       `json:"mode"`
 	Model                 string       `json:"model,omitempty"`
 	PlannedCases          int          `json:"planned_cases"`
@@ -122,6 +139,7 @@ func Evaluate(inputs []CaseInput) Report {
 	report := Report{GeneratedAt: time.Now().UTC(), CaseResults: make([]CaseResult, 0, len(inputs))}
 	var (
 		truePositiveCount      int
+		locationDetected       int
 		predictedCount         int
 		expectedCount          int
 		confirmedPredicted     int
@@ -139,6 +157,8 @@ func Evaluate(inputs []CaseInput) Report {
 	for _, input := range inputs {
 		result := CaseResult{
 			Error:                 input.Error,
+			Responses:             input.Actual.Responses,
+			RejectedFindings:      input.Actual.RejectedFindings,
 			SkippedReason:         input.Actual.SkippedReason,
 			Findings:              input.Actual.Findings,
 			Name:                  input.Name,
@@ -159,6 +179,7 @@ func Evaluate(inputs []CaseInput) Report {
 			continue
 		}
 		report.ScoredCases++
+		locationDetected += countLocationMatches(input.Expected, input.Actual.Findings)
 		matchedExpected := make([]bool, len(input.Expected))
 		for _, predicted := range input.Actual.Findings {
 			predictedCount++
@@ -219,6 +240,8 @@ func Evaluate(inputs []CaseInput) Report {
 
 	report.Cases = len(inputs)
 	report.NegativeCases = noIssueCaseCount
+	report.LocationPrecision = ratio(locationDetected, predictedCount)
+	report.LocationRecall = ratio(locationDetected, expectedCount)
 	report.Precision = ratio(truePositiveCount, predictedCount)
 	report.Recall = ratio(truePositiveCount, expectedCount)
 	report.FalsePositiveRate = ratio(falsePositiveCaseCount, noIssueCaseCount)
@@ -260,4 +283,33 @@ func abs(value int) int {
 		return -value
 	}
 	return value
+}
+
+// Maximum one-to-one location matching is a diagnostic proxy, not semantic correctness.
+func countLocationMatches(expected []ExpectedFinding, actual []store.Finding) int {
+	matched := make([]int, len(expected))
+	for i := range matched {
+		matched[i] = -1
+	}
+	var assign func(int, []bool) bool
+	assign = func(p int, seen []bool) bool {
+		for e := range expected {
+			if seen[e] || !findingsMatch(expected[e], actual[p]) {
+				continue
+			}
+			seen[e] = true
+			if matched[e] < 0 || assign(matched[e], seen) {
+				matched[e] = p
+				return true
+			}
+		}
+		return false
+	}
+	count := 0
+	for p := range actual {
+		if assign(p, make([]bool, len(expected))) {
+			count++
+		}
+	}
+	return count
 }

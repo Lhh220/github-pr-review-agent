@@ -112,3 +112,51 @@ func assertFloat(t *testing.T, actual, expected float64) {
 		t.Fatalf("value = %v, want %v", actual, expected)
 	}
 }
+
+func TestFailedParseRetainsDiagnostics(t *testing.T) {
+	cases, err := LoadCases("cases")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := cases[1]
+	c.Script[len(c.Script)-1].Content = "invalid final response"
+	c.Script = append(c.Script, c.Script[len(c.Script)-1])
+	result, err := RunCase(context.Background(), c, NewScriptProvider(c), RunnerOptions{MaxSteps: 4})
+	if err == nil {
+		t.Fatal("expected parse failure")
+	}
+	if len(result.Responses) == 0 || result.Responses[len(result.Responses)-1].Response.Content != "invalid final response" || result.TotalTokens == 0 || len(result.Tools) == 0 || result.Tools[0].Output == "" || result.Tools[0].Input == "" {
+		t.Fatalf("lost failure diagnostics: %+v", result)
+	}
+	report := Evaluate([]CaseInput{{Name: c.Name, Error: err.Error(), Actual: result}})
+	if report.FailedCases != 1 || len(report.CaseResults[0].Responses) == 0 {
+		t.Fatalf("lost report diagnostics: %+v", report)
+	}
+}
+
+func TestLocationMatchingDoesNotDoubleCount(t *testing.T) {
+	expected := []ExpectedFinding{{File: "a.go", Line: 10, Category: "performance"}}
+	actual := []store.Finding{{File: "a.go", Line: 10, Category: "bug"}, {File: "a.go", Line: 11, Category: "bug"}}
+	report := Evaluate([]CaseInput{{Expected: expected, Actual: RunResult{Findings: actual}}})
+	assertFloat(t, report.Precision, 0)
+	assertFloat(t, report.LocationPrecision, 0.5)
+	assertFloat(t, report.LocationRecall, 1)
+}
+
+func TestRepairRunsThroughEvidenceValidation(t *testing.T) {
+	cases, err := LoadCases("cases")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := cases[1]
+	final := c.Script[len(c.Script)-1]
+	c.Script[len(c.Script)-1].Content = "The code has an issue.\n" + final.Content
+	c.Script = append(c.Script, final)
+	result, err := RunCase(context.Background(), c, NewScriptProvider(c), RunnerOptions{MaxSteps: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Findings) != len(c.Expected.Findings) || len(result.Responses) != len(c.Script) {
+		t.Fatalf("repair lost findings or raw attempts: %+v", result)
+	}
+}

@@ -127,11 +127,38 @@ func parseReviewResponse(content string, evidenceCorpus ...string) (parsedReview
 }
 
 func normalizeFindings(findings []store.Finding, evidenceCorpus ...string) []store.Finding {
+	normalized, _ := normalizeFindingsWithDiagnostics(findings, evidenceCorpus...)
+	return normalized
+}
+
+type RejectedFinding struct {
+	Finding store.Finding `json:"finding"`
+	Reason  string        `json:"reason"`
+}
+
+// DiagnoseRejectedFindings uses the production evidence policy for eval reports.
+// Invalid responses are reported by parseReviewResponse, not as filtered findings.
+func DiagnoseRejectedFindings(content string, evidenceCorpus ...string) []RejectedFinding {
+	var parsed parsedReviewResponse
+	if json.Unmarshal([]byte(extractJSONObject(content)), &parsed) != nil {
+		return nil
+	}
+	_, rejected := normalizeFindingsWithDiagnostics(parsed.Findings, evidenceCorpus...)
+	return rejected
+}
+
+func normalizeFindingsWithDiagnostics(findings []store.Finding, evidenceCorpus ...string) ([]store.Finding, []RejectedFinding) {
 	normalized := make([]store.Finding, 0, len(findings))
+	var rejected []RejectedFinding
 	corpusStrings := evidenceStrings(evidenceCorpus)
 	for _, finding := range findings {
 		evidence := supportedEvidence(finding, evidenceCorpus, corpusStrings)
 		if finding.File == "" || finding.Line <= 0 || len(evidence) == 0 {
+			reason := "no evidence matched the retrieved corpus at the claimed location"
+			if finding.File == "" || finding.Line <= 0 {
+				reason = "missing file or invalid line"
+			}
+			rejected = append(rejected, RejectedFinding{Finding: finding, Reason: reason})
 			continue
 		}
 		if finding.Confidence != "confirmed" || finding.Category == "performance" {
@@ -140,7 +167,7 @@ func normalizeFindings(findings []store.Finding, evidenceCorpus ...string) []sto
 		finding.Evidence = evidence
 		normalized = append(normalized, finding)
 	}
-	return normalized
+	return normalized, rejected
 }
 
 func supportedEvidence(finding store.Finding, corpus, corpusStrings []string) []store.Evidence {
@@ -399,19 +426,14 @@ func isDocumentationFile(filename string) bool {
 
 func extractJSONObject(content string) string {
 	trimmed := strings.TrimSpace(content)
-	if strings.HasPrefix(trimmed, "```") {
-		lines := strings.Split(trimmed, "\n")
-		if len(lines) > 1 {
-			trimmed = strings.Join(lines[1:], "\n")
+	// Accept one complete Markdown envelope, never extract an arbitrary object
+	// from prose, multiple responses, or tool-call markup.
+	lines := strings.Split(trimmed, "\n")
+	if len(lines) >= 3 {
+		opening := strings.TrimSpace(lines[0])
+		if (opening == "```json" || opening == "```") && strings.TrimSpace(lines[len(lines)-1]) == "```" {
+			return strings.TrimSpace(strings.Join(lines[1:len(lines)-1], "\n"))
 		}
-		if idx := strings.LastIndex(trimmed, "```"); idx >= 0 {
-			trimmed = trimmed[:idx]
-		}
-	}
-	start := strings.Index(trimmed, "{")
-	end := strings.LastIndex(trimmed, "}")
-	if start >= 0 && end > start {
-		return trimmed[start : end+1]
 	}
 	return trimmed
 }
