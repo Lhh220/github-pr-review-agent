@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -37,6 +39,12 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
+
+	dataset, err := json.Marshal(cases)
+	if err != nil {
+		fatal(err)
+	}
+	datasetHash := fmt.Sprintf("%x", sha256.Sum256(dataset))
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
@@ -80,6 +88,7 @@ evaluation:
 			}
 			inputs = append(inputs, input)
 			report = eval.Evaluate(inputs)
+			report.DatasetHash = datasetHash
 			report.Runs = *runs
 			report.PlannedCases = len(cases) * *runs
 			report.Mode = "offline"
