@@ -10,7 +10,7 @@
     }
   ],
   "repository": {
-    "review_test.go": "package review\n\nimport \"testing\"\n\nfunc TestSectionRoundTrip(t *testing.T) {\n\tpatch := \"@@ -1 +1 @@\\n-old\\n+new\"\n\tsource := BuildDiff(\"a.go\", patch)\n\tif got := Section(source, \"a.go\"); got != patch { t.Fatalf(\"section = %q\", got) }\n\tif got := Section(source, \"missing.go\"); got != \"\" { t.Fatalf(\"unexpected section %q\", got) }\n}",
+    "review_test.go": "package review\n\nimport \"testing\"\n\nfunc TestSectionRoundTrip(t *testing.T) {\n\tpatch := \"@@ -1 +1 @@\\n-old\\n+new\"\n\tsource := BuildDiff(\"a.go\", patch)\n\tif got := Section(source, \"a.go\"); got != patch { t.Fatalf(\"section = %q\", got) }\n\tif got := Section(source, \"missing.go\"); got != \"\" { t.Fatalf(\"unexpected section %q\", got) }\n}\n\nfunc TestExactPathAndUnifiedDiffLines(t *testing.T) {\n patch := \"@@ -1 +1 @@\\n-### old\\n+### new\"\n source := BuildDiff(\"a/b.go\", patch)\n if got := Section(source, \"b.go\"); got != \"\" { t.Fatalf(\"suffix matched: %q\", got) }\n if got := Section(source, \"a/b.go\"); got != patch { t.Fatalf(\"diff markers split content: %q\", got) }\n next := \"@@ -1 +1 @@\\n-x\\n+y\"\n source += \"\\n\" + BuildDiff(\"b.go\", next)\n if got := Section(source, \"a/b.go\"); got != patch { t.Fatalf(\"separator changed patch: %q\", got) }\n if got := Section(source, \"b.go\"); got != next { t.Fatalf(\"wrong exact section: %q\", got) }\n}\n",
     "go.mod": "module example.com/review\n\ngo 1.25\n"
   },
   "body": "Review the implementation and its callers and tests for introduced defects.",

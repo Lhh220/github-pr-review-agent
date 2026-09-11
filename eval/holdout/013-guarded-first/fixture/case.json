@@ -1,0 +1,21 @@
+{
+  "title": "013-guarded-first",
+  "body": "Return the first value or an empty string for an empty slice.",
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "files": [
+    {
+      "filename": "sample.go",
+      "status": "added",
+      "additions": 6,
+      "deletions": 0,
+      "changes": 6,
+      "patch": "@@ -0,0 +1,6 @@\n+package sample\n+\n+func First(values []string) string {\n+ if len(values) == 0 { return \"\" }\n+ return values[0]\n+}"
+    }
+  ],
+  "file_contents": {
+    "sample.go": "package sample\n\nfunc First(values []string) string {\n if len(values) == 0 { return \"\" }\n return values[0]\n}\n"
+  },
+  "repository": {
+    "go.mod": "module example.com/sample\n\ngo 1.25\n"
+  }
+}

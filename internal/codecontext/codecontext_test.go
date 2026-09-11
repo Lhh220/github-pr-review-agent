@@ -152,3 +152,14 @@ func TestExtractFallbackDoesNotMarkExactEndAsTruncated(t *testing.T) {
 		t.Fatalf("unexpected truncation: truncated=%v content=%s", result.Truncated, result.Content)
 	}
 }
+
+func TestFallbackRangeBeyondShortFile(t *testing.T) {
+	result := Extract(Request{Path: "go.mod", Content: "module sample\n\ngo 1.25\n", TargetLines: []int{1, 2, 3, 80}, MaxLines: 200})
+	if !strings.Contains(result.Content, "3: go 1.25") {
+		t.Fatalf("lost actual content: %+v", result)
+	}
+	result = Extract(Request{Path: "go.mod", Content: "module sample", TargetLines: []int{80, 81}, MaxLines: 200})
+	if result.Content != "" {
+		t.Fatalf("out-of-range request should be empty: %+v", result)
+	}
+}

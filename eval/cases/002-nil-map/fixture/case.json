@@ -15,5 +15,7 @@
   "file_contents": {
     "internal/metrics/metrics.go": "package metrics\n\nfunc Record() map[string]int {\n\tvar counts map[string]int\n\tcounts[\"requests\"] = 1\n\treturn counts\n}\n"
   },
-  "repository": {}
+  "repository": {
+    "go.mod": "module example.com/review\n\ngo 1.25\n"
+  }
 }

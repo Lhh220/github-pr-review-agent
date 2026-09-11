@@ -113,7 +113,7 @@ type parsedReviewResponse struct {
 	Findings []store.Finding `json:"findings"`
 }
 
-func parseReviewResponse(content string, evidenceCorpus ...string) (parsedReviewResponse, error) {
+func decodeReviewResponse(content string) (parsedReviewResponse, error) {
 	cleaned := extractJSONObject(content)
 	var parsed parsedReviewResponse
 	if err := json.Unmarshal([]byte(cleaned), &parsed); err != nil {
@@ -122,7 +122,20 @@ func parseReviewResponse(content string, evidenceCorpus ...string) (parsedReview
 	if strings.TrimSpace(parsed.Summary) == "" || parsed.Findings == nil {
 		return parsedReviewResponse{}, fmt.Errorf("parse review response: summary and findings array are required")
 	}
-	parsed.Findings = normalizeFindings(parsed.Findings, evidenceCorpus...)
+	return parsed, nil
+}
+
+func parseReviewResponse(content string, evidenceCorpus ...string) (parsedReviewResponse, error) {
+	parsed, err := decodeReviewResponse(content)
+	if err != nil {
+		return parsedReviewResponse{}, err
+	}
+	var rejected []RejectedFinding
+	parsed.Findings, rejected = normalizeFindingsWithDiagnostics(parsed.Findings, evidenceCorpus...)
+	if len(rejected) > 0 {
+		// The original summary may repeat rejected claims. Keep it only in RawResponse.
+		parsed.Summary = fmt.Sprintf("Review completed with %d evidence-validated finding(s). %d candidate(s) were omitted because their evidence could not be validated. This does not establish that the PR is defect-free.", len(parsed.Findings), len(rejected))
+	}
 	return parsed, nil
 }
 
@@ -464,7 +477,7 @@ func buildReviewComment(result store.ReviewResult, taskID uint64, commitSHA stri
 			}
 		}
 	} else {
-		b.WriteString("\n\nNo issues found.")
+		b.WriteString("\n\nNo evidence-validated findings to publish.")
 	}
 	b.WriteString(fmt.Sprintf("\n\n---\n%s", footer))
 	return b.String()
@@ -556,4 +569,26 @@ func buildDiff(files []github.PullRequestFile, maxLines int) string {
 		lineCount += strings.Count(f.Patch, "\n") + 1
 	}
 	return b.String()
+}
+
+// A genuine quote at a different location can be corrected by the model;
+// it must never be silently moved or accepted as proof at the claimed location.
+func validateReviewCandidate(content string, corpus []string) error {
+	parsed, err := decodeReviewResponse(content)
+	if err != nil {
+		return err
+	}
+	corpusStrings := evidenceStrings(corpus)
+	for i, finding := range parsed.Findings {
+		if len(supportedEvidence(finding, corpus, corpusStrings)) > 0 {
+			continue
+		}
+		for _, evidence := range finding.Evidence {
+			if evidence.Type == "reference" && evidence.File != "" && evidence.Line > 0 &&
+				(finding.File != evidence.File || finding.Line != evidence.Line) && referenceEvidenceInCorpus(evidence, corpus) {
+				return fmt.Errorf("finding %d location does not match its verified reference evidence at %s:%d; anchor the finding to the failing usage if appropriate, or omit it; do not alter or invent the source quote", i+1, evidence.File, evidence.Line)
+			}
+		}
+	}
+	return nil
 }

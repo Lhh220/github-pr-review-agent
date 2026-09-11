@@ -1,5 +1,40 @@
 # 交付验收与材料
 
+## 2026-09-11 本轮交付增量
+
+- 已修复：证据位置纠正（复用一次最终验证重试）；纠正后仍进行原来的精确引用校验；虚构证据不接受。
+- 已修复：候选被过滤时使用中性摘要，保留原文用于诊断；不再追加“无问题”结论。
+- Go PR 在模型调用前读取根 go.mod；嵌套模块仍需工具进一步确认。缺少文件会留下工具错误，不假设旧版本。
+- 发现并修复非语法树文件的上下文范围超过实际行数时的越界；增加回归测试。
+- 评测显示样本开始/结束、模型调用、纠正标记和每 20 秒等待提示；默认用时间戳文件名，拒绝覆盖已有报告。
+- 主集 004 改为 bug/high/confirmed，原因是明确违反每个任务执行一次的约定。不是重新解释旧报告；新报告有新的 dataset_hash。
+- 008 增加精确路径、diff 行前缀和多文件分隔的可执行测试，并在本机实际通过；这证明那些具体反例不成立，不意味着模型已不再误报。
+- 新增 eval/holdout 的 4 个独立样本，单独运行、单独报告，尚未用于 live 调优。
+- 静态检查输出在运行时限为 16 KiB，保留截断标记；Linux 超时取消整个进程组，Windows 不宣称具有同等进程树隔离。
+- 阶段四配置与文档见 [快速交付指南](quickstart.md)。完整 Docker 启动、远端 CI 结果、真实视频与线上静态专项仍待验收，不能标为完成。
+
+本轮验收命令：
+
+```powershell
+go test -p 1 ./...
+go vet ./...
+go run ./cmd/eval -runs 3
+go run ./cmd/eval -cases eval/holdout -runs 3
+docker compose --env-file compose.env.example config --quiet
+```
+
+本轮 live 复验（自动生成新报告，避免覆盖）：
+
+```powershell
+go run ./cmd/eval -live -runs 3 -timeout 30m
+go run ./cmd/eval -cases eval/holdout -live -runs 3 -timeout 30m
+```
+
+程序结束时会打印报告路径。读取打印出的实际文件路径；下面历史示例的 `eval/report-live.json` 是原基线，不会被自动更新。
+
+静态检查线上专项需要保存四类记录：真实成功、实际代码导致的编译/测试失败、超时、环境/依赖失败。最后两类只能标记验证不完整；任务失败、工具调用失败、检查命令失败是不同层次。至少记录 PR/head、Task ID、命令、退出码、输出、超时状态、最终 finding。远端 CI 的 Linux 进程组测试与部署冒烟也需确认通过。
+
+
 ## 验收状态
 
 | 项目 | 状态 | 结果 |
@@ -13,7 +48,7 @@
 | 收尾代码补强 | 本地完成，待部署 | 无效模型输出报错重试；静态证据拒绝空摘录、成功、超时与启动错误；新增正常代码负样本、评测失败记录与逐样本报告 |
 | 评论发布恢复 | 本地完成，待部署 | 20 个模式/故障组合验证不重复分析或发评；发布凭证与 done、审计同事务；migration 4 实库通过 |
 | CI | 配置已添加，远端待运行 | push / PR 运行测试、MySQL 集成、vet、离线评测；不使用模型 Key |
-| Live 模型评测 | 待执行 | 本地未配置 `DEEPSEEK_API_KEY`，不能伪造统计结果 |
+| Live 模型评测 | 已有基线，本轮复测待执行 | 2026-09-11 用户实际运行：27/27，0 失败，precision=0.50，recall=0.60，负样本误报率=0.25 |
 | 静态检查线上专项 | 待执行 | 需要在 Railway 开启配置并提交编译错误 PR |
 
 ## 剩余验收操作
@@ -26,7 +61,7 @@
 
 注意：GitHub API 与 MySQL 之间没有共同事务，查询与 POST 仍有竞态，不能声称严格 exactly-once。连续基础设施失败仍可能耗尽尝试次数进入死信；修复后重新入队会先对账。旧任务有 result 却没有 delivery 时会提示 `manual reconciliation required`，不要删除结果或随意补造标识：先人工核对历史评论，已完成的任务由管理员确认状态；确需重新审查则通过新的 PR 事件创建新任务。
 
-独立临时 MySQL 只用于本地测试，不是生产连接配置。已有线上 Key 和日志权限未配置到当前环境，因此 live 与线上专项仍按下面步骤执行，不能用本地测试代替。
+独立临时 MySQL 只用于本地测试，不是生产连接配置。已有 live 基线来自用户运行；本轮新代码尚未 live 复测。线上专项仍按下面步骤执行，不能用本地测试代替。
 
 ### 1. 本机运行 live 评测
 
@@ -40,7 +75,7 @@ $env:CGO_ENABLED="1"
 $env:CC="D:\Dev-Cpp\TDM-GCC-64\bin\gcc.exe"
 $evalKey = Read-Host "DeepSeek API Key" -AsSecureString
 $env:DEEPSEEK_API_KEY = [System.Net.NetworkCredential]::new("", $evalKey).Password
-go run ./cmd/eval -live -runs 3 -timeout 30m -report eval/report-live.json
+go run ./cmd/eval -live -runs 3 -timeout 30m
 Remove-Item Env:DEEPSEEK_API_KEY
 ```
 
@@ -54,11 +89,11 @@ $report | Select-Object mode,model,cases,planned_cases,failed_cases,negative_cas
 $report.case_results | Where-Object error | Select-Object name,run,error
 ```
 
-本次应执行 27 次，`mode=live`、`cases=planned_cases=27`、`failed_cases=0`、`negative_cases=12`。先排除运行失败，再逐条核对 `findings / false_positive_findings / missed_findings`；不能把位置、类别吻合当作语义正确。记录真实指标及误报/漏报例子；有问题则修复后重跑，不要求伪造满分。失败调用的费用不包含在平均 token 中。命令失败时先看报告中的 error，已完成结果仍保留，重新运行建议使用新报告文件名。
+主集本次应执行 27 次，`mode=live`、`cases=planned_cases=27`、`failed_cases=0`、`negative_cases=12`。先排除运行失败，再逐条核对 `findings / false_positive_findings / missed_findings`；不能把位置、类别吻合当作语义正确。记录真实指标及误报/漏报例子；有问题则修复后重跑，不要求伪造满分。失败调用的费用不包含在平均 token 中。命令失败时先看报告中的 error，已完成结果仍保留，重新运行建议使用新报告文件名。
 
 ### 2. 部署修复并验收静态检查
 
-先提交本地修复、推送到部署分支，等待 Railway 完成构建；本轮仅本地验证，尚未部署。在 Railway 设置：
+先提交本地修复、推送到部署分支，等待 Railway 完成构建；本轮仅本地验证，尚未部署。仅在受控个人测试仓库和专用测试环境执行；不要对不可信 PR 开启本机静态执行。在 Railway 设置：
 
 ```text
 AGENT_MODE=tool_calling

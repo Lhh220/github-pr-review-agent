@@ -16,7 +16,7 @@ import (
 func main() {
 	var (
 		caseRoot           = flag.String("cases", "eval/cases", "evaluation case directory")
-		reportPath         = flag.String("report", "eval/report.json", "report output path")
+		reportPath         = flag.String("report", "", "report output path")
 		live               = flag.Bool("live", false, "call DeepSeek instead of using fixture scripts")
 		runs               = flag.Int("runs", 1, "times to run each case")
 		apiKey             = flag.String("api-key", os.Getenv("DEEPSEEK_API_KEY"), "DeepSeek API key")
@@ -35,6 +35,14 @@ func main() {
 		fatal(fmt.Errorf("-runs must be positive"))
 	}
 
+	if *reportPath == "" {
+		*reportPath = "eval/report-" + time.Now().UTC().Format("20060102T150405.000000000Z") + ".json"
+	}
+	if _, err := os.Stat(*reportPath); err == nil {
+		fatal(fmt.Errorf("report already exists: %s; use a new -report path to preserve the baseline", *reportPath))
+	} else if !os.IsNotExist(err) {
+		fatal(err)
+	}
 	cases, err := eval.LoadCases(*caseRoot)
 	if err != nil {
 		fatal(err)
@@ -68,7 +76,13 @@ evaluation:
 			} else {
 				provider = eval.NewScriptProvider(evaluationCase)
 			}
+			started := time.Now()
+			fmt.Printf("[%d/%d] run=%d case=%s started\n", len(inputs)+1, len(cases)**runs, run, evaluationCase.Name)
+			stopHeartbeat := startProgressHeartbeat(evaluationCase.Name)
 			result, err := eval.RunCase(ctx, evaluationCase, provider, eval.RunnerOptions{
+				OnProgress: func(message string) {
+					fmt.Printf("  case=%s elapsed=%s %s\n", evaluationCase.Name, time.Since(started).Round(time.Second), message)
+				},
 				MaxSteps:           *maxSteps,
 				ToolTimeout:        *toolTimeout,
 				EnableStaticChecks: *enableStaticChecks,
@@ -76,6 +90,7 @@ evaluation:
 				StaticCheckWorkDir: *staticWorkDir,
 				StaticCheckGoProxy: *staticGoProxy,
 			})
+			stopHeartbeat()
 			input := eval.CaseInput{
 				Name:     evaluationCase.Name,
 				Run:      run,
@@ -86,6 +101,11 @@ evaluation:
 				input.Error = err.Error()
 				fmt.Fprintf(os.Stderr, "run=%d case=%s: %v\n", run, evaluationCase.Name, err)
 			}
+			status := "ok"
+			if err != nil {
+				status = "failed"
+			}
+			fmt.Printf("[%d/%d] case=%s status=%s elapsed=%s calls=%d tokens=%d findings=%d rejected=%d\n", len(inputs)+1, len(cases)**runs, evaluationCase.Name, status, time.Since(started).Round(time.Millisecond), len(result.Responses), result.TotalTokens, len(result.Findings), len(result.RejectedFindings))
 			inputs = append(inputs, input)
 			report = eval.Evaluate(inputs)
 			report.DatasetHash = datasetHash
@@ -130,4 +150,24 @@ func envOrDefault(key, fallback string) string {
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, err)
 	os.Exit(1)
+}
+
+func startProgressHeartbeat(name string) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	started := time.Now()
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(20 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				fmt.Printf("  case=%s still running elapsed=%s\n", name, time.Since(started).Round(time.Second))
+			}
+		}
+	}()
+	return func() { close(stop); <-done }
 }

@@ -33,3 +33,25 @@ jobs:
       - run: go test -p 1 ./...
       - run: go vet ./...
       - run: go run ./cmd/eval -report /tmp/eval-report.json
+
+      - run: go run ./cmd/eval -cases eval/holdout -report /tmp/eval-holdout.json
+
+  compose-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      APP_ENV_FILE: compose.env.example
+      APP_PORT: "18080"
+      COMPOSE_PROJECT_NAME: review-ci
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose --env-file compose.env.example config --quiet
+      - run: docker compose --env-file compose.env.example up --build -d --wait --wait-timeout 240
+      - run: |
+          curl --fail http://127.0.0.1:18080/healthz
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/tasks)" = "401"
+          curl --fail -H 'Authorization: Bearer local-review-token' http://127.0.0.1:18080/tasks
+      - if: failure()
+        run: docker compose --env-file compose.env.example logs --tail 100
+      - if: always()
+        run: docker compose --env-file compose.env.example down --volumes

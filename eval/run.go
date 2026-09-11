@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/liaohonghui/github-pr-review-agent/internal/github"
@@ -21,6 +22,7 @@ import (
 )
 
 type RunnerOptions struct {
+	OnProgress          func(string)
 	MaxSteps            int
 	ToolTimeout         time.Duration
 	MaxDiffLines        int
@@ -257,7 +259,7 @@ func RunCase(
 ) (RunResult, error) {
 	gh := &fixtureGitHubClient{fixture: evaluationCase.Fixture}
 	resultStore := &memoryStore{}
-	recorder := &recordingProvider{provider: provider}
+	recorder := &recordingProvider{provider: provider, onProgress: options.OnProgress}
 	service := review.NewAgent(gh, recorder, resultStore, review.AgentOptions{
 		MaxSteps:            options.MaxSteps,
 		ToolTimeout:         options.ToolTimeout,
@@ -329,13 +331,18 @@ func WriteReport(filePath string, report Report) error {
 
 // Record at the provider boundary so failed parses and exhausted steps retain diagnostics.
 type recordingProvider struct {
-	provider  review.AgentProvider
-	responses []ModelTrace
+	provider   review.AgentProvider
+	responses  []ModelTrace
+	onProgress func(string)
 }
 
 func (p *recordingProvider) ChatWithTools(ctx context.Context, request llm.ChatRequest) (llm.ChatResponse, error) {
+	repair := len(request.Messages) > 0 && request.Messages[len(request.Messages)-1].Role == "user" && strings.HasPrefix(request.Messages[len(request.Messages)-1].Content, "Your final response failed validation:")
+	if p.onProgress != nil {
+		p.onProgress(fmt.Sprintf("model_call=%d repair=%t", len(p.responses)+1, repair))
+	}
 	response, err := p.provider.ChatWithTools(ctx, request)
-	trace := ModelTrace{Response: response}
+	trace := ModelTrace{Response: response, Repair: repair}
 	if err != nil {
 		trace.Error = err.Error()
 	}

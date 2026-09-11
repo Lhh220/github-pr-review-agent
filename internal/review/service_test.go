@@ -332,3 +332,15 @@ func TestRejectedFindingDiagnostics(t *testing.T) {
 		t.Fatalf("valid evidence rejected: %+v", got)
 	}
 }
+
+func TestRejectedSummaryIsNotPublishedAsFact(t *testing.T) {
+	content := `{"summary":"This definitely breaks compilation.","findings":[{"category":"bug","file":"a.go","line":1,"evidence":[]}]}`
+	parsed, err := parseReviewResponse(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := buildReviewComment(store.ReviewResult{Summary: parsed.Summary, Findings: parsed.Findings}, 1, "abcdef")
+	if strings.Contains(body, "definitely breaks") || strings.Contains(body, "No issues found") || !strings.Contains(body, "1 candidate(s) were omitted") {
+		t.Fatalf("contradictory comment: %s", body)
+	}
+}

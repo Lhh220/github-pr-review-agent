@@ -2,6 +2,22 @@
 
 一个基于 Go 的 GitHub PR 自动审查 Agent。收到 GitHub PR 事件后，任务进入 RabbitMQ 异步队列，由 Worker 读取 PR 上下文和 diff，调用 DeepSeek 生成结构化审查意见，并以 GitHub App bot 身份回写 PR Review。
 
+## 快速启动与最新验收状态
+
+完整本地部署、架构图、30 秒演示脚本和面试提纲见 [快速交付指南](docs/quickstart.md)。Compose 已包含应用、MySQL、Redis、RabbitMQ 和健康依赖；默认使用 tool-calling，静态检查关闭。
+
+```powershell
+docker compose -p pr-review-demo up --build -d --wait --wait-timeout 240
+```
+
+默认配置仅用于本机演示，可启动健康检查与后台；实际 PR 审查需要配置 GitHub 和模型凭据，详见指南。应用默认代码配置仍为 legacy，Compose 显式覆盖为 tool-calling。
+
+2026-09-11 用户提供的最近一轮 live 基线：27/27 完成、0 失败，严格 precision=0.50、recall=0.60、负样本误报率=0.25。它使用此前的标签和提示词，不代表下面这些修复后的模型成绩。
+
+本轮新增：证据位置不一致时的一次纠正、过滤后摘要一致性、Go 版本预读取、短文件上下文越界修复、评测实时进度与防覆盖、静态检查输出内存上限和 Linux 超时进程组清理。9 个主样本之外单独提供 4 个复验样本；离线脚本通过只证明执行链路。主集 004 标签按“任务执行一次”的明确约定改为 bug，008 增加可执行反例测试，因此新旧分数不能直接归因于模型提升。
+
+当前仍待验收：本轮 live 复测、线上静态检查专项、完整 Compose 实机启动和真实演示录制。本机 Docker 引擎未能响应；Compose 配置已校验，CI 已增加完整部署冒烟任务，远端结果尚未获取。详见 [验收状态](docs/delivery.md)。
+
 ## 当前进度
 
 MVP 已经跑通并部署到 Railway：

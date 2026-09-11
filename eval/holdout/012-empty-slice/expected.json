@@ -2,8 +2,8 @@
   "findings": [
     {
       "category": "bug",
-      "file": "internal/worker/worker.go",
-      "line": 6,
+      "file": "sample.go",
+      "line": 4,
       "severity": "high",
       "confidence": "confirmed"
     }

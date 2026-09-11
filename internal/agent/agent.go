@@ -26,10 +26,11 @@ type Options struct {
 }
 
 type Request struct {
-	SystemPrompt string
-	UserPrompt   string
-	MaxSteps     int
-	ToolTimeout  time.Duration
+	InitialToolCalls []llm.ToolCall
+	SystemPrompt     string
+	UserPrompt       string
+	MaxSteps         int
+	ToolTimeout      time.Duration
 }
 
 type ToolInvocation struct {
@@ -100,6 +101,21 @@ func (a *Agent) Run(ctx context.Context, request Request) (Result, error) {
 	tools := a.registry.Definitions()
 
 	result := Result{ToolCalls: []ToolInvocation{}}
+	if len(request.InitialToolCalls) > 0 {
+		calls := normalizeToolCallIDs(request.InitialToolCalls, -1)
+		messages = append(messages, llm.ChatMessage{Role: "assistant", ToolCalls: calls})
+		for _, call := range calls {
+			invocation := a.executeTool(ctx, call, toolTimeout)
+			result.ToolCalls = append(result.ToolCalls, invocation)
+			if a.options.OnToolCall != nil {
+				if err := a.options.OnToolCall(ctx, invocation); err != nil {
+					return result, fmt.Errorf("record initial tool call: %w", err)
+				}
+			}
+			messages = append(messages, llm.ChatMessage{Role: "tool", Content: toolResultContent(invocation), Name: call.Name, ToolCallID: call.ID})
+		}
+	}
+
 	for step := 0; step < maxSteps; step++ {
 		response, err := a.provider.ChatWithTools(ctx, llm.ChatRequest{
 			Messages: messages,
@@ -216,7 +232,7 @@ func toolResultContent(invocation ToolInvocation) string {
 	return invocation.Output
 }
 
-// Retry only the final serialization, once, with the collected evidence retained.
+// Retry final validation once, with the collected evidence retained.
 func (a *Agent) validateFinal(ctx context.Context, messages []llm.ChatMessage, result Result) (Result, error) {
 	if a.options.ValidateResponse == nil {
 		return result, nil
@@ -227,7 +243,7 @@ func (a *Agent) validateFinal(ctx context.Context, messages []llm.ChatMessage, r
 	}
 	messages = append(messages, llm.ChatMessage{Role: "assistant", Content: result.Content}, llm.ChatMessage{
 		Role: "user", Content: "Your final response failed validation: " + validationErr.Error() +
-			". Re-emit exactly one valid JSON object matching the required schema, with summary and findings array (use [] for no findings). No introductory explanation, Markdown, or tool calls. Fix JSON escaping. Preserve the review conclusions and quote only evidence already retrieved; do not invent new findings or tool results.",
+			". Re-emit exactly one valid JSON object matching the required schema, with summary and findings array (use [] for no findings). No introductory explanation, Markdown, or tool calls. Fix JSON escaping. Preserve supported review conclusions, correct finding locations when requested by validation, and quote only evidence already retrieved. Omit unsupported findings and update the summary accordingly; do not invent new findings or tool results.",
 	})
 	response, err := a.provider.ChatWithTools(ctx, llm.ChatRequest{Messages: messages})
 	result.ProviderCalls++

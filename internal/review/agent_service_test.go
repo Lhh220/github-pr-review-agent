@@ -161,20 +161,21 @@ func TestAgentReviewPRRunsToolsAndPersistsTrace(t *testing.T) {
 	if len(provider.requests) != 3 || len(provider.requests[0].Tools) != 6 {
 		t.Fatalf("unexpected provider requests: count=%d first_tools=%d", len(provider.requests), len(provider.requests[0].Tools))
 	}
-	if provider.requests[1].Messages[3].Role != "tool" ||
-		!strings.Contains(provider.requests[1].Messages[3].Content, "internal/auth/auth.go") {
+	if provider.requests[1].Messages[5].Role != "tool" ||
+		!strings.Contains(provider.requests[1].Messages[5].Content, "internal/auth/auth.go") {
 		t.Fatalf("unexpected changed-files result: %+v", provider.requests[1].Messages)
 	}
-	if provider.requests[2].Messages[5].Role != "tool" ||
-		!strings.Contains(provider.requests[2].Messages[5].Content, "ValidateToken") {
+	if provider.requests[2].Messages[7].Role != "tool" ||
+		!strings.Contains(provider.requests[2].Messages[7].Content, "ValidateToken") {
 		t.Fatalf("unexpected file-context result: %+v", provider.requests[2].Messages)
 	}
 	if gh.contentPath != "internal/auth/auth.go" || gh.contentRef != "291ac5aedc5fd96c5030a6c18e91923140677591" {
 		t.Fatalf("unexpected file context request: path=%s ref=%s", gh.contentPath, gh.contentRef)
 	}
-	if len(resultStore.toolCalls) != 2 ||
-		resultStore.toolCalls[0].ToolName != "list_changed_files" ||
-		resultStore.toolCalls[1].ToolName != "read_file_context" {
+	if len(resultStore.toolCalls) != 3 ||
+		resultStore.toolCalls[0].Input != `{"path":"go.mod","start_line":1,"end_line":80}` ||
+		resultStore.toolCalls[1].ToolName != "list_changed_files" ||
+		resultStore.toolCalls[2].ToolName != "read_file_context" {
 		t.Fatalf("unexpected tool call log: %+v", resultStore.toolCalls)
 	}
 	if resultStore.result.Summary != "No blocking issues." ||

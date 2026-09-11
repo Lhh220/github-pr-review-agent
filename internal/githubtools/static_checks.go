@@ -2,6 +2,7 @@ package githubtools
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -141,7 +143,9 @@ func (t staticChecksTool) Execute(ctx context.Context, input map[string]any) (st
 		if runErr != nil {
 			result.Error = runErr.Error()
 		}
-		result.Output, result.OutputTruncated = clampString(result.Output, maxStaticCheckOutputChars)
+		output, truncated := clampString(result.Output, maxStaticCheckOutputChars)
+		result.Output = output
+		result.OutputTruncated = result.OutputTruncated || truncated
 		results = append(results, result)
 	}
 
@@ -296,10 +300,16 @@ func runStaticCheckCommand(
 	command.Dir = dir
 	command.Env = env
 
-	output, err := command.CombinedOutput()
+	command.WaitDelay = 2 * time.Second
+	configureStaticProcess(command)
+	output := &boundedCheckOutput{}
+	command.Stdout = output
+	command.Stderr = output
+	err := command.Run()
 	result := staticCheckCommandResult{
-		Success: err == nil,
-		Output:  string(output),
+		Success:         err == nil,
+		Output:          output.String(),
+		OutputTruncated: output.truncated,
 	}
 	if err == nil {
 		return result, nil
@@ -317,3 +327,24 @@ func runStaticCheckCommand(
 	}
 	return result, fmt.Errorf("start go command: %w", err)
 }
+
+// Bound memory while the process runs, rather than truncating only after exit.
+type boundedCheckOutput struct {
+	mu        sync.Mutex
+	data      bytes.Buffer
+	truncated bool
+}
+
+func (b *boundedCheckOutput) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := len(p)
+	remaining := maxStaticCheckOutputChars - b.data.Len()
+	if len(p) > remaining {
+		b.truncated = true
+		p = p[:remaining]
+	}
+	_, _ = b.data.Write(p)
+	return n, nil
+}
+func (b *boundedCheckOutput) String() string { return b.data.String() }

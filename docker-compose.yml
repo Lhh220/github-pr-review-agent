@@ -1,18 +1,91 @@
 services:
+  app:
+    build: .
+    init: true
+    restart: unless-stopped
+    env_file:
+      - path: ${APP_ENV_FILE:-.env}
+        required: false
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      PORT: "8080"
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-local-review-token}
+      MYSQL_DSN: "review:${MYSQL_PASSWORD:-review-local}@tcp(mysql:3306)/review?charset=utf8mb4&parseTime=true&loc=Local"
+      RABBITMQ_URL: "amqp://review:${RABBITMQ_PASSWORD:-review-local}@rabbitmq:5672/"
+      REDIS_URL: redis://redis:6379/0
+      AGENT_MODE: ${AGENT_MODE:-tool_calling}
+      AGENT_ENABLE_STATIC_CHECKS: "false"
+      REVIEW_WORKERS: "2"
+    ports:
+      - "127.0.0.1:${APP_PORT:-8080}:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    mem_limit: 1g
+    stop_grace_period: 30s
+
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_DATABASE: review
+      MYSQL_USER: review
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-review-local}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root-local}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_PASSWORD mysql -h 127.0.0.1 -u review -D review -e 'SELECT 1' >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    mem_limit: 768m
+
   redis:
     image: redis:7-alpine
-    container_name: github-pr-review-agent-redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    mem_limit: 128m
 
   rabbitmq:
     image: rabbitmq:3.13-management
-    container_name: github-pr-review-agent-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: review
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-review-local}
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "127.0.0.1:${RABBITMQ_PORT:-5672}:5672"
+      - "127.0.0.1:${RABBITMQ_ADMIN_PORT:-15672}:15672"
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 20s
+    mem_limit: 512m
 
 volumes:
+  mysql-data:
   rabbitmq-data:

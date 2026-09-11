@@ -55,6 +55,7 @@ type ToolCallSpec struct {
 }
 
 type ModelTrace struct {
+	Repair   bool             `json:"repair,omitempty"`
 	Response llm.ChatResponse `json:"response"`
 	Error    string           `json:"error,omitempty"`
 }
