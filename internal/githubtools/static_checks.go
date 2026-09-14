@@ -285,7 +285,8 @@ func staticCheckEnvironment(baseDir, goProxy string) []string {
 		"GOTOOLCHAIN=local",
 		"GOENV=off",
 		"GOPROXY=" + goProxy,
-		"GOFLAGS=-mod=mod",
+		"GOFLAGS=-mod=mod -p=1",
+		"GOMAXPROCS=2",
 		"CGO_ENABLED=1",
 	}
 }

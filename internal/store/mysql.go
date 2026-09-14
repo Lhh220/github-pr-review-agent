@@ -295,6 +295,15 @@ func (s *Store) UpdateTaskStatus(ctx context.Context, id uint64, status, taskErr
 	if err != nil {
 		return fmt.Errorf("lock review task for update: %w", err)
 	}
+	if oldStatus == "superseded" {
+		if status == "superseded" {
+			return tx.Commit()
+		}
+		return ErrTaskTransitionFailed
+	}
+	if status == "superseded" && oldStatus != "running" {
+		return ErrTaskTransitionFailed
+	}
 	// Delivery confirmation already completes the task atomically with its audit log.
 	if oldStatus == "done" && status == "done" && errorMessage == nil {
 		return tx.Commit()
@@ -302,10 +311,11 @@ func (s *Store) UpdateTaskStatus(ctx context.Context, id uint64, status, taskErr
 
 	if _, err := tx.ExecContext(ctx, `
 UPDATE review_task
-SET status = ?, error = ?
+SET status = ?, error = ?, next_retry_at = CASE WHEN ? = 'superseded' THEN NULL ELSE next_retry_at END
 WHERE id = ?`,
 		status,
 		errorMessage,
+		status,
 		id,
 	); err != nil {
 		return fmt.Errorf("update review task status: %w", err)
