@@ -21,6 +21,22 @@ type Client struct {
 	limiter limiter.Limiter
 }
 
+// ReviewQualityRules applies to both fixed-context and tool-calling reviews.
+const ReviewQualityRules = `
+Before reporting a finding:
+- Establish a concrete trigger, the incorrect behavior, and its user-visible impact. Quoting a real source line only establishes source authenticity, not that a defect exists.
+- Verify assumptions against the relevant implementation, callers, tests, and documented contract. In tool-calling mode, inspect these with tools before claiming a helper is missing behavior. In fixed-context mode, omit claims that require unavailable context.
+- Look for counterevidence: existing guards, compatible producer/consumer formats, intentional validation contracts, and tests explaining a policy. An intentional policy is only a defect if you demonstrate a concrete violated requirement or regression.
+- For string matching claims, work through the exact needle and input including separators, prefixes, and newlines. A similar-looking path is not proof of a match; discard a counterexample that does not actually trigger the condition.
+- For version-dependent behavior, inspect the repository's language version before asserting a defect. When a field or API is removed, follow the affected callers and resolve their types before deciding whether the change breaks them.
+- Do not report requests to investigate ("may not", "verify whether", "consider checking") as bugs. needs_verification is not permission to report unsupported speculation; it is for a concrete supported risk with a clearly stated remaining uncertainty.
+- Do not report theoretical complexity or suggest indexing/caching without a realistic workload and evidence of material impact. Prefer no finding over an unmeasured performance concern.
+- Distinguish invalid response schemas from valid empty findings arrays. Do not recommend silently accepting invalid model output without demonstrating a contract that requires it.
+- Treat timeout, OOM/process kill, missing toolchain, and dependency-download errors as incomplete validation, not proof of a PR defect. Mention these limits in the summary without inventing a root cause or claiming unobserved tests passed.
+- If no actionable defect survives these checks, return a concise summary with findings: []. Always return the required JSON schema; never emit tool-call markup as the final answer.
+- Emit exactly one JSON object, without Markdown fences, introductory prose, examples, or trailing text. Escape code snippets inside JSON strings.
+`
+
 type Usage struct {
 	InputTokens  int `json:"prompt_tokens"`
 	OutputTokens int `json:"completion_tokens"`
@@ -73,6 +89,7 @@ func New(apiKey, baseURL, model string) *Client {
 		baseURL: baseURL,
 		model:   model,
 		http:    &http.Client{Timeout: 120 * time.Second},
+		limiter: limiter.NoopLimiter{},
 	}
 }
 
@@ -198,7 +215,7 @@ func (c *Client) ReviewCode(ctx context.Context, title, body, diff, fileContext 
       "confidence": "confirmed|needs_verification",
       "evidence": [
         {
-          "type": "reference",
+          "type": "reference|static_check",
           "file": "path/to/file.go",
           "line": 12,
           "text": "exact source line from the supplied diff or file context"
@@ -218,10 +235,13 @@ Rules:
 - Treat architectural concerns, performance risks, and concurrency concerns that need human confirmation as needs_verification.
 - Do not report pure formatting or style preferences.
 - Do not invent files, line numbers, commands, or output.
+- Reference evidence must use the same file and line as the finding and quote the source exactly.
+- Static-check evidence must quote the failed command and output exactly. If evidence cannot be quoted exactly, omit the finding.
+- Report at most five findings, and only report issues introduced or directly triggered by this pull request.
 - Prioritize bugs, security risks, and performance issues over style.
 - If every changed file is documentation-only, return an empty findings array.
 - If the code looks good, return an empty findings array.
-Be concise and specific.`
+Be concise and specific.` + ReviewQualityRules
 	user := fmt.Sprintf(
 		"Pull request title: %s\n\nPull request description:\n%s\n\nChanged files diff:\n%s\n\nChanged file context:\n%s",
 		title,
@@ -253,10 +273,11 @@ Be concise and specific.`
 }
 
 func (c *Client) chat(ctx context.Context, request chatRequest) (chatResponse, int64, error) {
-	if c.limiter == nil {
-		c.limiter = limiter.NoopLimiter{}
+	limiterInstance := c.limiter
+	if limiterInstance == nil {
+		limiterInstance = limiter.NoopLimiter{}
 	}
-	if err := c.limiter.Wait(ctx, "llm:deepseek"); err != nil {
+	if err := limiterInstance.Wait(ctx, "llm:deepseek"); err != nil {
 		return chatResponse{}, 0, fmt.Errorf("wait llm rate limit: %w", err)
 	}
 

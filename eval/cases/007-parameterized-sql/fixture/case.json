@@ -1,0 +1,8 @@
+{
+  "title": "Look up users by name",
+  "body": "Add a user lookup helper.",
+  "head_sha": "7777777777777777777777777777777777777777",
+  "files": [{"filename":"users.go","status":"added","additions":7,"deletions":0,"changes":7,"patch":"@@ -0,0 +1,7 @@\n+package users\n+\n+import \"database/sql\"\n+\n+func Find(db *sql.DB, name string) *sql.Row {\n+\treturn db.QueryRow(\"SELECT id FROM users WHERE name = ?\", name)\n+}"}],
+  "file_contents": {"users.go":"package users\n\nimport \"database/sql\"\n\nfunc Find(db *sql.DB, name string) *sql.Row {\n\treturn db.QueryRow(\"SELECT id FROM users WHERE name = ?\", name)\n}\n"},
+  "repository": {"go.mod":"module example.com/users\n\ngo 1.25\n"}
+}

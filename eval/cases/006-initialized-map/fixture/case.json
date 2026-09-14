@@ -1,0 +1,8 @@
+{
+  "title": "Collect request metrics",
+  "body": "Record request counts in a map.",
+  "head_sha": "6666666666666666666666666666666666666666",
+  "files": [{"filename":"metrics.go","status":"added","additions":7,"deletions":0,"changes":7,"patch":"@@ -0,0 +1,7 @@\n+package metrics\n+\n+func Record() map[string]int {\n+\tcounts := make(map[string]int)\n+\tcounts[\"requests\"] = 1\n+\treturn counts\n+}"}],
+  "file_contents": {"metrics.go":"package metrics\n\nfunc Record() map[string]int {\n\tcounts := make(map[string]int)\n\tcounts[\"requests\"] = 1\n\treturn counts\n}\n"},
+  "repository": {"go.mod":"module example.com/metrics\n\ngo 1.25\n"}
+}

@@ -613,6 +613,7 @@
             <option value="done">done</option>
             <option value="failed">failed</option>
             <option value="retrying">retrying</option>
+            <option value="superseded">superseded</option>
             <option value="dead_letter">dead_letter</option>
           </select>
         </label>
@@ -901,7 +902,7 @@
       `).join('');
       $('stats-time').textContent = stats.generated_at ? `Updated ${formatDate(stats.generated_at)}` : '';
 
-      const statuses = ['received', 'queued', 'running', 'done', 'failed', 'retrying', 'dead_letter'];
+      const statuses = ['received', 'queued', 'running', 'done', 'failed', 'retrying', 'dead_letter', 'superseded'];
       const max = Math.max(1, ...statuses.map(name => stats.status_counts?.[name] || 0));
       $('status-distribution').innerHTML = statuses.map(name => {
         const count = stats.status_counts?.[name] || 0;

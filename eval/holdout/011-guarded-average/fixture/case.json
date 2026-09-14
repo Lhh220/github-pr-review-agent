@@ -1,0 +1,21 @@
+{
+  "title": "011-guarded-average",
+  "body": "Return false when count is zero; otherwise compute the integer average.",
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "files": [
+    {
+      "filename": "sample.go",
+      "status": "added",
+      "additions": 6,
+      "deletions": 0,
+      "changes": 6,
+      "patch": "@@ -0,0 +1,6 @@\n+package sample\n+\n+func Average(total, count int) (int, bool) {\n+ if count == 0 { return 0, false }\n+ return total / count, true\n+}"
+    }
+  ],
+  "file_contents": {
+    "sample.go": "package sample\n\nfunc Average(total, count int) (int, bool) {\n if count == 0 { return 0, false }\n return total / count, true\n}\n"
+  },
+  "repository": {
+    "go.mod": "module example.com/sample\n\ngo 1.25\n"
+  }
+}

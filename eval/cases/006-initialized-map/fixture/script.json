@@ -1,0 +1,4 @@
+[
+  {"model":"fixture","tool_calls":[{"id":"read-map","name":"read_file_context","arguments":"{\"path\":\"metrics.go\"}"}]},
+  {"model":"fixture","content":"{\"summary\":\"The map is initialized before writing.\",\"findings\":[]}"}
+]

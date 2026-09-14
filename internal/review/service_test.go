@@ -1,12 +1,48 @@
 package review
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/liaohonghui/github-pr-review-agent/internal/github"
 	"github.com/liaohonghui/github-pr-review-agent/internal/store"
 )
+
+func TestStaticEvidenceRequiresCompletedFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name, excerpt    string
+		success, timeout bool
+		code             int
+		err              string
+		want             bool
+	}{
+		{name: "failure", excerpt: "undefined: x", code: 1, want: true},
+		{name: "empty", code: 1},
+		{name: "whitespace", excerpt: "  ", code: 1},
+		{name: "success", excerpt: "undefined: x", success: true},
+		{name: "timeout", excerpt: "undefined: x", timeout: true, code: 1},
+		{name: "start failure", excerpt: "undefined: x", code: 1, err: "start failed"},
+		{name: "no exit status", excerpt: "undefined: x"},
+		{name: "fabricated", excerpt: "other failure", code: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			output, err := json.Marshal(map[string]any{"checks": []any{map[string]any{
+				"command": "go test ./...", "output": "undefined: x", "success": tc.success,
+				"exit_code": tc.code, "timed_out": tc.timeout, "error": tc.err,
+			}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			finding := store.Finding{File: "a.go", Line: 1, Category: "bug", Confidence: "confirmed",
+				Evidence: []store.Evidence{{Type: "static_check", Command: "go test ./...", Excerpt: tc.excerpt}}}
+			got := normalizeFindings([]store.Finding{finding}, string(output))
+			if (len(got) == 1) != tc.want {
+				t.Fatalf("findings = %+v, want accepted=%v", got, tc.want)
+			}
+		})
+	}
+}
 
 func TestBuildDiff(t *testing.T) {
 	files := []github.PullRequestFile{
@@ -118,7 +154,15 @@ func TestParseReviewResponseRequiresEvidence(t *testing.T) {
 		]
 	}`
 
-	parsed := parseReviewResponse(content)
+	parsed, err := parseReviewResponse(
+		content,
+		`{"path":"cmd/server/main.go","content":"42: cfg.MaxDiffLines"}`,
+		`{"checks":[{"command":"go test ./...","success":false,"exit_code":1,"output":"undefined: cfg.MaxDiffLines"}]}`,
+		`{"path":"internal/review/service.go","content":"20: for _, file := range files"}`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(parsed.Findings) != 2 {
 		t.Fatalf("findings length = %d, want 2: %+v", len(parsed.Findings), parsed.Findings)
 	}
@@ -131,6 +175,118 @@ func TestParseReviewResponseRequiresEvidence(t *testing.T) {
 	performance := parsed.Findings[1]
 	if performance.Confidence != "needs_verification" || len(performance.Evidence) != 1 {
 		t.Fatalf("unexpected performance finding: %+v", performance)
+	}
+}
+
+func TestParseReviewResponseDropsFabricatedEvidence(t *testing.T) {
+	content := `{
+		"summary": "Fabricated evidence is not retained.",
+		"findings": [
+			{
+				"category": "bug",
+				"file": "cmd/server/main.go",
+				"line": 42,
+				"severity": "high",
+				"comment": "Fabricated source line.",
+				"confidence": "confirmed",
+				"evidence": [
+					{"type": "reference", "file": "cmd/server/main.go", "line": 42, "text": "not in the tool output"}
+				]
+			},
+			{
+				"category": "performance",
+				"file": "internal/review/service.go",
+				"line": 20,
+				"severity": "medium",
+				"comment": "Performance findings remain speculative without a benchmark.",
+				"confidence": "confirmed",
+				"evidence": [
+					{"type": "reference", "file": "internal/review/service.go", "line": 20, "text": "for _, file := range files"}
+				]
+			}
+		]
+	}`
+
+	parsed, err := parseReviewResponse(
+		content,
+		`{"path":"internal/review/service.go","content":"20: for _, file := range files"}`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Findings) != 1 {
+		t.Fatalf("findings length = %d, want 1: %+v", len(parsed.Findings), parsed.Findings)
+	}
+	if parsed.Findings[0].Confidence != "needs_verification" {
+		t.Fatalf("performance confidence = %s, want needs_verification", parsed.Findings[0].Confidence)
+	}
+}
+
+func TestParseReviewResponseValidatesRawEvidenceByFileAndLine(t *testing.T) {
+	content := `{
+		"summary": "Only exact raw references survive.",
+		"findings": [
+			{
+				"category": "bug",
+				"file": "cmd/server/main.go",
+				"line": 2,
+				"severity": "high",
+				"comment": "Valid diff evidence.",
+				"confidence": "confirmed",
+				"evidence": [{"type": "reference", "file": "cmd/server/main.go", "line": 2, "text": "cfg.MaxDiffLines"}]
+			},
+			{
+				"category": "bug",
+				"file": "cmd/server/removed.go",
+				"line": 2,
+				"severity": "medium",
+				"comment": "Removed diff lines are not current evidence.",
+				"confidence": "confirmed",
+				"evidence": [{"type": "reference", "file": "cmd/server/removed.go", "line": 2, "text": "removed line"}]
+			},
+			{
+				"category": "bug",
+				"file": "cmd/server/main.go",
+				"line": 1,
+				"severity": "medium",
+				"comment": "Wrong line is not evidence.",
+				"confidence": "confirmed",
+				"evidence": [{"type": "reference", "file": "cmd/server/main.go", "line": 1, "text": "cfg.MaxDiffLines"}]
+			},
+			{
+				"category": "bug",
+				"file": "internal/metrics/metrics.go",
+				"line": 4,
+				"severity": "medium",
+				"comment": "Valid file-context evidence.",
+				"confidence": "confirmed",
+				"evidence": [{"type": "reference", "file": "internal/metrics/metrics.go", "line": 4, "text": "counts[\"requests\"] = 1"}]
+			},
+			{
+				"category": "bug",
+				"file": "internal/metrics/metrics.go",
+				"line": 4,
+				"severity": "medium",
+				"comment": "Partial lines are not exact evidence.",
+				"confidence": "confirmed",
+				"evidence": [{"type": "reference", "file": "internal/metrics/metrics.go", "line": 3, "text": "counts"}]
+			}
+		]
+	}`
+
+	parsed, err := parseReviewResponse(
+		content,
+		"\n### cmd/server/main.go\n@@ -1,2 +1,2 @@\n package main\n-cfg.MaxDiffLimits\n+cfg.MaxDiffLines\n\n### cmd/server/removed.go\n@@ -1,2 +1,2 @@\n package main\n-removed line\n+replacement\n",
+		"\n### internal/metrics/metrics.go\npackage metrics\n\nfunc Record() {\n\tcounts[\"requests\"] = 1\n}\n",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Findings) != 2 {
+		t.Fatalf("findings length = %d, want 2: %+v", len(parsed.Findings), parsed.Findings)
+	}
+	if parsed.Findings[0].File != "cmd/server/main.go" || parsed.Findings[1].File != "internal/metrics/metrics.go" {
+		t.Fatalf("unexpected surviving findings: %+v", parsed.Findings)
 	}
 }
 
@@ -150,5 +306,41 @@ func TestIsDocsOnlyPR(t *testing.T) {
 				t.Fatalf("isDocsOnlyPR() = %t, want %t", got, test.want)
 			}
 		})
+	}
+}
+
+func TestReviewResponseEnvelope(t *testing.T) {
+	valid := `{"summary":"Code contains } and ` + "`" + ` characters","findings":[]}`
+	for _, content := range []string{valid, "```json\n" + valid + "\n```", "```\r\n" + valid + "\r\n```\r\n"} {
+		if _, err := parseReviewResponse(content); err != nil {
+			t.Fatalf("valid envelope rejected: %v", err)
+		}
+	}
+	for _, content := range []string{"Here is the review: " + valid, valid + "`", valid + valid, "```json\n" + valid, "```json\n" + valid + "\n```\ntrailing", "<tool_calls>" + valid + "</tool_calls>", "```json\n" + valid + "\n```\n```json\n" + valid + "\n```"} {
+		if _, err := parseReviewResponse(content); err == nil {
+			t.Fatalf("invalid envelope accepted: %q", content)
+		}
+	}
+}
+
+func TestRejectedFindingDiagnostics(t *testing.T) {
+	content := `{"summary":"Candidate","findings":[{"file":"a.go","line":1,"category":"bug","confidence":"confirmed","evidence":[{"type":"reference","file":"a.go","line":1,"text":"panic()"}]}]}`
+	if got := DiagnoseRejectedFindings(content, "### a.go\nreturn nil"); len(got) != 1 || got[0].Reason == "" {
+		t.Fatalf("missing rejection: %+v", got)
+	}
+	if got := DiagnoseRejectedFindings(content, "### a.go\npanic()"); len(got) != 0 {
+		t.Fatalf("valid evidence rejected: %+v", got)
+	}
+}
+
+func TestRejectedSummaryIsNotPublishedAsFact(t *testing.T) {
+	content := `{"summary":"This definitely breaks compilation.","findings":[{"category":"bug","file":"a.go","line":1,"evidence":[]}]}`
+	parsed, err := parseReviewResponse(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := buildReviewComment(store.ReviewResult{Summary: parsed.Summary, Findings: parsed.Findings}, 1, "abcdef")
+	if strings.Contains(body, "definitely breaks") || strings.Contains(body, "No issues found") || !strings.Contains(body, "1 candidate(s) were omitted") {
+		t.Fatalf("contradictory comment: %s", body)
 	}
 }

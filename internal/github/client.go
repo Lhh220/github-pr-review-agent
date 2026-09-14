@@ -34,6 +34,7 @@ func NewClient(token string) *Client {
 		token:   token,
 		http:    &http.Client{Timeout: 30 * time.Second},
 		baseURL: apiBaseURL,
+		limiter: limiter.NoopLimiter{},
 	}
 }
 
@@ -64,6 +65,7 @@ func NewAppClient(auth AppAuth) *Client {
 		},
 		http:    &http.Client{Timeout: 30 * time.Second},
 		baseURL: apiBaseURL,
+		limiter: limiter.NoopLimiter{},
 	}
 }
 
@@ -122,10 +124,11 @@ type fileContentResponse struct {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) error {
-	if c.limiter == nil {
-		c.limiter = limiter.NoopLimiter{}
+	limiterInstance := c.limiter
+	if limiterInstance == nil {
+		limiterInstance = limiter.NoopLimiter{}
 	}
-	if err := c.limiter.Wait(ctx, "github:api"); err != nil {
+	if err := limiterInstance.Wait(ctx, "github:api"); err != nil {
 		return fmt.Errorf("wait github api rate limit: %w", err)
 	}
 
@@ -240,10 +243,11 @@ func (c *Client) GetFileContent(ctx context.Context, owner, repo, path, ref stri
 }
 
 func (c *Client) GetRepositoryTarball(ctx context.Context, owner, repo, ref string) (io.ReadCloser, error) {
-	if c.limiter == nil {
-		c.limiter = limiter.NoopLimiter{}
+	limiterInstance := c.limiter
+	if limiterInstance == nil {
+		limiterInstance = limiter.NoopLimiter{}
 	}
-	if err := c.limiter.Wait(ctx, "github:api"); err != nil {
+	if err := limiterInstance.Wait(ctx, "github:api"); err != nil {
 		return nil, fmt.Errorf("wait github api rate limit: %w", err)
 	}
 

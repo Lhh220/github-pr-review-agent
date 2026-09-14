@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -10,8 +11,10 @@ import (
 )
 
 const (
-	DefaultMaxSteps    = 8
-	DefaultToolTimeout = 20 * time.Second
+	DefaultMaxContextBytes    = 96 << 10
+	DefaultMaxToolOutputBytes = 48 << 10
+	DefaultMaxSteps           = 8
+	DefaultToolTimeout        = 20 * time.Second
 )
 
 type Provider interface {
@@ -19,19 +22,26 @@ type Provider interface {
 }
 
 type Options struct {
-	MaxSteps    int
-	ToolTimeout time.Duration
-	OnToolCall  func(ctx context.Context, invocation ToolInvocation) error
+	// Byte budgets, not tokenizer-specific token limits.
+	MaxContextBytes    int
+	MaxToolOutputBytes int
+	CacheableTools     []string
+	ValidateResponse   func(string) error
+	MaxSteps           int
+	ToolTimeout        time.Duration
+	OnToolCall         func(ctx context.Context, invocation ToolInvocation) error
 }
 
 type Request struct {
-	SystemPrompt string
-	UserPrompt   string
-	MaxSteps     int
-	ToolTimeout  time.Duration
+	InitialToolCalls []llm.ToolCall
+	SystemPrompt     string
+	UserPrompt       string
+	MaxSteps         int
+	ToolTimeout      time.Duration
 }
 
 type ToolInvocation struct {
+	Cached     bool   `json:"cached,omitempty"`
 	ID         string `json:"id"`
 	Name       string `json:"name"`
 	Arguments  string `json:"arguments"`
@@ -58,6 +68,12 @@ type Agent struct {
 func New(provider Provider, registry *Registry, options Options) (*Agent, error) {
 	if provider == nil {
 		return nil, fmt.Errorf("agent provider is required")
+	}
+	if options.MaxContextBytes <= 0 {
+		options.MaxContextBytes = DefaultMaxContextBytes
+	}
+	if options.MaxToolOutputBytes <= 0 {
+		options.MaxToolOutputBytes = DefaultMaxToolOutputBytes
 	}
 	if options.MaxSteps <= 0 {
 		options.MaxSteps = DefaultMaxSteps
@@ -99,8 +115,64 @@ func (a *Agent) Run(ctx context.Context, request Request) (Result, error) {
 	tools := a.registry.Definitions()
 
 	result := Result{ToolCalls: []ToolInvocation{}}
+	// Cache only explicitly declared read-only tools, scoped to this Run/commit.
+	cache := map[string]ToolInvocation{}
+	remaining := a.options.MaxToolOutputBytes
+	execute := func(call llm.ToolCall) ToolInvocation {
+		key := ""
+		for _, name := range a.options.CacheableTools {
+			if name == call.Name {
+				var args any
+				decoder := json.NewDecoder(strings.NewReader(call.Arguments))
+				decoder.UseNumber()
+				if json.Valid([]byte(call.Arguments)) && decoder.Decode(&args) == nil {
+					normalized, _ := json.Marshal(args)
+					key = name + string(normalized)
+				}
+				break
+			}
+		}
+		if previous, ok := cache[key]; key != "" && ok {
+			return ToolInvocation{ID: call.ID, Name: call.Name, Arguments: call.Arguments, Cached: true,
+				Output: "Duplicate read; reuse the complete result of earlier tool call " + previous.ID + "."}
+		}
+		if remaining <= 0 {
+			return ToolInvocation{ID: call.ID, Name: call.Name, Arguments: call.Arguments,
+				Error: "Tool output budget exhausted. Finish using collected evidence; explicitly disclose uninspected scope."}
+		}
+		invocation := a.executeTool(ctx, call, toolTimeout)
+		if invocation.Error == "" {
+			// Keep JSON intact. Rejected output must not enter the model or evidence corpus.
+			if len(invocation.Output) > remaining {
+				invocation.Output = ""
+				invocation.Error = fmt.Sprintf("Tool output exceeds remaining context budget (%d bytes). Request a smaller file/range, or finish and disclose uninspected scope.", remaining)
+			} else {
+				remaining -= len(invocation.Output)
+				if key != "" {
+					cache[key] = invocation
+				}
+			}
+		}
+		return invocation
+	}
+
+	if len(request.InitialToolCalls) > 0 {
+		calls := normalizeToolCallIDs(request.InitialToolCalls, -1)
+		messages = append(messages, llm.ChatMessage{Role: "assistant", ToolCalls: calls})
+		for _, call := range calls {
+			invocation := execute(call)
+			result.ToolCalls = append(result.ToolCalls, invocation)
+			if a.options.OnToolCall != nil {
+				if err := a.options.OnToolCall(ctx, invocation); err != nil {
+					return result, fmt.Errorf("record initial tool call: %w", err)
+				}
+			}
+			messages = append(messages, llm.ChatMessage{Role: "tool", Content: toolResultContent(invocation), Name: call.Name, ToolCallID: call.ID})
+		}
+	}
+
 	for step := 0; step < maxSteps; step++ {
-		response, err := a.provider.ChatWithTools(ctx, llm.ChatRequest{
+		response, err := a.chat(ctx, llm.ChatRequest{
 			Messages: messages,
 			Tools:    tools,
 		})
@@ -121,7 +193,7 @@ func (a *Agent) Run(ctx context.Context, request Request) (Result, error) {
 				return result, fmt.Errorf("agent provider step %d returned empty content and no tool calls", step+1)
 			}
 			result.Content = response.Content
-			return result, nil
+			return a.validateFinal(ctx, messages, result)
 		}
 
 		assistantMessage := llm.ChatMessage{
@@ -132,7 +204,7 @@ func (a *Agent) Run(ctx context.Context, request Request) (Result, error) {
 		messages = append(messages, assistantMessage)
 
 		for _, call := range assistantMessage.ToolCalls {
-			invocation := a.executeTool(ctx, call, toolTimeout)
+			invocation := execute(call)
 			result.ToolCalls = append(result.ToolCalls, invocation)
 			if a.options.OnToolCall != nil {
 				if err := a.options.OnToolCall(ctx, invocation); err != nil {
@@ -153,7 +225,7 @@ func (a *Agent) Run(ctx context.Context, request Request) (Result, error) {
 		Content: "The tool-calling budget is exhausted. Do not request more tools. " +
 			"Return the final JSON answer now using the information already collected.",
 	})
-	response, err := a.provider.ChatWithTools(ctx, llm.ChatRequest{Messages: messages})
+	response, err := a.chat(ctx, llm.ChatRequest{Messages: messages})
 	if err != nil {
 		return result, fmt.Errorf("agent final provider call: %w", err)
 	}
@@ -168,8 +240,11 @@ func (a *Agent) Run(ctx context.Context, request Request) (Result, error) {
 	if response.Content == "" {
 		return result, fmt.Errorf("agent final provider call returned empty content")
 	}
+	if len(response.ToolCalls) != 0 {
+		return result, fmt.Errorf("agent final provider call requested tools")
+	}
 	result.Content = response.Content
-	return result, nil
+	return a.validateFinal(ctx, messages, result)
 }
 
 func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, timeout time.Duration) ToolInvocation {
@@ -210,4 +285,48 @@ func toolResultContent(invocation ToolInvocation) string {
 		return "Tool returned an empty result."
 	}
 	return invocation.Output
+}
+
+// Retry final validation once, with the collected evidence retained.
+func (a *Agent) validateFinal(ctx context.Context, messages []llm.ChatMessage, result Result) (Result, error) {
+	if a.options.ValidateResponse == nil {
+		return result, nil
+	}
+	validationErr := a.options.ValidateResponse(result.Content)
+	if validationErr == nil {
+		return result, nil
+	}
+	messages = append(messages, llm.ChatMessage{Role: "assistant", Content: result.Content}, llm.ChatMessage{
+		Role: "user", Content: "Your final response failed validation: " + validationErr.Error() +
+			". Re-emit exactly one valid JSON object matching the required schema, with summary and findings array (use [] for no findings). No introductory explanation, Markdown, or tool calls. Fix JSON escaping. Preserve supported review conclusions, correct finding locations when requested by validation, and quote only evidence already retrieved. Omit unsupported findings and update the summary accordingly; do not invent new findings or tool results.",
+	})
+	response, err := a.chat(ctx, llm.ChatRequest{Messages: messages})
+	result.ProviderCalls++
+	result.Usage.InputTokens += response.Usage.InputTokens
+	result.Usage.OutputTokens += response.Usage.OutputTokens
+	result.Usage.TotalTokens += response.Usage.TotalTokens
+	result.DurationMS += response.DurationMS
+	if err != nil {
+		return result, fmt.Errorf("repair final response after %v: %w", validationErr, err)
+	}
+	result.Content = response.Content
+	if len(response.ToolCalls) != 0 {
+		return result, fmt.Errorf("final response repair requested tools")
+	}
+	if err := a.options.ValidateResponse(result.Content); err != nil {
+		return result, fmt.Errorf("final response invalid after one repair: %w", err)
+	}
+	return result, nil
+}
+
+// Apply the same guard to normal, forced-final and JSON-repair requests.
+func (a *Agent) chat(ctx context.Context, request llm.ChatRequest) (llm.ChatResponse, error) {
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		return llm.ChatResponse{}, fmt.Errorf("encode agent context: %w", err)
+	}
+	if len(encoded) > a.options.MaxContextBytes {
+		return llm.ChatResponse{}, fmt.Errorf("agent context budget exceeded: %d > %d bytes; reduce review scope", len(encoded), a.options.MaxContextBytes)
+	}
+	return a.provider.ChatWithTools(ctx, request)
 }

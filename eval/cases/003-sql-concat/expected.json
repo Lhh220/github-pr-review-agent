@@ -1,0 +1,18 @@
+{
+  "findings": [
+    {
+      "category": "security",
+      "file": "internal/store/users.go",
+      "line": 6,
+      "severity": "high",
+      "confidence": "confirmed"
+    },
+    {
+      "category": "bug",
+      "file": "internal/store/users.go",
+      "line": 8,
+      "severity": "high",
+      "confidence": "confirmed"
+    }
+  ]
+}

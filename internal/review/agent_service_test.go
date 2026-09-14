@@ -12,6 +12,33 @@ import (
 	"github.com/liaohonghui/github-pr-review-agent/internal/store"
 )
 
+func TestInvalidOutputDoesNotPublishOrPersistReview(t *testing.T) {
+	for _, content := range []string{"not JSON", `{"summary":"fine"}`, `{"summary":"fine","findings":null}`, `{"summary":"","findings":[]}`, `{"summary":"fine","findings":{}}`} {
+		t.Run(content, func(t *testing.T) {
+			pr := &github.PullRequest{Head: github.Ref{SHA: "head"}}
+			files := []github.PullRequestFile{{Filename: "a.go", Patch: "@@ -1 +1 @@\n+x"}}
+			legacyGH := &fakeGitHubClient{pr: pr, files: files}
+			legacyStore := &fakeResultStore{}
+			legacy := New(legacyGH, &fakeLLMClient{response: llm.ReviewResponse{Content: content}}, legacyStore, 100, 0, 100)
+			if err := legacy.ReviewPR(context.Background(), "o", "r", 1, 1); err == nil {
+				t.Fatal("legacy accepted invalid output")
+			}
+			if legacyGH.reviewBody != "" || legacyStore.input.TaskID != 0 {
+				t.Fatal("legacy published or persisted invalid review")
+			}
+			agentGH := &fakeAgentGitHubClient{pr: pr, files: files}
+			agentStore := &fakeAgentStore{}
+			service := NewAgent(agentGH, &scriptedAgentProvider{responses: []llm.ChatResponse{{Content: content}}}, agentStore, AgentOptions{})
+			if err := service.ReviewPR(context.Background(), "o", "r", 1, 1); err == nil {
+				t.Fatal("agent accepted invalid output")
+			}
+			if agentGH.reviewBody != "" || agentStore.result.TaskID != 0 {
+				t.Fatal("agent published or persisted invalid review")
+			}
+		})
+	}
+}
+
 type fakeAgentGitHubClient struct {
 	pr          *github.PullRequest
 	files       []github.PullRequestFile
@@ -65,6 +92,7 @@ func (p *scriptedAgentProvider) ChatWithTools(ctx context.Context, request llm.C
 }
 
 type fakeAgentStore struct {
+	delivery  *store.ReviewDelivery
 	result    store.NewReviewResult
 	toolCalls []store.NewToolCallLog
 }
@@ -133,20 +161,21 @@ func TestAgentReviewPRRunsToolsAndPersistsTrace(t *testing.T) {
 	if len(provider.requests) != 3 || len(provider.requests[0].Tools) != 6 {
 		t.Fatalf("unexpected provider requests: count=%d first_tools=%d", len(provider.requests), len(provider.requests[0].Tools))
 	}
-	if provider.requests[1].Messages[3].Role != "tool" ||
-		!strings.Contains(provider.requests[1].Messages[3].Content, "internal/auth/auth.go") {
+	if provider.requests[1].Messages[5].Role != "tool" ||
+		!strings.Contains(provider.requests[1].Messages[5].Content, "internal/auth/auth.go") {
 		t.Fatalf("unexpected changed-files result: %+v", provider.requests[1].Messages)
 	}
-	if provider.requests[2].Messages[5].Role != "tool" ||
-		!strings.Contains(provider.requests[2].Messages[5].Content, "ValidateToken") {
+	if provider.requests[2].Messages[7].Role != "tool" ||
+		!strings.Contains(provider.requests[2].Messages[7].Content, "ValidateToken") {
 		t.Fatalf("unexpected file-context result: %+v", provider.requests[2].Messages)
 	}
 	if gh.contentPath != "internal/auth/auth.go" || gh.contentRef != "291ac5aedc5fd96c5030a6c18e91923140677591" {
 		t.Fatalf("unexpected file context request: path=%s ref=%s", gh.contentPath, gh.contentRef)
 	}
-	if len(resultStore.toolCalls) != 2 ||
-		resultStore.toolCalls[0].ToolName != "list_changed_files" ||
-		resultStore.toolCalls[1].ToolName != "read_file_context" {
+	if len(resultStore.toolCalls) != 3 ||
+		resultStore.toolCalls[0].Input != `{"path":"go.mod","start_line":1,"end_line":80}` ||
+		resultStore.toolCalls[1].ToolName != "list_changed_files" ||
+		resultStore.toolCalls[2].ToolName != "read_file_context" {
 		t.Fatalf("unexpected tool call log: %+v", resultStore.toolCalls)
 	}
 	if resultStore.result.Summary != "No blocking issues." ||

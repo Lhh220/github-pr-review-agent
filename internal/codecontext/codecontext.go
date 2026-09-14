@@ -318,7 +318,10 @@ func firstTargetInRange(symbol Symbol, targetLines []int) int {
 
 func fallbackContent(lines []string, targetLines []int, maxLines int) string {
 	start := targetLines[0]
-	end := targetLines[len(targetLines)-1]
+	if start > len(lines) {
+		return ""
+	}
+	end := min(targetLines[len(targetLines)-1], len(lines))
 	truncated := false
 	if end-start+1 > maxLines {
 		end = start + maxLines - 1

@@ -1,0 +1,26 @@
+[
+  {
+    "tool_calls": [
+      {
+        "arguments": "{\"path\":\"review.go\",\"start_line\":1,\"end_line\":100}",
+        "id": "read-implementation",
+        "name": "read_file_context"
+      }
+    ],
+    "model": "fixture"
+  },
+  {
+    "tool_calls": [
+      {
+        "arguments": "{\"path\":\"review_test.go\",\"start_line\":1,\"end_line\":100}",
+        "id": "read-tests",
+        "name": "read_file_context"
+      }
+    ],
+    "model": "fixture"
+  },
+  {
+    "content": "{\"summary\":\"The implementation and tests agree on the contract; no actionable defect found.\",\"findings\":[]}",
+    "model": "fixture"
+  }
+]

@@ -195,7 +195,7 @@ Day 2 的 GitHub Toolkit 绑定当前任务的 owner / repo / PR number，模型
 3. 根仓库没有 `go.mod` 时返回 `supported=false`，不执行命令。
 4. 模型只能选择 `go_test` 或 `go_vet`；实际命令固定为 `go test ./...` / `go vet ./...`，不能传任意 shell。
 5. 子进程使用独立的最小 Go 环境，只包含固定 `PATH`、`HOME`、Go cache / module cache / tmp 目录、`GOTOOLCHAIN=local`、`GOPROXY` 等白名单变量，不继承 GitHub App 私钥、LLM Key 或数据库密码。
-6. 每次工具调用有总超时，单个命令输出最多 16KB，工具总输出继续受 40KB JSON 上限约束；临时仓库执行完删除。
+6. 每条静态检查命令都有独立超时，整个工具调用继续受 Agent Tool Timeout 限制；单个命令输出最多 16KB，工具总输出继续受 40KB JSON 上限约束；临时仓库执行完删除。
 7. `GOPROXY` 默认 `off`，禁止静态检查阶段下载新依赖；显式配置代理时表示接受该网络访问。
 
 它目前是“受限本地静态检查模式”，不是强隔离沙箱：测试代码会被真实执行，也可能访问网络。个人项目和可信仓库演示可用；公开多租户场景应升级为独立容器、专用 runner 或 Firecracker / gVisor，并进一步禁网、限制 CPU / 内存。
@@ -209,7 +209,7 @@ Day 2 的 GitHub Toolkit 绑定当前任务的 owner / repo / PR number，模型
 
 后续增强：
 
-- 评测集和误报率统计。
+- 扩充真实 MR 中出现过的误报和漏报样本。
 
 目标示例：
 
@@ -255,7 +255,7 @@ go test ./... 输出编译失败。
 当前实现：
 
 - DeepSeek 被要求只返回上述 JSON。
-- `review.Service` 解析 JSON，过滤没有文件、行号或 evidence 的 finding，并把非法 confidence 归一化为 `needs_verification`。
+- `review.Service` 解析 JSON，过滤没有文件、行号或 evidence 的 finding；引用证据必须匹配同一文件的指定行和整行内容，静态检查证据必须来自对应命令输出。非法 confidence 会归一化为 `needs_verification`。
 - 无 diff 和纯文档 PR 直接返回空 findings，不调用 LLM。
 - 解析结果先写入 `review_result`，再回写 PR Review。
 - `payload_json` 保存 findings，`raw_response` 保存模型原文。
@@ -394,16 +394,66 @@ type Provider interface {
 
 ## 8. 评测
 
-- 构造一批 PR 样本，人工标注应有问题。
-- 指标：
-  - 准确率：提出的审查意见中正确比例。
-  - 误报率：无问题却报问题的比例。
-  - 覆盖率：人工标注问题中被命中的比例。
-- 评测集随项目迭代，持续优化提示词和工具链。
+Day 7 实现了离线优先的评测框架。每个样本包含三部分：
+
+- `fixture/case.json`：模拟 PR 标题、描述、head SHA、diff、变更文件内容和仓库快照。
+- `fixture/script.json`：离线模式下的 provider 响应脚本，包括工具调用请求、token 用量和模型耗时。
+- `expected.json`：人工标注的问题类别、文件、行号、严重级别和期望 confidence。
+
+离线模式会把这些 fixture 接到真实的 `AgentService`、Agent Loop 和 GitHub 工具上：GitHub API 被 fixture 替代，工具真实执行，模型响应由脚本替代。因此它可以验证工具输入、工具输出、evidence 校验、confidence 降级、docs-only 跳过和指标统计，同时保持确定性和零 API 成本。
+
+匹配规则按文件、行号邻近度（默认 3 行内）和类别做贪心匹配；类别错误记为误报，未被正确类别命中的标注记为漏报。`category_accuracy` 记录可匹配位置的预测中类别正确的比例。`confirmed_precision` 的分子还要求人工标注的 confidence 为 confirmed；把 needs_verification 报成 confirmed 会记入 `overconfirmed_findings`。这仍是位置与类别匹配的近似指标，无法证明 comment 的语义正确；live 验收必须人工检查报告中的完整 `case_results[].findings`。
+
+当前指标：
+
+- `precision`：报出问题中命中人工标注的比例。
+- `recall`：人工标注问题中被命中的比例。
+- `false_positive_rate`：实际执行审查的无问题样本中出现任意乱报的比例；排除 docs-only 跳过与运行失败，分母见 `negative_cases`。
+- `category_accuracy`：可匹配位置的预测中类别正确的比例。
+- `confirmed_precision`：confirmed finding 中命中位置、类别且标注也为 confirmed 的比例。
+- `failed_cases / scored_cases / planned_cases`：运行失败数、成功执行数、计划执行数；失败不当作漏报或正确的空结果。
+- `overconfirmed_findings`：位置与类别命中，但把 needs_verification 标注过度确认为 confirmed 的数量。
+- `avg_input_tokens / avg_output_tokens / avg_total_tokens`：平均 token 成本。
+- `avg_latency_ms`：平均耗时。
+- `case_results[].tools`：每个 case 的工具调用轨迹。
+
+运行方式：
+
+```powershell
+go run ./cmd/eval
+$env:DEEPSEEK_API_KEY="..."
+go run ./cmd/eval -live -runs 3 -timeout 30m -report eval/report-live.json
+```
+
+离线报告输出到 `eval/report.json`，适合提交为回归基线；live 模式复用 fixture GitHub 客户端，只调用真实模型，不回写 GitHub 评论。live 支持 `-runs` 重复执行并记录轮次，用于观察模型输出波动。评测集随项目迭代，优先补充真实 MR 中出现过的误报和漏报样本。
+
+每个 case 完成或失败后立即保存报告；单个错误记录在 `case_results[].error` 后继续后续样本，总超时后停止。存在失败或未完成样本时 CLI 返回非零状态。`mode` 区分 offline/live，live 报告记录配置的 `model`。平均 token 与延迟仅统计成功执行，失败调用的费用不包含在内。9 个样本中有 4 个正常代码负样本（已初始化 map、参数化 SQL、diff 格式契约、审查输出策略），会经过模型和工具链；文档样本只验证跳过逻辑。
 
 ## 9. 后续可选扩展
+
+### 发布一致性
+
+发布状态拆为：`review_delivery` 保存首次分析的 commit 和随机标识，`review_result` 保存不可覆盖的模型结果，非零 `github_review_id` 表示已确认远端 review。两种审查模式及跳过路径复用同一套恢复流程。提交前保存结果；收到错误或重启后先查已保存结果，再分页核对 GitHub 的已提交 review，匹配标识和 commit 后仅确认本地状态。查询不完整时拒绝发布。确认 Review ID、更新 done、写入状态审计在同一 MySQL 事务执行，重复确认同一 ID 无副作用，不同 ID 被拒绝。
+
+参考 [GitHub Review API](https://docs.github.com/en/rest/pulls/reviews)：POST 显式传入 commit_id，GET 列表用于失败后对账。PR 级 Redis 锁串行化正常执行，但 GitHub 没有参与数据库事务；远端可见性延迟、失锁或外部修改等情况仍限制 exactly-once 保证。已有结果只恢复原版本发布；生成前和保存前比对 head，不能将检查结果归到重试时的新 head。旧版任务缺少可靠的发布快照时停止自动补发并要求人工核对。
+
+审查质量回归：Task 26 的误报被整理为 `008-diff-section-contract` 和 `009-review-output-policy` 两个精简样本，保留相关实现与测试。两种模式共用 `ReviewQualityRules`：报错前核对实现、调用方、测试和契约，陈述具体触发条件与影响；needs_verification 不用于包装无依据的猜测。超时、OOM、依赖下载或工具链问题在 summary 中说明验证限制，不能据此断定 PR 有缺陷或声称未观察到的测试通过。
+
+离线脚本只验证这些样本能经过真实工具链并产生预期报告，不能证明提示词降低了模型误报。需要使用 live 模式对这两个样本做人工复核，并确认原有正样本仍能检出，避免通过过度压制 finding 降低召回率。
 
 - 支持 GitLab / Gitea。
 - 支持增量审查：只审查相对上次审查的新 commit。
 - 支持 MCP 协议工具层，和金山实习的 MCP 工具形成对比。
 - 接入向量库，检索相似历史 PR。
+
+
+### 过期任务与审查资源预算
+
+- 尚未保存审查结果的任务，如果 webhook commit 与当前 PR head 不一致，返回可识别的 `ErrTaskSuperseded`。Worker 将其写为 `superseded` 并确认消息，不增加重试次数、不投递死信；状态写入失败仍走基础设施恢复。首次执行也使用 webhook 快照，防止排队期间发生 push 后错审新 commit。
+- 已保存结果继续按原 commit 和 marker 对账，保持已有发布恢复语义；不能因为 PR 有新提交就跳过已发评论的回执恢复。历史 dead_letter 不自动改写。`superseded` 可在后台筛选，状态分布单独展示，不计入成功率的 done/failed/dead_letter 分母。
+- 静态检查子进程固定 `GOFLAGS=-mod=mod -p=1` 和 `GOMAXPROCS=2`，减少包级并行编译和进程内部并发。命令仍为 `go test ./...` / `go vet ./...`。这不是内存上限，单个编译器仍可能被平台终止，需要部署后验证。
+- Agent 每次 Run 缓存指定的只读工具成功输出，以工具名和规范化 JSON 参数作为键。重复请求只返回原调用 ID 引用，不重复执行、不重复注入正文；失败不缓存，静态检查不缓存，不同 Run 不共享。
+- 累计接纳工具正文默认最多 48 KiB；单次序列化 ChatRequest 默认最多 96 KiB，包含历史消息和工具定义，最终回答及 JSON 修复也检查。均为字节预算，不是精确 token 限额或整次任务计费上限。正文超限时整段拒绝并提示缩小范围，拒绝内容不加入证据；请求超限返回明确错误，不发送给模型。原有 MaxSteps 继续约束轮数。
+- Task 29 的附件记录包含 15 次工具调用，无相同参数的重复读取；128,560 total tokens 主要应关注多轮历史累积。上线后用相同规模 PR 比较 token、工具调用和遗漏率，不能仅根据缓存命中宣称质量或成本改善。
+
+验收：更新部署后触发一次新审查，确认静态检查可完整执行；连续 push 时旧未完成任务应成为 superseded，新 commit 任务正常完成。若仍出现 `signal: killed`，检查平台内存指标。保留旧评测报告，使用新报告路径重跑 live/holdout，对照失败数、precision/recall 和 token，尤其检查预算拒绝是否造成漏报。

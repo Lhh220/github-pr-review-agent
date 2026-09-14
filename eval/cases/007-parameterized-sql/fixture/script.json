@@ -1,0 +1,4 @@
+[
+  {"model":"fixture","tool_calls":[{"id":"read-sql","name":"read_file_context","arguments":"{\"path\":\"users.go\"}"}]},
+  {"model":"fixture","content":"{\"summary\":\"The query passes user input as a parameter.\",\"findings\":[]}"}
+]

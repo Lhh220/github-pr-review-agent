@@ -1,0 +1,11 @@
+{
+  "findings": [
+    {
+      "category": "bug",
+      "file": "sample.go",
+      "line": 4,
+      "severity": "high",
+      "confidence": "confirmed"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+[
+  {
+    "tool_calls": [
+      {
+        "id": "read",
+        "name": "read_file_context",
+        "arguments": "{\"path\":\"sample.go\"}"
+      }
+    ],
+    "model": "fixture"
+  },
+  {
+    "content": "{\"summary\": \"Review complete.\", \"findings\": [{\"category\": \"bug\", \"file\": \"sample.go\", \"line\": 4, \"severity\": \"high\", \"confidence\": \"confirmed\", \"comment\": \"count=0 causes an integer divide-by-zero panic.\", \"suggestion\": \"Guard the empty input before the operation.\", \"evidence\": [{\"type\": \"reference\", \"file\": \"sample.go\", \"line\": 4, \"text\": \"return total / count\"}]}]}",
+    "model": "fixture"
+  }
+]

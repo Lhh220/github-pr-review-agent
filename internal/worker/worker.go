@@ -252,7 +252,7 @@ func (w *Worker) process(msg queue.Message) (action queue.Action) {
 
 	now := time.Now()
 	switch {
-	case task.Status == "done", task.Status == "dead_letter", task.Status == "failed":
+	case task.Status == "done", task.Status == "dead_letter", task.Status == "failed", task.Status == "superseded":
 		return queue.Ack
 	case task.Status == "retrying" && task.NextRetryAt != nil && task.NextRetryAt.After(now):
 		return w.deferTaskUntilRetry(task, msg, task.NextRetryAt.Sub(now))
@@ -304,6 +304,13 @@ func (w *Worker) process(msg queue.Message) (action queue.Action) {
 	defer cancelReview()
 	if err := w.reviewer.ReviewPR(reviewCtx, owner, repo, task.PRNumber, taskID); err != nil {
 		log.Printf("review pr failed: owner=%s repo=%s number=%d task_id=%d error=%v", owner, repo, task.PRNumber, taskID, err)
+		if errors.Is(err, store.ErrTaskSuperseded) {
+			if markErr := w.updateStatus(taskID, "superseded", err.Error()); markErr != nil {
+				// A database failure still needs recovery; do not claim successful cancellation.
+				return w.fail(task, msg, fmt.Sprintf("persist superseded task: %v", markErr))
+			}
+			return queue.Ack
+		}
 		return w.fail(task, msg, err.Error())
 	}
 
