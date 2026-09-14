@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"unsafe"
 
 	treesitter "github.com/tree-sitter/go-tree-sitter"
@@ -77,22 +78,7 @@ func Extract(request Request) Result {
 		return result
 	}
 
-	language, supported := parserLanguage(result.Language)
-	if !supported {
-		result.Content = fallbackContent(lines, targetLines, request.MaxLines)
-		result.Truncated = strings.Contains(result.Content, "[context truncated")
-		return result
-	}
-
-	parser := treesitter.NewParser()
-	defer parser.Close()
-	if err := parser.SetLanguage(treesitter.NewLanguage(language())); err != nil {
-		result.Content = fallbackContent(lines, targetLines, request.MaxLines)
-		result.Truncated = strings.Contains(result.Content, "[context truncated")
-		return result
-	}
-
-	tree := parser.Parse([]byte(request.Content), nil)
+	tree := parseWithCachedParser(result.Language, request.Content)
 	if tree == nil {
 		result.Content = fallbackContent(lines, targetLines, request.MaxLines)
 		result.Truncated = strings.Contains(result.Content, "[context truncated")
@@ -112,6 +98,35 @@ func Extract(request Request) Result {
 	result.Symbols = symbols
 	result.Content, result.Truncated = buildSymbolContent(lines, symbols, targetLines, request.MaxLines)
 	return result
+}
+
+var (
+	// treeSitterMu guards treeSitterParsers: tree-sitter parsers keep C-level
+	// mutable state and are not safe for concurrent use, so each supported
+	// language gets exactly one parser reused behind a global lock instead of
+	// being re-allocated on every Extract call.
+	treeSitterMu      sync.Mutex
+	treeSitterParsers = map[string]*treesitter.Parser{}
+)
+
+func parseWithCachedParser(name, content string) *treesitter.Tree {
+	treeSitterMu.Lock()
+	defer treeSitterMu.Unlock()
+
+	constructor, supported := parserLanguage(name)
+	if !supported {
+		return nil
+	}
+	parser, cached := treeSitterParsers[name]
+	if !cached {
+		parser = treesitter.NewParser()
+		if err := parser.SetLanguage(treesitter.NewLanguage(constructor())); err != nil {
+			parser.Close()
+			return nil
+		}
+		treeSitterParsers[name] = parser
+	}
+	return parser.Parse([]byte(content), nil)
 }
 
 func languageForPath(path string) string {
