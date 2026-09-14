@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -64,6 +65,9 @@ type Toolkit struct {
 	cachedPR    *github.PullRequest
 	cachedFiles []github.PullRequestFile
 	filesLoaded bool
+	tarballFile *os.File
+	tarballPath string
+	tarballRef  string
 }
 
 func NewToolkit(client Client, owner, repo string, number int, options Options) *Toolkit {

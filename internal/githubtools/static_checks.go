@@ -106,14 +106,9 @@ func (t staticChecksTool) Execute(ctx context.Context, input map[string]any) (st
 	}
 	defer os.RemoveAll(repoDir)
 
-	archive, err := t.toolkit.client.GetRepositoryTarball(
-		ctx,
-		t.toolkit.owner,
-		t.toolkit.repo,
-		pr.Head.SHA,
-	)
+	archive, err := t.toolkit.cachedTarball(ctx, pr.Head.SHA)
 	if err != nil {
-		return "", fmt.Errorf("get repository tarball: %w", err)
+		return "", err
 	}
 	defer archive.Close()
 	if err := extractStaticCheckArchive(archive, repoDir); err != nil {

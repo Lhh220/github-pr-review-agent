@@ -33,6 +33,7 @@ type fakeClient struct {
 	filePaths     []string
 	refs          []string
 	tarballRef    string
+	tarballCalls  int
 }
 
 func (f *fakeClient) GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error) {
@@ -60,6 +61,7 @@ func (f *fakeClient) GetFileContent(ctx context.Context, owner, repo, path, ref 
 }
 
 func (f *fakeClient) GetRepositoryTarball(ctx context.Context, owner, repo, ref string) (io.ReadCloser, error) {
+	f.tarballCalls++
 	f.tarballRef = ref
 	if f.tarball == nil {
 		return io.NopCloser(strings.NewReader("")), nil
