@@ -1,6 +1,8 @@
 package githubtools
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -27,5 +29,28 @@ func TestStaticCheckEnvironmentBoundsCompilation(t *testing.T) {
 	}
 	if !found["GOFLAGS=-mod=mod -p=1"] || !found["GOMAXPROCS=2"] {
 		t.Fatalf("missing concurrency limits: %v", env)
+	}
+}
+
+func TestStaticDiagnosticsDoNotExposeSecrets(t *testing.T) {
+	got := staticCheckDiagnosticEnvironment([]string{"GOFLAGS=-mod=mod -p=1", "GOMAXPROCS=2", "DEEPSEEK_API_KEY=secret", "MYSQL_DSN=secret"})
+	if len(got) != 2 || got["GOFLAGS"] != "-mod=mod -p=1" {
+		t.Fatalf("unexpected environment: %v", got)
+	}
+}
+func TestMemoryDiagnosticsUnavailableAndBounded(t *testing.T) {
+	root := t.TempDir()
+	if got := readStaticCheckResources(root); len(got) != 0 {
+		t.Fatalf("missing metrics treated as available: %v", got)
+	}
+	if err := os.WriteFile(filepath.Join(root, "memory.max"), []byte("max\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "memory.events"), []byte(strings.Repeat("x", 5000)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got := readStaticCheckResources(root)
+	if got["memory.max"] != "max" || len(got["memory.events"]) != 4096 {
+		t.Fatalf("unexpected metrics: %v", got)
 	}
 }

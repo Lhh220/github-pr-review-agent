@@ -37,15 +37,17 @@ type staticCheckRunner func(
 ) (staticCheckCommandResult, error)
 
 type staticCheckCommandResult struct {
-	Name            string `json:"name"`
-	Command         string `json:"command"`
-	Success         bool   `json:"success"`
-	ExitCode        int    `json:"exit_code"`
-	TimedOut        bool   `json:"timed_out"`
-	DurationMS      int64  `json:"duration_ms"`
-	Output          string `json:"output"`
-	OutputTruncated bool   `json:"output_truncated"`
-	Error           string `json:"error,omitempty"`
+	Name            string            `json:"name"`
+	Command         string            `json:"command"`
+	Success         bool              `json:"success"`
+	ExitCode        int               `json:"exit_code"`
+	TimedOut        bool              `json:"timed_out"`
+	DurationMS      int64             `json:"duration_ms"`
+	Output          string            `json:"output"`
+	OutputTruncated bool              `json:"output_truncated"`
+	Error           string            `json:"error,omitempty"`
+	ResourcesBefore map[string]string `json:"resources_before"`
+	ResourcesAfter  map[string]string `json:"resources_after"`
 }
 
 type staticChecksTool struct {
@@ -135,8 +137,11 @@ func (t staticChecksTool) Execute(ctx context.Context, input map[string]any) (st
 		args := staticCheckCommands[check]
 		started := time.Now()
 		runCtx, cancel := context.WithTimeout(ctx, t.toolkit.staticCheckTimeout)
+		before := staticCheckResources()
 		result, runErr := t.toolkit.staticCheckRunner(runCtx, args, repoDir, env)
 		cancel()
+		result.ResourcesBefore = before
+		result.ResourcesAfter = staticCheckResources()
 		result.Name = check
 		result.Command = "go " + strings.Join(args, " ")
 		result.DurationMS = time.Since(started).Milliseconds()
@@ -150,10 +155,12 @@ func (t staticChecksTool) Execute(ctx context.Context, input map[string]any) (st
 	}
 
 	return encodeJSON(map[string]any{
-		"supported": true,
-		"ref":       pr.Head.SHA,
-		"checks":    results,
-		"timeout":   t.toolkit.staticCheckTimeout.String(),
+		"execution_environment": staticCheckDiagnosticEnvironment(env),
+		"resource_scope":        "container cgroup v2 root; counters are shared by all processes, not attributable to this command alone",
+		"supported":             true,
+		"ref":                   pr.Head.SHA,
+		"checks":                results,
+		"timeout":               t.toolkit.staticCheckTimeout.String(),
 	})
 }
 
@@ -349,3 +356,36 @@ func (b *boundedCheckOutput) Write(p []byte) (int, error) {
 	return n, nil
 }
 func (b *boundedCheckOutput) String() string { return b.data.String() }
+
+// Whitelist only execution settings, never the application's inherited environment.
+func staticCheckDiagnosticEnvironment(env []string) map[string]string {
+	result := map[string]string{}
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok && (key == "GOFLAGS" || key == "GOMAXPROCS" || key == "GOTOOLCHAIN" || key == "CGO_ENABLED") {
+			result[key] = value
+		}
+	}
+	return result
+}
+
+func staticCheckResources() map[string]string {
+	return readStaticCheckResources("/sys/fs/cgroup")
+}
+
+// Missing files mean unavailable (including non-Linux/v1), never zero usage.
+func readStaticCheckResources(root string) map[string]string {
+	result := map[string]string{}
+	for _, name := range []string{"memory.current", "memory.max", "memory.peak", "memory.events"} {
+		file, err := os.Open(filepath.Join(root, name))
+		if err != nil {
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(file, 4096))
+		file.Close()
+		if err == nil {
+			result[name] = strings.TrimSpace(string(data))
+		}
+	}
+	return result
+}

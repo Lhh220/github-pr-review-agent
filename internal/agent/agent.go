@@ -118,6 +118,9 @@ func (a *Agent) Run(ctx context.Context, request Request) (Result, error) {
 	// Cache only explicitly declared read-only tools, scoped to this Run/commit.
 	cache := map[string]ToolInvocation{}
 	remaining := a.options.MaxToolOutputBytes
+	lowBudget := min(2048, a.options.MaxToolOutputBytes/10)
+	rejectedOutputs := 0
+	exhausted := func() bool { return remaining <= lowBudget || rejectedOutputs >= 2 }
 	execute := func(call llm.ToolCall) ToolInvocation {
 		key := ""
 		for _, name := range a.options.CacheableTools {
@@ -136,7 +139,7 @@ func (a *Agent) Run(ctx context.Context, request Request) (Result, error) {
 			return ToolInvocation{ID: call.ID, Name: call.Name, Arguments: call.Arguments, Cached: true,
 				Output: "Duplicate read; reuse the complete result of earlier tool call " + previous.ID + "."}
 		}
-		if remaining <= 0 {
+		if exhausted() {
 			return ToolInvocation{ID: call.ID, Name: call.Name, Arguments: call.Arguments,
 				Error: "Tool output budget exhausted. Finish using collected evidence; explicitly disclose uninspected scope."}
 		}
@@ -144,9 +147,11 @@ func (a *Agent) Run(ctx context.Context, request Request) (Result, error) {
 		if invocation.Error == "" {
 			// Keep JSON intact. Rejected output must not enter the model or evidence corpus.
 			if len(invocation.Output) > remaining {
+				rejectedOutputs++
 				invocation.Output = ""
 				invocation.Error = fmt.Sprintf("Tool output exceeds remaining context budget (%d bytes). Request a smaller file/range, or finish and disclose uninspected scope.", remaining)
 			} else {
+				rejectedOutputs = 0
 				remaining -= len(invocation.Output)
 				if key != "" {
 					cache[key] = invocation
@@ -172,8 +177,14 @@ func (a *Agent) Run(ctx context.Context, request Request) (Result, error) {
 	}
 
 	for step := 0; step < maxSteps; step++ {
+		if exhausted() {
+			break
+		}
+		// This notice is refreshed, not accumulated in conversation history.
+		modelMessages := append([]llm.ChatMessage(nil), messages...)
+		modelMessages = append(modelMessages, llm.ChatMessage{Role: "user", Content: fmt.Sprintf("Remaining tool output budget: %d bytes; %d tool rounds remain. Prioritize changed production code and evidence for suspected defects. Use targeted file/range reads; avoid full-repository diffs, generated reports and unrelated context. Reserve budget for validating cross-file references. If coverage is incomplete, disclose it in the final summary; do not equate missing evidence with a clean review.", remaining, maxSteps-step)})
 		response, err := a.chat(ctx, llm.ChatRequest{
-			Messages: messages,
+			Messages: modelMessages,
 			Tools:    tools,
 		})
 		if err != nil {
@@ -223,7 +234,7 @@ func (a *Agent) Run(ctx context.Context, request Request) (Result, error) {
 	messages = append(messages, llm.ChatMessage{
 		Role: "user",
 		Content: "The tool-calling budget is exhausted. Do not request more tools. " +
-			"Return the final JSON answer now using the information already collected.",
+			"Return the final JSON answer now using the information already collected. Explicitly disclose uninspected scope and failed checks in the summary; do not claim complete coverage.",
 	})
 	response, err := a.chat(ctx, llm.ChatRequest{Messages: messages})
 	if err != nil {

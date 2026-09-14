@@ -127,7 +127,7 @@ func TestAgentRunsToolCallingLoop(t *testing.T) {
 	}
 
 	messages := provider.requests[1].Messages
-	if len(messages) != 4 ||
+	if len(messages) != 5 ||
 		messages[2].Role != "assistant" || messages[2].ToolCalls[0].ID != "call-1" ||
 		messages[3].Role != "tool" || messages[3].ToolCallID != "call-1" ||
 		messages[3].Content != `{"language":"Go"}` {
@@ -364,5 +364,43 @@ func TestCacheSkipsExecutionButRetriesFailures(t *testing.T) {
 	result, err := runner.Run(context.Background(), Request{SystemPrompt: "system", UserPrompt: "user"})
 	if err != nil || tool.calls != 2 || !result.ToolCalls[2].Cached {
 		t.Fatalf("err=%v calls=%d result=%+v", err, tool.calls, result)
+	}
+}
+
+func TestLowBudgetFinishesWithoutMoreReads(t *testing.T) {
+	tool := &countedEchoTool{}
+	registry, _ := NewRegistry(tool)
+	provider := &scriptedProvider{responses: []llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{{ID: "one", Name: "echo_language", Arguments: `{"language":"` + strings.Repeat("x", 80) + `"}`}, {ID: "two", Name: "echo_language", Arguments: `{"language":"Go"}`}}},
+		{Content: "partial review"},
+	}}
+	runner, _ := New(provider, registry, Options{MaxToolOutputBytes: 100})
+	result, err := runner.Run(context.Background(), Request{SystemPrompt: "system", UserPrompt: "user"})
+	if err != nil || tool.calls != 1 || result.ToolCalls[1].Error == "" {
+		t.Fatalf("err=%v calls=%d result=%+v", err, tool.calls, result)
+	}
+	last := provider.requests[len(provider.requests)-1]
+	if len(last.Tools) != 0 || !strings.Contains(last.Messages[len(last.Messages)-1].Content, "uninspected") {
+		t.Fatal("missing forced final/coverage notice")
+	}
+	if !strings.Contains(provider.requests[0].Messages[2].Content, "100 bytes") {
+		t.Fatal("missing upfront budget")
+	}
+}
+
+func TestRepeatedOversizeReadsStopWithinBatch(t *testing.T) {
+	tool := &countedEchoTool{}
+	registry, _ := NewRegistry(tool)
+	call := llm.ToolCall{Name: "echo_language", Arguments: `{"language":"` + strings.Repeat("x", 200) + `"}`}
+	provider := &scriptedProvider{responses: []llm.ChatResponse{{ToolCalls: []llm.ToolCall{call, call, call}}, {Content: "partial review"}}}
+	runner, _ := New(provider, registry, Options{MaxToolOutputBytes: 100})
+	result, err := runner.Run(context.Background(), Request{SystemPrompt: "system", UserPrompt: "user"})
+	if err != nil || tool.calls != 2 || len(result.ToolCalls) != 3 || len(provider.requests[1].Tools) != 0 {
+		t.Fatalf("err=%v calls=%d result=%+v", err, tool.calls, result)
+	}
+	for _, call := range result.ToolCalls {
+		if call.Output != "" || call.Error == "" {
+			t.Fatal("rejected output entered evidence")
+		}
 	}
 }

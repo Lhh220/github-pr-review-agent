@@ -457,3 +457,12 @@ go run ./cmd/eval -live -runs 3 -timeout 30m -report eval/report-live.json
 - Task 29 的附件记录包含 15 次工具调用，无相同参数的重复读取；128,560 total tokens 主要应关注多轮历史累积。上线后用相同规模 PR 比较 token、工具调用和遗漏率，不能仅根据缓存命中宣称质量或成本改善。
 
 验收：更新部署后触发一次新审查，确认静态检查可完整执行；连续 push 时旧未完成任务应成为 superseded，新 commit 任务正常完成。若仍出现 `signal: killed`，检查平台内存指标。保留旧评测报告，使用新报告路径重跑 live/holdout，对照失败数、precision/recall 和 token，尤其检查预算拒绝是否造成漏报。
+
+
+### 预算收尾与静态检查诊断补充
+
+Agent 在每轮请求中刷新剩余工具正文预算和剩余轮数（提示不累积），要求优先变更生产代码、疑似问题及跨文件验证，避免整仓 diff、生成报告和无关上下文。默认剩余正文不超过 2 KiB 时，或连续两次正文超限时，不再执行新的读取；同一批剩余调用仍返回配对的工具错误，随后禁用工具生成最终回答，并要求披露未检查范围。较小自定义预算使用总预算的 10% 作为收尾阈值。一次超限后仍可请求更小片段，成功接纳正文会清零连续拒绝计数。该策略限制无效读取，不保证覆盖整个大 PR；质量须用 live/holdout 验证。
+
+`run_static_checks` 输出增加 `execution_environment`（仅 GOFLAGS、GOMAXPROCS、GOTOOLCHAIN、CGO_ENABLED 白名单）和每项检查的 `resources_before` / `resources_after`。在容器 cgroup v2 根目录可读时记录 memory.current、memory.max、memory.peak、memory.events；不可读/v1/非 Linux 时缺项表示未知，不能当成零。数值单位和语义保留内核原文，max 表示该层无有限内存上限，peak 为 cgroup 历史峰值，不是该次检查的单独峰值。
+
+部署后先确认 execution_environment 中 GOFLAGS 包含 -p=1、GOMAXPROCS 为 2。若仍出现 signal: killed，对比检查前后的 memory.events 中 oom/oom_kill，并结合平台同期内存曲线和限制判断。计数属于整个 cgroup，增长只能证明该范围内出现事件，不能单独归因给本次编译；祖先 cgroup 限制和平台外部终止也可能不在这些文件中体现。不自动提升资源额度、不把 kill 推断成 PR 缺陷。
