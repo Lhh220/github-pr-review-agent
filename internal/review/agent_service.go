@@ -82,6 +82,7 @@ func (s *AgentService) ReviewPR(ctx context.Context, owner, repo string, number 
 		StaticCheckWorkDir:  s.Options.StaticCheckWorkDir,
 		StaticCheckGoProxy:  s.Options.StaticCheckGoProxy,
 	})
+	defer toolkit.Close()
 	_, err = toolkit.PullRequest(ctx)
 	if err != nil {
 		return fmt.Errorf("get pull request before agent review: %w", err)
