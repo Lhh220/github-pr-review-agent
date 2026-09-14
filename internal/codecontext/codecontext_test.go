@@ -2,6 +2,7 @@ package codecontext
 
 import (
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -162,4 +163,43 @@ func TestFallbackRangeBeyondShortFile(t *testing.T) {
 	if result.Content != "" {
 		t.Fatalf("out-of-range request should be empty: %+v", result)
 	}
+}
+
+func TestExtractReusesParserPerLanguage(t *testing.T) {
+	sources := []Request{
+		{Path: "a.go", Content: "package a\n\nfunc Alpha() {}\n", TargetLines: []int{3}, MaxLines: 10},
+		{Path: "b.go", Content: "package b\n\nfunc Beta() {}\n", TargetLines: []int{3}, MaxLines: 10},
+		{Path: "c.py", Content: "def gamma():\n    pass\n", TargetLines: []int{1}, MaxLines: 10},
+		{Path: "d.js", Content: "function delta() {}\n", TargetLines: []int{1}, MaxLines: 10},
+	}
+	for index, request := range sources {
+		if result := Extract(request); result.Strategy != "tree_sitter" {
+			t.Fatalf("source %d: strategy = %s, want tree_sitter (%+v)", index, result.Strategy, result)
+		}
+	}
+
+	treeSitterMu.Lock()
+	defer treeSitterMu.Unlock()
+	if got := len(treeSitterParsers); got != 3 {
+		t.Fatalf("cached parsers = %d, want 3 (one per go/python/javascript)", got)
+	}
+}
+
+func TestExtractConcurrentCallsAreSafe(t *testing.T) {
+	requests := []Request{
+		{Path: "a.go", Content: "package a\n\nfunc Alpha() { Beta() }\nfunc Beta() {}\n", TargetLines: []int{3}, MaxLines: 10},
+		{Path: "b.py", Content: "class C:\n    def m(self):\n        return 1\n", TargetLines: []int{2}, MaxLines: 10},
+		{Path: "c.js", Content: "const f = () => 1;\nfunction g() { return f(); }\n", TargetLines: []int{2}, MaxLines: 10},
+	}
+	var wg sync.WaitGroup
+	for worker := 0; worker < 8; worker++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			for round := 0; round < 25; round++ {
+				Extract(requests[(worker+round)%len(requests)])
+			}
+		}(worker)
+	}
+	wg.Wait()
 }
