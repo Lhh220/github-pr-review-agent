@@ -111,6 +111,7 @@ func (s *AgentService) ReviewPR(ctx context.Context, owner, repo string, number 
 	}
 	var toolOutputs []string
 	agentRunner, err := agent.New(s.Provider, registry, agent.Options{
+		CacheableTools: []string{"get_pr_meta", "list_changed_files", "read_diff", "read_file_context", "get_commit_history", "search_references"},
 		ValidateResponse: func(content string) error {
 			return validateReviewCandidate(content, toolOutputs)
 		},
@@ -120,7 +121,7 @@ func (s *AgentService) ReviewPR(ctx context.Context, owner, repo string, number 
 			if err := s.recordToolCall(ctx, taskID, invocation); err != nil {
 				return err
 			}
-			if invocation.Error == "" {
+			if invocation.Error == "" && !invocation.Cached {
 				toolOutputs = append(toolOutputs, invocation.Output)
 			}
 			return nil

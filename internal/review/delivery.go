@@ -38,7 +38,7 @@ func resumeReview(ctx context.Context, gh ReviewPublisher, db ResultStore, owner
 		return nil, false, err
 	}
 	if delivery.CommitSHA != pr.Head.SHA {
-		return nil, false, fmt.Errorf("PR head changed since task snapshot; refusing to mix commits")
+		return nil, false, fmt.Errorf("%w: PR head changed since task snapshot; refusing to mix commits", store.ErrTaskSuperseded)
 	}
 	return pr, false, nil
 }
@@ -54,7 +54,7 @@ func finishReview(ctx context.Context, gh ReviewPublisher, db ResultStore, owner
 		return err
 	}
 	if pr.Head.SHA != delivery.CommitSHA {
-		return fmt.Errorf("PR head changed during review; result not published")
+		return fmt.Errorf("%w: PR head changed during review; result not published", store.ErrTaskSuperseded)
 	}
 	result, err := db.CreateReviewResult(ctx, input)
 	if err != nil {

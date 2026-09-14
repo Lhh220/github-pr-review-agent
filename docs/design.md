@@ -445,3 +445,15 @@ go run ./cmd/eval -live -runs 3 -timeout 30m -report eval/report-live.json
 - 支持增量审查：只审查相对上次审查的新 commit。
 - 支持 MCP 协议工具层，和金山实习的 MCP 工具形成对比。
 - 接入向量库，检索相似历史 PR。
+
+
+### 过期任务与审查资源预算
+
+- 尚未保存审查结果的任务，如果 webhook commit 与当前 PR head 不一致，返回可识别的 `ErrTaskSuperseded`。Worker 将其写为 `superseded` 并确认消息，不增加重试次数、不投递死信；状态写入失败仍走基础设施恢复。首次执行也使用 webhook 快照，防止排队期间发生 push 后错审新 commit。
+- 已保存结果继续按原 commit 和 marker 对账，保持已有发布恢复语义；不能因为 PR 有新提交就跳过已发评论的回执恢复。历史 dead_letter 不自动改写。`superseded` 可在后台筛选，状态分布单独展示，不计入成功率的 done/failed/dead_letter 分母。
+- 静态检查子进程固定 `GOFLAGS=-mod=mod -p=1` 和 `GOMAXPROCS=2`，减少包级并行编译和进程内部并发。命令仍为 `go test ./...` / `go vet ./...`。这不是内存上限，单个编译器仍可能被平台终止，需要部署后验证。
+- Agent 每次 Run 缓存指定的只读工具成功输出，以工具名和规范化 JSON 参数作为键。重复请求只返回原调用 ID 引用，不重复执行、不重复注入正文；失败不缓存，静态检查不缓存，不同 Run 不共享。
+- 累计接纳工具正文默认最多 48 KiB；单次序列化 ChatRequest 默认最多 96 KiB，包含历史消息和工具定义，最终回答及 JSON 修复也检查。均为字节预算，不是精确 token 限额或整次任务计费上限。正文超限时整段拒绝并提示缩小范围，拒绝内容不加入证据；请求超限返回明确错误，不发送给模型。原有 MaxSteps 继续约束轮数。
+- Task 29 的附件记录包含 15 次工具调用，无相同参数的重复读取；128,560 total tokens 主要应关注多轮历史累积。上线后用相同规模 PR 比较 token、工具调用和遗漏率，不能仅根据缓存命中宣称质量或成本改善。
+
+验收：更新部署后触发一次新审查，确认静态检查可完整执行；连续 push 时旧未完成任务应成为 superseded，新 commit 任务正常完成。若仍出现 `signal: killed`，检查平台内存指标。保留旧评测报告，使用新报告路径重跑 live/holdout，对照失败数、precision/recall 和 token，尤其检查预算拒绝是否造成漏报。

@@ -16,6 +16,8 @@ type ReviewDelivery struct {
 	GitHubReviewID uint64 `json:"github_review_id"`
 }
 
+var ErrTaskSuperseded = errors.New("review task superseded by a newer PR head")
+
 var ErrReviewDeliveryNotFound = errors.New("review delivery not found")
 
 func (s *Store) GetReviewDelivery(ctx context.Context, taskID uint64) (*ReviewDelivery, error) {
@@ -35,11 +37,19 @@ func (s *Store) PrepareReviewDelivery(ctx context.Context, taskID uint64, commit
 	if taskID == 0 || commitSHA == "" {
 		return nil, errors.New("task and commit are required for review delivery")
 	}
+	// Preserve the webhook snapshot even if this task first runs after another push.
+	task, err := s.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if task.CommitSHA != "" {
+		commitSHA = task.CommitSHA
+	}
 	var token [16]byte
 	if _, err := rand.Read(token[:]); err != nil {
 		return nil, err
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO review_delivery (task_id, commit_sha, marker) VALUES (?, ?, ?)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO review_delivery (task_id, commit_sha, marker) VALUES (?, ?, ?)
 ON DUPLICATE KEY UPDATE task_id = task_id`, taskID, commitSHA, hex.EncodeToString(token[:]))
 	if err != nil {
 		return nil, fmt.Errorf("prepare review delivery: %w", err)

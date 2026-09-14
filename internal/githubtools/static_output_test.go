@@ -18,3 +18,14 @@ func TestCheckOutputBoundsMemoryWithoutShortWrite(t *testing.T) {
 		t.Fatal("unbounded output or missing truncation flag")
 	}
 }
+
+func TestStaticCheckEnvironmentBoundsCompilation(t *testing.T) {
+	env := staticCheckEnvironment(t.TempDir(), "https://proxy.golang.org")
+	found := map[string]bool{}
+	for _, v := range env {
+		found[v] = true
+	}
+	if !found["GOFLAGS=-mod=mod -p=1"] || !found["GOMAXPROCS=2"] {
+		t.Fatalf("missing concurrency limits: %v", env)
+	}
+}

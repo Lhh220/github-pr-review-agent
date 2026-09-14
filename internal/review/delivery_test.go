@@ -149,10 +149,10 @@ func TestDeliveryRefusesLegacyResultsAndChangedSnapshot(t *testing.T) {
 	}
 	s.result = store.NewReviewResult{}
 	s.delivery = &store.ReviewDelivery{TaskID: 1, CommitSHA: "old-head", Marker: "marker"}
-	if _, _, err := resumeReview(ctx, g, s, "o", "r", 1, 1); err == nil {
+	if _, _, err := resumeReview(ctx, g, s, "o", "r", 1, 1); !errors.Is(err, store.ErrTaskSuperseded) {
 		t.Fatal("snapshot changed on retry")
 	}
-	if err := finishReview(ctx, g, s, "o", "r", 1, store.NewReviewResult{TaskID: 1}); err == nil {
+	if err := finishReview(ctx, g, s, "o", "r", 1, store.NewReviewResult{TaskID: 1}); !errors.Is(err, store.ErrTaskSuperseded) {
 		t.Fatal("head changed during analysis")
 	}
 	if g.posts != 0 || s.creates != 0 {
