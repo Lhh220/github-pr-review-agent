@@ -7,6 +7,8 @@ import (
 	"os"
 )
 
+const maxTarballDownloadBytes = 32 << 20 // Compressed bytes; independent of extraction limits.
+
 // cachedTarball downloads the repository tarball for ref once and stores it in
 // a local temp file, so repeated tool calls during one review do not re-download
 // a potentially large archive. Failures are not memoized so a later call can retry.
@@ -34,7 +36,7 @@ func (t *Toolkit) cachedTarball(ctx context.Context, ref string) (*os.File, erro
 	if err != nil {
 		return nil, fmt.Errorf("create tarball cache file: %w", err)
 	}
-	written, copyErr := io.Copy(file, archive)
+	written, copyErr := io.Copy(file, io.LimitReader(archive, maxTarballDownloadBytes+1))
 	closeErr := file.Close()
 	if copyErr != nil {
 		os.Remove(file.Name())
@@ -43,6 +45,10 @@ func (t *Toolkit) cachedTarball(ctx context.Context, ref string) (*os.File, erro
 	if closeErr != nil {
 		os.Remove(file.Name())
 		return nil, fmt.Errorf("close tarball cache file: %w", closeErr)
+	}
+	if written > maxTarballDownloadBytes {
+		os.Remove(file.Name())
+		return nil, fmt.Errorf("repository tarball exceeds compressed download limit of %d bytes", maxTarballDownloadBytes)
 	}
 	if written == 0 {
 		os.Remove(file.Name())

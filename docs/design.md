@@ -466,3 +466,10 @@ Agent 在每轮请求中刷新剩余工具正文预算和剩余轮数（提示�
 `run_static_checks` 输出增加 `execution_environment`（仅 GOFLAGS、GOMAXPROCS、GOTOOLCHAIN、CGO_ENABLED 白名单）和每项检查的 `resources_before` / `resources_after`。在容器 cgroup v2 根目录可读时记录 memory.current、memory.max、memory.peak、memory.events；不可读/v1/非 Linux 时缺项表示未知，不能当成零。数值单位和语义保留内核原文，max 表示该层无有限内存上限，peak 为 cgroup 历史峰值，不是该次检查的单独峰值。
 
 部署后先确认 execution_environment 中 GOFLAGS 包含 -p=1、GOMAXPROCS 为 2。若仍出现 signal: killed，对比检查前后的 memory.events 中 oom/oom_kill，并结合平台同期内存曲线和限制判断。计数属于整个 cgroup，增长只能证明该范围内出现事件，不能单独归因给本次编译；祖先 cgroup 限制和平台外部终止也可能不在这些文件中体现。不自动提升资源额度、不把 kill 推断成 PR 缺陷。
+
+
+### 下载与文件上下文边界
+
+仓库 tarball 缓存限制压缩下载大小为 32 MiB（额外读取最多 1 字节以判断超限），独立于解压/搜索大小限制。超限会关闭流、删除临时文件且不缓存失败；合法缓存仍按 SHA 复用。该限制是每份压缩包的上限，不是所有任务的总磁盘配额，大仓库可能明确失败。
+
+legacy 文件上下文按输入顺序分批拉取，每批不超过 4 个，也不超过剩余成功名额。失败和空内容不占 MaxFileContexts 名额，继续补取后续可读文件；达到成功上限或 context 取消后不再启动新批次。并发回归采用同步屏障验证，避免以短耗时阈值造成 CI 偶发失败。

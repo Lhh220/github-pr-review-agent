@@ -513,50 +513,45 @@ func (s *Service) fetchFileContents(ctx context.Context, owner, repo, ref string
 	if s.MaxFileContexts <= 0 {
 		return contents
 	}
-	selected := make([]github.PullRequestFile, 0, s.MaxFileContexts)
-	for _, file := range files {
-		if len(selected) >= s.MaxFileContexts {
-			break
+
+	// Fetch small ordered batches; failures do not consume successful-context slots.
+	for next := 0; next < len(files) && len(contents) < s.MaxFileContexts && ctx.Err() == nil; {
+		size := min(fileFetchConcurrency, s.MaxFileContexts-len(contents))
+		selected := make([]github.PullRequestFile, 0, size)
+		for next < len(files) && len(selected) < size {
+			file := files[next]
+			next++
+			if hasReadableExtension(file.Filename) {
+				selected = append(selected, file)
+			}
 		}
-		if hasReadableExtension(file.Filename) {
-			selected = append(selected, file)
+		fetched := make([]github.FileContent, len(selected))
+		var wg sync.WaitGroup
+		for index, file := range selected {
+			wg.Add(1)
+			go func(index int, filename string) {
+				defer wg.Done()
+				if ctx.Err() != nil {
+					return
+				}
+				content, err := s.GitHub.GetFileContent(ctx, owner, repo, filename, ref)
+				if err != nil {
+					log.Printf("read file context failed: owner=%s repo=%s file=%s error=%v", owner, repo, filename, err)
+					return
+				}
+				if strings.TrimSpace(content) != "" {
+					fetched[index] = github.FileContent{Path: filename, Content: content}
+				}
+			}(index, file.Filename)
 		}
-	}
-	if len(selected) == 0 {
-		return contents
+		wg.Wait()
+		for _, content := range fetched {
+			if content.Path != "" {
+				contents = append(contents, content)
+			}
+		}
 	}
 
-	fetched := make([]github.FileContent, len(selected))
-	var wg sync.WaitGroup
-	semaphore := make(chan struct{}, fileFetchConcurrency)
-	for index, file := range selected {
-		wg.Add(1)
-		go func(index int, filename string) {
-			defer wg.Done()
-			select {
-			case semaphore <- struct{}{}:
-				defer func() { <-semaphore }()
-			case <-ctx.Done():
-				return
-			}
-			content, err := s.GitHub.GetFileContent(ctx, owner, repo, filename, ref)
-			if err != nil {
-				log.Printf("read file context failed: owner=%s repo=%s file=%s error=%v", owner, repo, filename, err)
-				return
-			}
-			if strings.TrimSpace(content) == "" {
-				return
-			}
-			fetched[index] = github.FileContent{Path: filename, Content: content}
-		}(index, file.Filename)
-	}
-	wg.Wait()
-
-	for _, content := range fetched {
-		if content.Path != "" {
-			contents = append(contents, content)
-		}
-	}
 	return contents
 }
 

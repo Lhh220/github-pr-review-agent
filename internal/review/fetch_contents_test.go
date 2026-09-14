@@ -18,7 +18,8 @@ type fakeContentClient struct {
 	calls    atomic.Int32
 	inFlight atomic.Int32
 	maxSeen  atomic.Int32
-	delay    time.Duration
+	started  chan struct{}
+	release  chan struct{}
 }
 
 func (f *fakeContentClient) GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error) {
@@ -49,8 +50,13 @@ func (f *fakeContentClient) GetFileContent(ctx context.Context, owner, repo, pat
 			break
 		}
 	}
-	if f.delay > 0 {
-		time.Sleep(f.delay)
+	if f.started != nil {
+		f.started <- struct{}{}
+		select {
+		case <-f.release:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	}
 	f.inFlight.Add(-1)
 	f.calls.Add(1)
@@ -76,13 +82,29 @@ func TestFetchFileContentsRunsConcurrently(t *testing.T) {
 		contents: map[string]string{
 			"a.go": "package a", "b.go": "package b", "c.go": "package c", "d.go": "package d",
 		},
-		delay: 30 * time.Millisecond,
+		started: make(chan struct{}, 8),
+		release: make(chan struct{}),
 	}
 	service := New(client, nil, nil, 0, 10, 20)
 
-	started := time.Now()
-	got := service.fetchFileContents(context.Background(), "owner", "repo", "ref", contentsFor(paths...))
-	elapsed := time.Since(started)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan []github.FileContent, 1)
+	go func() { done <- service.fetchFileContents(ctx, "owner", "repo", "ref", contentsFor(paths...)) }()
+	for i := 0; i < 4; i++ {
+		select {
+		case <-client.started:
+		case <-ctx.Done():
+			t.Fatal("four reads did not reach barrier")
+		}
+	}
+	close(client.release)
+	var got []github.FileContent
+	select {
+	case got = <-done:
+	case <-ctx.Done():
+		t.Fatal("reads did not finish")
+	}
 
 	if len(got) != 4 {
 		t.Fatalf("fetched %d files, want 4", len(got))
@@ -95,9 +117,10 @@ func TestFetchFileContentsRunsConcurrently(t *testing.T) {
 	if client.maxSeen.Load() < 2 {
 		t.Fatalf("max concurrent fetches = %d, want >= 2 (fetches are still serial)", client.maxSeen.Load())
 	}
-	if elapsed >= 4*30*time.Millisecond {
-		t.Fatalf("fetch took %v, want parallel wall time below the serial sum %v", elapsed, 4*30*time.Millisecond)
+	if client.maxSeen.Load() > 4 {
+		t.Fatal("exceeded concurrency limit")
 	}
+
 }
 
 func TestFetchFileContentsSkipsFailuresAndKeepsOrder(t *testing.T) {
@@ -148,5 +171,20 @@ func TestFetchFileContentsZeroCapFetchesNothing(t *testing.T) {
 	}
 	if got := client.calls.Load(); got != 0 {
 		t.Fatalf("GetFileContent calls = %d, want 0", got)
+	}
+}
+
+func TestFetchFileContentsReplenishesFailedAndEmptyFiles(t *testing.T) {
+	c := &fakeContentClient{contents: map[string]string{"b.go": " ", "c.go": "package c", "d.go": "package d", "e.go": "package e"}, errs: map[string]error{"a.go": errors.New("removed")}}
+	s := New(c, nil, nil, 0, 2, 20)
+	got := s.fetchFileContents(context.Background(), "o", "r", "head", contentsFor("a.go", "b.go", "c.go", "d.go", "e.go"))
+	if len(got) != 2 || got[0].Path != "c.go" || got[1].Path != "d.go" || c.calls.Load() != 4 {
+		t.Fatalf("got=%+v calls=%d", got, c.calls.Load())
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.fetchFileContents(ctx, "o", "r", "head", contentsFor("e.go"))
+	if c.calls.Load() != 4 {
+		t.Fatal("read after cancellation")
 	}
 }
