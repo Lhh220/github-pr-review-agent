@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/liaohonghui/github-pr-review-agent/internal/github"
 	"github.com/liaohonghui/github-pr-review-agent/internal/llm"
@@ -500,27 +501,61 @@ func shortCommitSHA(commitSHA string) string {
 	return commitSHA
 }
 
+// fileFetchConcurrency bounds parallel GitHub contents API calls so a large
+// PR does not burst the API or the shared GitHub rate limiter.
+const fileFetchConcurrency = 4
+
+// fetchFileContents fetches up to MaxFileContexts readable files concurrently.
+// Failures and empty files are skipped individually, and result order follows
+// the input file order so the assembled prompt stays deterministic.
 func (s *Service) fetchFileContents(ctx context.Context, owner, repo, ref string, files []github.PullRequestFile) []github.FileContent {
 	contents := make([]github.FileContent, 0)
 	if s.MaxFileContexts <= 0 {
 		return contents
 	}
+	selected := make([]github.PullRequestFile, 0, s.MaxFileContexts)
 	for _, file := range files {
-		if len(contents) >= s.MaxFileContexts {
+		if len(selected) >= s.MaxFileContexts {
 			break
 		}
-		if !hasReadableExtension(file.Filename) {
-			continue
+		if hasReadableExtension(file.Filename) {
+			selected = append(selected, file)
 		}
-		content, err := s.GitHub.GetFileContent(ctx, owner, repo, file.Filename, ref)
-		if err != nil {
-			log.Printf("read file context failed: owner=%s repo=%s file=%s error=%v", owner, repo, file.Filename, err)
-			continue
+	}
+	if len(selected) == 0 {
+		return contents
+	}
+
+	fetched := make([]github.FileContent, len(selected))
+	var wg sync.WaitGroup
+	semaphore := make(chan struct{}, fileFetchConcurrency)
+	for index, file := range selected {
+		wg.Add(1)
+		go func(index int, filename string) {
+			defer wg.Done()
+			select {
+			case semaphore <- struct{}{}:
+				defer func() { <-semaphore }()
+			case <-ctx.Done():
+				return
+			}
+			content, err := s.GitHub.GetFileContent(ctx, owner, repo, filename, ref)
+			if err != nil {
+				log.Printf("read file context failed: owner=%s repo=%s file=%s error=%v", owner, repo, filename, err)
+				return
+			}
+			if strings.TrimSpace(content) == "" {
+				return
+			}
+			fetched[index] = github.FileContent{Path: filename, Content: content}
+		}(index, file.Filename)
+	}
+	wg.Wait()
+
+	for _, content := range fetched {
+		if content.Path != "" {
+			contents = append(contents, content)
 		}
-		if strings.TrimSpace(content) == "" {
-			continue
-		}
-		contents = append(contents, github.FileContent{Path: file.Filename, Content: content})
 	}
 	return contents
 }
