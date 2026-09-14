@@ -15,6 +15,7 @@ import (
 )
 
 type GitHubClient interface {
+	ReviewPublisher
 	GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error)
 	GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, error)
 	GetFileContent(ctx context.Context, owner, repo, path, ref string) (string, error)
@@ -26,6 +27,10 @@ type LLMClient interface {
 }
 
 type ResultStore interface {
+	GetReviewResultByTaskID(context.Context, uint64) (*store.ReviewResult, error)
+	GetReviewDelivery(context.Context, uint64) (*store.ReviewDelivery, error)
+	PrepareReviewDelivery(context.Context, uint64, string) (*store.ReviewDelivery, error)
+	MarkReviewDelivered(context.Context, uint64, uint64) error
 	CreateReviewResult(ctx context.Context, input store.NewReviewResult) (*store.ReviewResult, error)
 }
 
@@ -50,9 +55,9 @@ func New(gh GitHubClient, l LLMClient, results ResultStore, maxDiffLines, maxFil
 }
 
 func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int, taskID uint64) error {
-	pr, err := s.GitHub.GetPullRequest(ctx, owner, repo, number)
-	if err != nil {
-		return fmt.Errorf("get pull request: %w", err)
+	pr, completed, err := resumeReview(ctx, s.GitHub, s.Results, owner, repo, number, taskID)
+	if err != nil || completed {
+		return err
 	}
 	files, err := s.GitHub.GetPullRequestFiles(ctx, owner, repo, number)
 	if err != nil {
@@ -65,21 +70,13 @@ func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int, 
 			summary = "This pull request only changes documentation; code review skipped."
 			rawResponse = "Documentation-only pull request; code review skipped."
 		}
-		result, err := s.Results.CreateReviewResult(ctx, store.NewReviewResult{
+		return finishReview(ctx, s.GitHub, s.Results, owner, repo, number, store.NewReviewResult{
 			TaskID:      taskID,
 			Summary:     summary,
 			Findings:    []store.Finding{},
 			RawResponse: rawResponse,
 			Model:       "none",
 		})
-		if err != nil {
-			return fmt.Errorf("create no-diff review result: %w", err)
-		}
-		comment := buildReviewComment(*result, taskID, pr.Head.SHA)
-		if err := s.GitHub.CreatePullRequestReview(ctx, owner, repo, number, comment); err != nil {
-			return fmt.Errorf("create no-diff review: %w", err)
-		}
-		return nil
 	}
 	diff := buildDiff(files, s.MaxDiffLines)
 	if strings.TrimSpace(diff) == "" {
@@ -98,7 +95,7 @@ func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int, 
 	if err != nil {
 		return err
 	}
-	result, err := s.Results.CreateReviewResult(ctx, store.NewReviewResult{
+	return finishReview(ctx, s.GitHub, s.Results, owner, repo, number, store.NewReviewResult{
 		TaskID:        taskID,
 		Summary:       parsed.Summary,
 		Findings:      parsed.Findings,
@@ -109,14 +106,6 @@ func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int, 
 		TotalTokens:   response.Usage.TotalTokens,
 		LLMDurationMS: response.DurationMS,
 	})
-	if err != nil {
-		return fmt.Errorf("create review result: %w", err)
-	}
-	comment := buildReviewComment(*result, taskID, pr.Head.SHA)
-	if err := s.GitHub.CreatePullRequestReview(ctx, owner, repo, number, comment); err != nil {
-		return fmt.Errorf("create pull request review: %w", err)
-	}
-	return nil
 }
 
 type parsedReviewResponse struct {
@@ -124,7 +113,7 @@ type parsedReviewResponse struct {
 	Findings []store.Finding `json:"findings"`
 }
 
-func parseReviewResponse(content string, evidenceCorpus ...string) (parsedReviewResponse, error) {
+func decodeReviewResponse(content string) (parsedReviewResponse, error) {
 	cleaned := extractJSONObject(content)
 	var parsed parsedReviewResponse
 	if err := json.Unmarshal([]byte(cleaned), &parsed); err != nil {
@@ -133,16 +122,56 @@ func parseReviewResponse(content string, evidenceCorpus ...string) (parsedReview
 	if strings.TrimSpace(parsed.Summary) == "" || parsed.Findings == nil {
 		return parsedReviewResponse{}, fmt.Errorf("parse review response: summary and findings array are required")
 	}
-	parsed.Findings = normalizeFindings(parsed.Findings, evidenceCorpus...)
+	return parsed, nil
+}
+
+func parseReviewResponse(content string, evidenceCorpus ...string) (parsedReviewResponse, error) {
+	parsed, err := decodeReviewResponse(content)
+	if err != nil {
+		return parsedReviewResponse{}, err
+	}
+	var rejected []RejectedFinding
+	parsed.Findings, rejected = normalizeFindingsWithDiagnostics(parsed.Findings, evidenceCorpus...)
+	if len(rejected) > 0 {
+		// The original summary may repeat rejected claims. Keep it only in RawResponse.
+		parsed.Summary = fmt.Sprintf("Review completed with %d evidence-validated finding(s). %d candidate(s) were omitted because their evidence could not be validated. This does not establish that the PR is defect-free.", len(parsed.Findings), len(rejected))
+	}
 	return parsed, nil
 }
 
 func normalizeFindings(findings []store.Finding, evidenceCorpus ...string) []store.Finding {
+	normalized, _ := normalizeFindingsWithDiagnostics(findings, evidenceCorpus...)
+	return normalized
+}
+
+type RejectedFinding struct {
+	Finding store.Finding `json:"finding"`
+	Reason  string        `json:"reason"`
+}
+
+// DiagnoseRejectedFindings uses the production evidence policy for eval reports.
+// Invalid responses are reported by parseReviewResponse, not as filtered findings.
+func DiagnoseRejectedFindings(content string, evidenceCorpus ...string) []RejectedFinding {
+	var parsed parsedReviewResponse
+	if json.Unmarshal([]byte(extractJSONObject(content)), &parsed) != nil {
+		return nil
+	}
+	_, rejected := normalizeFindingsWithDiagnostics(parsed.Findings, evidenceCorpus...)
+	return rejected
+}
+
+func normalizeFindingsWithDiagnostics(findings []store.Finding, evidenceCorpus ...string) ([]store.Finding, []RejectedFinding) {
 	normalized := make([]store.Finding, 0, len(findings))
+	var rejected []RejectedFinding
 	corpusStrings := evidenceStrings(evidenceCorpus)
 	for _, finding := range findings {
 		evidence := supportedEvidence(finding, evidenceCorpus, corpusStrings)
 		if finding.File == "" || finding.Line <= 0 || len(evidence) == 0 {
+			reason := "no evidence matched the retrieved corpus at the claimed location"
+			if finding.File == "" || finding.Line <= 0 {
+				reason = "missing file or invalid line"
+			}
+			rejected = append(rejected, RejectedFinding{Finding: finding, Reason: reason})
 			continue
 		}
 		if finding.Confidence != "confirmed" || finding.Category == "performance" {
@@ -151,7 +180,7 @@ func normalizeFindings(findings []store.Finding, evidenceCorpus ...string) []sto
 		finding.Evidence = evidence
 		normalized = append(normalized, finding)
 	}
-	return normalized
+	return normalized, rejected
 }
 
 func supportedEvidence(finding store.Finding, corpus, corpusStrings []string) []store.Evidence {
@@ -410,19 +439,14 @@ func isDocumentationFile(filename string) bool {
 
 func extractJSONObject(content string) string {
 	trimmed := strings.TrimSpace(content)
-	if strings.HasPrefix(trimmed, "```") {
-		lines := strings.Split(trimmed, "\n")
-		if len(lines) > 1 {
-			trimmed = strings.Join(lines[1:], "\n")
+	// Accept one complete Markdown envelope, never extract an arbitrary object
+	// from prose, multiple responses, or tool-call markup.
+	lines := strings.Split(trimmed, "\n")
+	if len(lines) >= 3 {
+		opening := strings.TrimSpace(lines[0])
+		if (opening == "```json" || opening == "```") && strings.TrimSpace(lines[len(lines)-1]) == "```" {
+			return strings.TrimSpace(strings.Join(lines[1:len(lines)-1], "\n"))
 		}
-		if idx := strings.LastIndex(trimmed, "```"); idx >= 0 {
-			trimmed = trimmed[:idx]
-		}
-	}
-	start := strings.Index(trimmed, "{")
-	end := strings.LastIndex(trimmed, "}")
-	if start >= 0 && end > start {
-		return trimmed[start : end+1]
 	}
 	return trimmed
 }
@@ -453,7 +477,7 @@ func buildReviewComment(result store.ReviewResult, taskID uint64, commitSHA stri
 			}
 		}
 	} else {
-		b.WriteString("\n\nNo issues found.")
+		b.WriteString("\n\nNo evidence-validated findings to publish.")
 	}
 	b.WriteString(fmt.Sprintf("\n\n---\n%s", footer))
 	return b.String()
@@ -545,4 +569,26 @@ func buildDiff(files []github.PullRequestFile, maxLines int) string {
 		lineCount += strings.Count(f.Patch, "\n") + 1
 	}
 	return b.String()
+}
+
+// A genuine quote at a different location can be corrected by the model;
+// it must never be silently moved or accepted as proof at the claimed location.
+func validateReviewCandidate(content string, corpus []string) error {
+	parsed, err := decodeReviewResponse(content)
+	if err != nil {
+		return err
+	}
+	corpusStrings := evidenceStrings(corpus)
+	for i, finding := range parsed.Findings {
+		if len(supportedEvidence(finding, corpus, corpusStrings)) > 0 {
+			continue
+		}
+		for _, evidence := range finding.Evidence {
+			if evidence.Type == "reference" && evidence.File != "" && evidence.Line > 0 &&
+				(finding.File != evidence.File || finding.Line != evidence.Line) && referenceEvidenceInCorpus(evidence, corpus) {
+				return fmt.Errorf("finding %d location does not match its verified reference evidence at %s:%d; anchor the finding to the failing usage if appropriate, or omit it; do not alter or invent the source quote", i+1, evidence.File, evidence.Line)
+			}
+		}
+	}
+	return nil
 }

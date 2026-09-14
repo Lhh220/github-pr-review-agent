@@ -29,8 +29,8 @@ func TestMySQLTaskStore(t *testing.T) {
 	if len(migrationStatuses) == 0 || !migrationStatuses[0].Applied {
 		t.Fatalf("unexpected migration status: %+v", migrationStatuses)
 	}
-	if len(migrationStatuses) != 3 || !migrationStatuses[1].Applied || !migrationStatuses[2].Applied {
-		t.Fatalf("expected migrations version 1, 2, and 3 to be applied: %+v", migrationStatuses)
+	if len(migrationStatuses) != 4 || !migrationStatuses[1].Applied || !migrationStatuses[2].Applied || !migrationStatuses[3].Applied {
+		t.Fatalf("expected migrations version 1 through 4 to be applied: %+v", migrationStatuses)
 	}
 
 	var createdPrecision, updatedPrecision int

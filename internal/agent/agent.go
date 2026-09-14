@@ -19,16 +19,18 @@ type Provider interface {
 }
 
 type Options struct {
-	MaxSteps    int
-	ToolTimeout time.Duration
-	OnToolCall  func(ctx context.Context, invocation ToolInvocation) error
+	ValidateResponse func(string) error
+	MaxSteps         int
+	ToolTimeout      time.Duration
+	OnToolCall       func(ctx context.Context, invocation ToolInvocation) error
 }
 
 type Request struct {
-	SystemPrompt string
-	UserPrompt   string
-	MaxSteps     int
-	ToolTimeout  time.Duration
+	InitialToolCalls []llm.ToolCall
+	SystemPrompt     string
+	UserPrompt       string
+	MaxSteps         int
+	ToolTimeout      time.Duration
 }
 
 type ToolInvocation struct {
@@ -99,6 +101,21 @@ func (a *Agent) Run(ctx context.Context, request Request) (Result, error) {
 	tools := a.registry.Definitions()
 
 	result := Result{ToolCalls: []ToolInvocation{}}
+	if len(request.InitialToolCalls) > 0 {
+		calls := normalizeToolCallIDs(request.InitialToolCalls, -1)
+		messages = append(messages, llm.ChatMessage{Role: "assistant", ToolCalls: calls})
+		for _, call := range calls {
+			invocation := a.executeTool(ctx, call, toolTimeout)
+			result.ToolCalls = append(result.ToolCalls, invocation)
+			if a.options.OnToolCall != nil {
+				if err := a.options.OnToolCall(ctx, invocation); err != nil {
+					return result, fmt.Errorf("record initial tool call: %w", err)
+				}
+			}
+			messages = append(messages, llm.ChatMessage{Role: "tool", Content: toolResultContent(invocation), Name: call.Name, ToolCallID: call.ID})
+		}
+	}
+
 	for step := 0; step < maxSteps; step++ {
 		response, err := a.provider.ChatWithTools(ctx, llm.ChatRequest{
 			Messages: messages,
@@ -121,7 +138,7 @@ func (a *Agent) Run(ctx context.Context, request Request) (Result, error) {
 				return result, fmt.Errorf("agent provider step %d returned empty content and no tool calls", step+1)
 			}
 			result.Content = response.Content
-			return result, nil
+			return a.validateFinal(ctx, messages, result)
 		}
 
 		assistantMessage := llm.ChatMessage{
@@ -168,8 +185,11 @@ func (a *Agent) Run(ctx context.Context, request Request) (Result, error) {
 	if response.Content == "" {
 		return result, fmt.Errorf("agent final provider call returned empty content")
 	}
+	if len(response.ToolCalls) != 0 {
+		return result, fmt.Errorf("agent final provider call requested tools")
+	}
 	result.Content = response.Content
-	return result, nil
+	return a.validateFinal(ctx, messages, result)
 }
 
 func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, timeout time.Duration) ToolInvocation {
@@ -210,4 +230,36 @@ func toolResultContent(invocation ToolInvocation) string {
 		return "Tool returned an empty result."
 	}
 	return invocation.Output
+}
+
+// Retry final validation once, with the collected evidence retained.
+func (a *Agent) validateFinal(ctx context.Context, messages []llm.ChatMessage, result Result) (Result, error) {
+	if a.options.ValidateResponse == nil {
+		return result, nil
+	}
+	validationErr := a.options.ValidateResponse(result.Content)
+	if validationErr == nil {
+		return result, nil
+	}
+	messages = append(messages, llm.ChatMessage{Role: "assistant", Content: result.Content}, llm.ChatMessage{
+		Role: "user", Content: "Your final response failed validation: " + validationErr.Error() +
+			". Re-emit exactly one valid JSON object matching the required schema, with summary and findings array (use [] for no findings). No introductory explanation, Markdown, or tool calls. Fix JSON escaping. Preserve supported review conclusions, correct finding locations when requested by validation, and quote only evidence already retrieved. Omit unsupported findings and update the summary accordingly; do not invent new findings or tool results.",
+	})
+	response, err := a.provider.ChatWithTools(ctx, llm.ChatRequest{Messages: messages})
+	result.ProviderCalls++
+	result.Usage.InputTokens += response.Usage.InputTokens
+	result.Usage.OutputTokens += response.Usage.OutputTokens
+	result.Usage.TotalTokens += response.Usage.TotalTokens
+	result.DurationMS += response.DurationMS
+	if err != nil {
+		return result, fmt.Errorf("repair final response after %v: %w", validationErr, err)
+	}
+	result.Content = response.Content
+	if len(response.ToolCalls) != 0 {
+		return result, fmt.Errorf("final response repair requested tools")
+	}
+	if err := a.options.ValidateResponse(result.Content); err != nil {
+		return result, fmt.Errorf("final response invalid after one repair: %w", err)
+	}
+	return result, nil
 }

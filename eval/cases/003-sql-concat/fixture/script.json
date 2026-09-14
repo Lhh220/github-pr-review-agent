@@ -14,7 +14,7 @@
     "model": "fixture"
   },
   {
-    "content": "{\"summary\":\"The query concatenates untrusted input.\",\"findings\":[{\"category\":\"security\",\"file\":\"internal/store/users.go\",\"line\":6,\"severity\":\"high\",\"comment\":\"The SQL query concatenates user input and is vulnerable to injection.\",\"suggestion\":\"Use a parameterized query with a placeholder.\",\"confidence\":\"confirmed\",\"evidence\":[{\"type\":\"reference\",\"file\":\"internal/store/users.go\",\"line\":6,\"text\":\"query := \\\"SELECT id FROM users WHERE name = '\\\" + name + \\\"'\\\"\"}]}]}",
+    "content": "{\"summary\": \"The query concatenates untrusted input.\", \"findings\": [{\"category\": \"security\", \"file\": \"internal/store/users.go\", \"line\": 6, \"severity\": \"high\", \"comment\": \"The SQL query concatenates user input and is vulnerable to injection.\", \"suggestion\": \"Use a parameterized query with a placeholder.\", \"confidence\": \"confirmed\", \"evidence\": [{\"type\": \"reference\", \"file\": \"internal/store/users.go\", \"line\": 6, \"text\": \"query := \\\"SELECT id FROM users WHERE name = '\\\" + name + \\\"'\\\"\"}]}, {\"category\": \"bug\", \"file\": \"internal/store/users.go\", \"line\": 8, \"severity\": \"high\", \"confidence\": \"confirmed\", \"comment\": \"When Query returns an error and nil rows, the deferred Close on nil rows panics instead of returning the error.\", \"suggestion\": \"Check err before deferring rows.Close().\", \"evidence\": [{\"type\": \"reference\", \"file\": \"internal/store/users.go\", \"line\": 8, \"text\": \"defer rows.Close()\"}]}]}",
     "input_tokens": 230,
     "output_tokens": 85,
     "total_tokens": 315,

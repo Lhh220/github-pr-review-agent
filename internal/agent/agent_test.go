@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 
@@ -227,5 +228,59 @@ func TestAgentForcesFinalAnswerAfterToolBudget(t *testing.T) {
 	lastRequest := provider.requests[len(provider.requests)-1]
 	if len(lastRequest.Tools) != 0 || lastRequest.Messages[len(lastRequest.Messages)-1].Role != "user" {
 		t.Fatalf("expected forced final request: %+v", lastRequest)
+	}
+}
+
+func TestFinalResponseRepairIsBounded(t *testing.T) {
+	for _, exhausted := range []bool{false, true} {
+		for _, repair := range []string{`{"summary":"clean","findings":[]}`, "still invalid"} {
+			t.Run(fmt.Sprintf("exhausted=%v/repair=%s", exhausted, repair), func(t *testing.T) {
+				registry, err := NewRegistry(echoTool{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				responses := []llm.ChatResponse{}
+				if exhausted {
+					responses = append(responses, llm.ChatResponse{ToolCalls: []llm.ToolCall{{ID: "call", Name: "echo_language", Arguments: `{"language":"Go"}`}}})
+				}
+				responses = append(responses, llm.ChatResponse{Content: "The code looks good.\n" + `{"summary":"clean","findings":[]}`, Usage: llm.Usage{TotalTokens: 10}}, llm.ChatResponse{Content: repair, Usage: llm.Usage{TotalTokens: 7}})
+				provider := &scriptedProvider{responses: responses}
+				runner, err := New(provider, registry, Options{MaxSteps: 1, ValidateResponse: func(s string) error {
+					if !json.Valid([]byte(s)) {
+						return fmt.Errorf("invalid JSON")
+					}
+					return nil
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				result, err := runner.Run(context.Background(), Request{SystemPrompt: "Return JSON", UserPrompt: "Review"})
+				if (err != nil) != (repair == "still invalid") {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				wantCalls := 2
+				if exhausted {
+					wantCalls++
+				}
+				if len(provider.requests) != wantCalls || result.ProviderCalls != wantCalls || result.Usage.TotalTokens != 17 {
+					t.Fatalf("unbounded retry or lost usage: %+v", result)
+				}
+				last := provider.requests[len(provider.requests)-1]
+				if len(last.Tools) != 0 {
+					t.Fatal("repair must not offer tools")
+				}
+				if exhausted {
+					found := false
+					for _, m := range last.Messages {
+						if m.Role == "tool" {
+							found = true
+						}
+					}
+					if !found {
+						t.Fatal("repair lost collected evidence")
+					}
+				}
+			})
+		}
 	}
 }

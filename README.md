@@ -2,6 +2,22 @@
 
 一个基于 Go 的 GitHub PR 自动审查 Agent。收到 GitHub PR 事件后，任务进入 RabbitMQ 异步队列，由 Worker 读取 PR 上下文和 diff，调用 DeepSeek 生成结构化审查意见，并以 GitHub App bot 身份回写 PR Review。
 
+## 快速启动与最新验收状态
+
+完整本地部署、架构图、30 秒演示脚本和面试提纲见 [快速交付指南](docs/quickstart.md)。Compose 已包含应用、MySQL、Redis、RabbitMQ 和健康依赖；默认使用 tool-calling，静态检查关闭。
+
+```powershell
+docker compose -p pr-review-demo up --build -d --wait --wait-timeout 240
+```
+
+默认配置仅用于本机演示，可启动健康检查与后台；实际 PR 审查需要配置 GitHub 和模型凭据，详见指南。应用默认代码配置仍为 legacy，Compose 显式覆盖为 tool-calling。
+
+2026-09-11 用户提供的最近一轮 live 基线：27/27 完成、0 失败，严格 precision=0.50、recall=0.60、负样本误报率=0.25。它使用此前的标签和提示词，不代表下面这些修复后的模型成绩。
+
+本轮新增：证据位置不一致时的一次纠正、过滤后摘要一致性、Go 版本预读取、短文件上下文越界修复、评测实时进度与防覆盖、静态检查输出内存上限和 Linux 超时进程组清理。9 个主样本之外单独提供 4 个复验样本；离线脚本通过只证明执行链路。主集 004 标签按“任务执行一次”的明确约定改为 bug，008 增加可执行反例测试，因此新旧分数不能直接归因于模型提升。
+
+当前仍待验收：本轮 live 复测、线上静态检查专项、完整 Compose 实机启动和真实演示录制。本机 Docker 引擎未能响应；Compose 配置已校验，CI 已增加完整部署冒烟任务，远端结果尚未获取。详见 [验收状态](docs/delivery.md)。
+
 ## 当前进度
 
 MVP 已经跑通并部署到 Railway：
@@ -39,7 +55,7 @@ MVP 已经跑通并部署到 Railway：
 - 阶段三 Day 4 已接入 `search_references`：下载 PR head 的仓库 tarball，流式扫描跨文件精确标识符引用
 - 阶段三 Day 5 已接入 `run_static_checks`：默认关闭，开启后可在服务端白名单内执行 `go test` / `go vet` 并把结果回传 Agent
 - 阶段三 Day 6 已完成结构化输出增强：每条 finding 携带 `evidence`，并按 `confirmed / needs_verification` 标注可信度
-- 阶段三评测集已扩展为 7 个离线 PR fixture，包含 2 个正常代码负样本，统计 precision / recall / 误报率 / 分类准确率 / confidence 校准 / token / 延迟 / 工具轨迹
+- 阶段三评测集已扩展为 9 个离线 PR fixture，包含 4 个正常代码负样本，统计 precision / recall / 误报率 / 分类准确率 / confidence 校准 / token / 延迟 / 工具轨迹
 - 关键状态变更与审查结果创建会同步写入 `audit_log`，任务数据和审计数据保持同一事务
 - MySQL 结构通过版本化 migration 管理，服务启动自动执行，也提供 `cmd/migrate` CLI
 
@@ -205,7 +221,7 @@ GITHUB_TOKEN=...
 
    服务启动时也会自动执行 migration。
 
-   当前包含三个 migration：version 1 `init`、version 2 `audit_log` 和 version 3 `tool_call_log`。首次部署新数据库时，启动日志会依次出现应用记录；已执行过则显示 up to date。
+   当前包含四个 migration：version 1 `init`、version 2 `audit_log`、version 3 `tool_call_log`、version 4 `review_delivery`。首次部署新数据库时，启动日志会依次出现应用记录；已执行过则显示 up to date。
 
    如果本地数据库已经执行过，则只会看到 `mysql migrations are up to date`。
 
@@ -268,7 +284,7 @@ Railway / Docker 生产构建使用仓库根目录的 `Dockerfile`。构建阶�
 
 ## 评测
 
-评测集位于 `eval/cases`，当前包含 7 个离线可回归样本：
+评测集位于 `eval/cases`，当前包含 9 个离线可回归样本：
 
 - `001-delete-field`：删除配置字段后仍被跨文件引用，期望 `bug / confirmed`
 - `002-nil-map`：写入 nil map，期望 `bug / confirmed`
@@ -277,6 +293,8 @@ Railway / Docker 生产构建使用仓库根目录的 `Dockerfile`。构建阶�
 - `005-docs-only`：纯文档 PR，期望 0 findings 且不调用工具
 - `006-initialized-map`：先初始化 map 再写入，期望 0 findings，经过模型和工具审查
 - `007-parameterized-sql`：SQL 使用参数绑定，期望 0 findings，经过模型和工具审查
+- `008-diff-section-contract`：生成器与解析器使用兼容的文件标题格式，期望 0 findings
+- `009-review-output-policy`：明确的 JSON 校验和 performance 降级约定，与测试和评测逻辑一致，期望 0 findings
 
 离线模式使用 fixture script 驱动真实 Agent Loop 和 GitHub 工具，不访问外网、不消耗模型 token，适合作为回归测试：
 
@@ -537,6 +555,14 @@ Day 5 线上验收步骤：
 5. bot 评论应引用 `go test ./...` 或 `go vet ./...` 的失败输出；在 `/tasks/<task_id>/tool-calls` 中应能看到 `run_static_checks` 的输入、输出和耗时。
 
 ## 当前能力边界
+
+### 评论回写与失败恢复
+
+`review_delivery` 在分析前保存首次执行时的 PR head 和随机发布标识。分析结果先存入 `review_result`，重试时优先复用，避免重复模型调用和结果唯一键冲突。发布前分页查询该 PR 的 reviews，用标识、commit 和已提交状态核对；已存在则补记 GitHub Review ID，否则显式指定 `commit_id` 发布。Review ID、任务 done 和审计日志在同一个 MySQL 事务中提交。`/tasks/:id/result` 返回 `delivery.commit_sha / github_review_id`；历史结果没有 delivery 时为 null。
+
+这是 PR 锁保护下的幂等恢复，不是跨 GitHub/MySQL 的严格 exactly-once。查询与发布仍非原子，远端响应不确定且列表尚未可见、锁失效或人工删除标识等边界不能被完全消除。查询失败或分页超限不会继续发布。已有结果但缺少发布记录的旧任务要求人工核对，不会自动补发；相同任务重试只补发原版本结果，不重新审查新版本。新 head 应由新的 Webhook 任务处理。首次处理前已过期的 Webhook 合并/跳过策略仍属后续版本治理。
+
+新增 `.github/workflows/ci.yml`，推送或 PR 会运行 Go 测试、MySQL 集成测试、vet 和离线评测。工作流需推送后才能确认远端运行结果。
 
 默认 `legacy` 审查能力是 **diff + changed-file-context reviewer**：
 
