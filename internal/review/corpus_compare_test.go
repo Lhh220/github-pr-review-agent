@@ -2,6 +2,7 @@ package review
 
 import (
 	"reflect"
+	"sort"
 	"testing"
 
 	"github.com/liaohonghui/github-pr-review-agent/internal/store"
@@ -77,7 +78,11 @@ func TestParsedCorpusMatchesLegacyMatching(t *testing.T) {
 	}
 
 	for corpusName, corpus := range corpora {
-		if !reflect.DeepEqual(evidenceStrings(corpus), parseEvidenceCorpus(corpus).strings) {
+		legacy, current := evidenceStrings(corpus), parseEvidenceCorpus(corpus).strings
+		// JSON object traversal order is unspecified; matching only uses membership.
+		sort.Strings(legacy)
+		sort.Strings(current)
+		if !reflect.DeepEqual(legacy, current) {
 			t.Errorf("strings corpus=%s: legacy and parsed diverge", corpusName)
 		}
 	}

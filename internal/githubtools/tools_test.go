@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -772,25 +773,34 @@ func TestFileCacheSkipsOversizedFiles(t *testing.T) {
 
 func TestFileCacheRespectsCumulativeBudget(t *testing.T) {
 	client := newFakeClient()
-	big := strings.Repeat("b", 1<<20) // 1MB each
-	for _, path := range []string{"f1.go", "f2.go", "f3.go", "f4.go", "f5.go"} {
-		client.fileContents[path] = big
-	}
+	big := strings.Repeat("b", 1<<20) // 1 MiB each
+	wantCached := maxCachedFileTotalBytes / len(big)
 	toolkit := NewToolkit(client, "owner", "repo", 12, Options{})
 	defer toolkit.Close()
 
 	tool := toolByName(t, toolkit, "read_file_context")
-	for _, path := range []string{"f1.go", "f2.go", "f3.go", "f4.go", "f5.go"} {
+	for i := 0; i <= wantCached; i++ {
+		path := fmt.Sprintf("f%d.go", i)
+		client.fileContents[path] = big
 		if _, err := tool.Execute(context.Background(), map[string]any{"path": path, "start_line": 1, "end_line": 2}); err != nil {
 			t.Fatalf("read_file_context %s: %v", path, err)
 		}
+	}
+
+	// Reading the file beyond the cumulative budget must hit the client again.
+	path := fmt.Sprintf("f%d.go", wantCached)
+	if _, err := tool.Execute(context.Background(), map[string]any{"path": path, "start_line": 1, "end_line": 2}); err != nil {
+		t.Fatalf("read_file_context %s again: %v", path, err)
+	}
+	if got := len(client.filePaths); got != wantCached+2 {
+		t.Fatalf("GetFileContent calls = %d, want %d (file beyond cumulative budget is not cached)", got, wantCached+2)
 	}
 
 	toolkit.mu.Lock()
 	cached := len(toolkit.fileCache)
 	bytes := toolkit.fileCacheBytes
 	toolkit.mu.Unlock()
-	if cached != 4 || bytes != 4<<20 {
-		t.Fatalf("cached entries = %d, bytes = %d; want 4 entries / %d bytes", cached, bytes, 4<<20)
+	if cached != wantCached || bytes != maxCachedFileTotalBytes {
+		t.Fatalf("cached entries = %d, bytes = %d; want %d entries / %d bytes", cached, bytes, wantCached, maxCachedFileTotalBytes)
 	}
 }
