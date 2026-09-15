@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/liaohonghui/github-pr-review-agent/internal/httputil"
 	"github.com/liaohonghui/github-pr-review-agent/internal/limiter"
 )
 
@@ -164,8 +165,8 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("github api %s %s: status=%d body=%s", method, path, resp.StatusCode, string(raw))
+		body := httputil.ReadErrorBody(resp.Body, 0)
+		return fmt.Errorf("github api %s %s: status=%d body=%s", method, path, resp.StatusCode, body)
 	}
 	if out == nil {
 		return nil
@@ -279,9 +280,9 @@ func (c *Client) GetRepositoryTarball(ctx context.Context, owner, repo, ref stri
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(resp.Body)
+		body := httputil.ReadErrorBody(resp.Body, 0)
 		_ = resp.Body.Close()
-		return nil, fmt.Errorf("github api %s %s: status=%d body=%s", http.MethodGet, apiPath, resp.StatusCode, string(raw))
+		return nil, fmt.Errorf("github api %s %s: status=%d body=%s", http.MethodGet, apiPath, resp.StatusCode, body)
 	}
 	return resp.Body, nil
 }

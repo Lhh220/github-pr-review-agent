@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
+	"github.com/liaohonghui/github-pr-review-agent/internal/httputil"
 	"github.com/liaohonghui/github-pr-review-agent/internal/limiter"
 )
 
@@ -298,8 +298,8 @@ func (c *Client) chat(ctx context.Context, request chatRequest) (chatResponse, i
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(resp.Body)
-		return chatResponse{}, 0, fmt.Errorf("deepseek api: status=%d body=%s", resp.StatusCode, string(raw))
+		body := httputil.ReadErrorBody(resp.Body, 0)
+		return chatResponse{}, 0, fmt.Errorf("deepseek api: status=%d body=%s", resp.StatusCode, body)
 	}
 	var out chatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
