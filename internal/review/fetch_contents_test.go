@@ -26,8 +26,8 @@ func (f *fakeContentClient) GetPullRequest(ctx context.Context, owner, repo stri
 	return nil, nil
 }
 
-func (f *fakeContentClient) GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, error) {
-	return nil, nil
+func (f *fakeContentClient) GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, bool, error) {
+	return nil, false, nil
 }
 
 func (f *fakeContentClient) CreatePullRequestReview(ctx context.Context, owner, repo string, number int, body string) error {

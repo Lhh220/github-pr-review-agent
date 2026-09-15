@@ -12,18 +12,19 @@ import (
 )
 
 type fakeGitHubClient struct {
-	pr          *github.PullRequest
-	files       []github.PullRequestFile
-	fileContent string
-	reviewBody  string
+	pr             *github.PullRequest
+	files          []github.PullRequestFile
+	filesTruncated bool
+	fileContent    string
+	reviewBody     string
 }
 
 func (f *fakeGitHubClient) GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error) {
 	return f.pr, nil
 }
 
-func (f *fakeGitHubClient) GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, error) {
-	return f.files, nil
+func (f *fakeGitHubClient) GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, bool, error) {
+	return f.files, f.filesTruncated, nil
 }
 
 func (f *fakeGitHubClient) GetFileContent(ctx context.Context, owner, repo, path, ref string) (string, error) {
@@ -133,6 +134,39 @@ func TestReviewPRSkipsLLMForDocsOnlyPR(t *testing.T) {
 	}
 	if !strings.Contains(gh.reviewBody, "only changes documentation") {
 		t.Fatalf("unexpected docs-only review comment: %s", gh.reviewBody)
+	}
+}
+
+func TestReviewPRDoesNotConcludeDocsOnlyFromTruncatedFileList(t *testing.T) {
+	gh := &fakeGitHubClient{
+		pr: &github.PullRequest{
+			Title: "Update docs",
+			Head:  github.Ref{SHA: "291ac5aedc5fd96c5030a6c18e91923140677591"},
+		},
+		files: []github.PullRequestFile{
+			{Filename: "README.md", Patch: "@@ -1 +1 @@\n+updated"},
+		},
+		filesTruncated: true,
+		fileContent:    "updated docs",
+	}
+	fakeLLM := &fakeLLMClient{response: llm.ReviewResponse{
+		Content: `{"summary":"Docs-only in the visible files.","findings":[]}`,
+		Model:   "deepseek-chat",
+	}}
+	results := &fakeResultStore{}
+	service := New(gh, fakeLLM, results, 100, 10, 100)
+
+	if err := service.ReviewPR(context.Background(), "owner", "repo", 12, 3); err != nil {
+		t.Fatalf("ReviewPR() error = %v", err)
+	}
+	if !fakeLLM.called {
+		t.Fatal("LLM was skipped even though the file list was truncated")
+	}
+	if !strings.Contains(results.input.Summary, "pagination limit") {
+		t.Fatalf("summary lacks truncation note: %s", results.input.Summary)
+	}
+	if !strings.Contains(gh.reviewBody, "review coverage may be incomplete") {
+		t.Fatalf("review comment lacks truncation note: %s", gh.reviewBody)
 	}
 }
 

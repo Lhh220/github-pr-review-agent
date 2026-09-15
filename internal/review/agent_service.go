@@ -17,7 +17,7 @@ import (
 type AgentGitHubClient interface {
 	ReviewPublisher
 	GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error)
-	GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, error)
+	GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, bool, error)
 	GetPullRequestCommits(ctx context.Context, owner, repo string, number, limit int) ([]github.PullRequestCommit, error)
 	GetFileContent(ctx context.Context, owner, repo, path, ref string) (string, error)
 	GetRepositoryTarball(ctx context.Context, owner, repo, ref string) (io.ReadCloser, error)
@@ -91,7 +91,10 @@ func (s *AgentService) ReviewPR(ctx context.Context, owner, repo string, number 
 	if err != nil {
 		return fmt.Errorf("get pull request files before agent review: %w", err)
 	}
-	if len(files) == 0 || isDocsOnlyPR(files) {
+	filesTruncated := toolkit.CoverageTruncated()
+	// A truncated list cannot support the docs-only conclusion: unseen files
+	// may contain code, so keep the normal review path in that case.
+	if len(files) == 0 || (!filesTruncated && isDocsOnlyPR(files)) {
 		summary := "This pull request has no changed files relative to its base branch; review skipped."
 		rawResponse := "No changed files relative to the base branch."
 		if len(files) > 0 {
@@ -154,9 +157,13 @@ func (s *AgentService) ReviewPR(ctx context.Context, owner, repo string, number 
 	if err != nil {
 		return err
 	}
+	summary := parsed.Summary
+	if filesTruncated {
+		summary += "\n\n" + filesTruncatedSummaryNote
+	}
 	return finishReview(ctx, s.GitHub, s.Store, owner, repo, number, store.NewReviewResult{
 		TaskID:        taskID,
-		Summary:       parsed.Summary,
+		Summary:       summary,
 		Findings:      parsed.Findings,
 		RawResponse:   result.Content,
 		Model:         result.Model,

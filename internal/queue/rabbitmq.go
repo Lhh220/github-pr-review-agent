@@ -234,10 +234,18 @@ func (b *RabbitBroker) publish(ctx context.Context, queue string, msg Message, d
 	publisher := b.publisher
 	if publisher == nil {
 		b.mu.RUnlock()
+		// Nothing was sent on the wire yet, so retrying once after a
+		// successful reconnect cannot duplicate the message.
 		if reconnectErr := b.reconnect(); reconnectErr != nil {
 			log.Printf("reconnect rabbitmq publisher failed: error=%v", reconnectErr)
+			return errors.New("rabbitmq publisher is unavailable")
 		}
-		return errors.New("rabbitmq publisher is unavailable")
+		b.mu.RLock()
+		publisher = b.publisher
+		if publisher == nil {
+			b.mu.RUnlock()
+			return errors.New("rabbitmq publisher is unavailable")
+		}
 	}
 
 	confirmation, err := publisher.PublishWithDeferredConfirmWithContext(
@@ -255,6 +263,9 @@ func (b *RabbitBroker) publish(ctx context.Context, queue string, msg Message, d
 	)
 	b.mu.RUnlock()
 	if err != nil {
+		// The message state is unknown here: it may already be queued, so a
+		// retry could duplicate it. Only repair the connection for the next
+		// publish and let delivery idempotency handle the uncertainty.
 		if reconnectErr := b.reconnect(); reconnectErr != nil {
 			log.Printf("reconnect rabbitmq publisher failed: error=%v", reconnectErr)
 		}

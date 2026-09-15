@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/liaohonghui/github-pr-review-agent/internal/httputil"
 	"github.com/liaohonghui/github-pr-review-agent/internal/limiter"
 )
 
@@ -164,8 +165,8 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("github api %s %s: status=%d body=%s", method, path, resp.StatusCode, string(raw))
+		body := httputil.ReadErrorBody(resp.Body, 0)
+		return fmt.Errorf("github api %s %s: status=%d body=%s", method, path, resp.StatusCode, body)
 	}
 	if out == nil {
 		return nil
@@ -182,7 +183,11 @@ func (c *Client) GetPullRequest(ctx context.Context, owner, repo string, number 
 	return &pr, nil
 }
 
-func (c *Client) GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]PullRequestFile, error) {
+// GetPullRequestFiles returns up to maxPullRequestFilePages pages of changed
+// files. The second return value reports that the page cap was reached and
+// more files exist (confirmed by one extra probe page), meaning the caller's
+// view of the PR is incomplete.
+func (c *Client) GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]PullRequestFile, bool, error) {
 	var files []PullRequestFile
 	for page := 1; page <= maxPullRequestFilePages; page++ {
 		path := fmt.Sprintf(
@@ -191,14 +196,33 @@ func (c *Client) GetPullRequestFiles(ctx context.Context, owner, repo string, nu
 		)
 		var pageFiles []PullRequestFile
 		if err := c.do(ctx, http.MethodGet, path, nil, &pageFiles); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		files = append(files, pageFiles...)
 		if len(pageFiles) < 100 {
-			break
+			return files, false, nil
 		}
 	}
-	return files, nil
+	truncated, err := c.confirmMorePullRequestFiles(ctx, owner, repo, number, maxPullRequestFilePages+1)
+	if err != nil {
+		// Coverage is unknown; report truncation so callers never treat the
+		// capped list as the complete PR file set.
+		log.Printf("probe pull request files beyond page cap failed: owner=%s repo=%s number=%d error=%v", owner, repo, number, err)
+		return files, true, nil
+	}
+	return files, truncated, nil
+}
+
+func (c *Client) confirmMorePullRequestFiles(ctx context.Context, owner, repo string, number, page int) (bool, error) {
+	path := fmt.Sprintf(
+		"/repos/%s/%s/pulls/%d/files?per_page=100&page=%d",
+		owner, repo, number, page,
+	)
+	var pageFiles []PullRequestFile
+	if err := c.do(ctx, http.MethodGet, path, nil, &pageFiles); err != nil {
+		return false, err
+	}
+	return len(pageFiles) > 0, nil
 }
 
 func (c *Client) GetPullRequestCommits(ctx context.Context, owner, repo string, number, limit int) ([]PullRequestCommit, error) {
@@ -279,9 +303,9 @@ func (c *Client) GetRepositoryTarball(ctx context.Context, owner, repo, ref stri
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(resp.Body)
+		body := httputil.ReadErrorBody(resp.Body, 0)
 		_ = resp.Body.Close()
-		return nil, fmt.Errorf("github api %s %s: status=%d body=%s", http.MethodGet, apiPath, resp.StatusCode, string(raw))
+		return nil, fmt.Errorf("github api %s %s: status=%d body=%s", http.MethodGet, apiPath, resp.StatusCode, body)
 	}
 	return resp.Body, nil
 }

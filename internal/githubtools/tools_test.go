@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -24,16 +25,17 @@ type fakeClient struct {
 	fileContents map[string]string
 	tarball      io.Reader
 
-	getPRCalls    int
-	getFilesCalls int
-	owners        []string
-	repos         []string
-	numbers       []int
-	commitLimits  []int
-	filePaths     []string
-	refs          []string
-	tarballRef    string
-	tarballCalls  int
+	getPRCalls     int
+	getFilesCalls  int
+	owners         []string
+	repos          []string
+	numbers        []int
+	commitLimits   []int
+	filePaths      []string
+	refs           []string
+	tarballRef     string
+	tarballCalls   int
+	filesTruncated bool
 }
 
 func (f *fakeClient) GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error) {
@@ -44,9 +46,9 @@ func (f *fakeClient) GetPullRequest(ctx context.Context, owner, repo string, num
 	return f.pr, nil
 }
 
-func (f *fakeClient) GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, error) {
+func (f *fakeClient) GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, bool, error) {
 	f.getFilesCalls++
-	return f.files, nil
+	return f.files, f.filesTruncated, nil
 }
 
 func (f *fakeClient) GetPullRequestCommits(ctx context.Context, owner, repo string, number, limit int) ([]github.PullRequestCommit, error) {
@@ -695,5 +697,110 @@ func TestToolsRejectNonIntegerArguments(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "start_line must be an integer") {
 		t.Fatalf("expected integer validation error, got %v", err)
+	}
+}
+
+func TestChangedFilesToolReportsCoverageTruncation(t *testing.T) {
+	client := newFakeClient()
+	client.filesTruncated = true
+	toolkit := NewToolkit(client, "owner", "repo", 12, Options{})
+	defer toolkit.Close()
+
+	output, err := toolByName(t, toolkit, "list_changed_files").Execute(context.Background(), map[string]any{})
+	if err != nil {
+		t.Fatalf("list_changed_files: %v", err)
+	}
+	if !strings.Contains(output, "\"coverage_truncated\":true") {
+		t.Fatalf("coverage_truncated missing from output: %s", output)
+	}
+	if !toolkit.CoverageTruncated() {
+		t.Fatal("CoverageTruncated() = false after loading truncated files")
+	}
+
+	diffOutput, err := toolByName(t, toolkit, "read_diff").Execute(context.Background(), map[string]any{})
+	if err != nil {
+		t.Fatalf("read_diff: %v", err)
+	}
+	if !strings.Contains(diffOutput, "\"coverage_truncated\":true") {
+		t.Fatalf("read_diff full output lacks coverage_truncated: %s", diffOutput)
+	}
+}
+
+func TestFileContextToolCachesFileContent(t *testing.T) {
+	client := newFakeClient()
+	toolkit := NewToolkit(client, "owner", "repo", 12, Options{})
+	defer toolkit.Close()
+
+	tool := toolByName(t, toolkit, "read_file_context")
+	input := func(start int) map[string]any {
+		return map[string]any{"path": "internal/auth/auth.go", "start_line": start, "end_line": start + 5}
+	}
+	for invocation := 0; invocation < 3; invocation++ {
+		if _, err := tool.Execute(context.Background(), input(1+invocation)); err != nil {
+			t.Fatalf("read_file_context invocation %d: %v", invocation, err)
+		}
+	}
+	if got := len(client.filePaths); got != 1 {
+		t.Fatalf("GetFileContent calls = %d, want 1 (same path, different ranges)", got)
+	}
+
+	// A different path must still hit the client.
+	if _, err := tool.Execute(context.Background(), map[string]any{"path": "internal/auth/token.go", "start_line": 1, "end_line": 3}); err != nil {
+		t.Fatalf("read_file_context new path: %v", err)
+	}
+	if got := len(client.filePaths); got != 2 {
+		t.Fatalf("GetFileContent calls = %d, want 2", got)
+	}
+}
+
+func TestFileCacheSkipsOversizedFiles(t *testing.T) {
+	client := newFakeClient()
+	client.fileContents["internal/auth/auth.go"] = strings.Repeat("a", maxCachedFileBytes+1)
+	toolkit := NewToolkit(client, "owner", "repo", 12, Options{})
+	defer toolkit.Close()
+
+	tool := toolByName(t, toolkit, "read_file_context")
+	input := map[string]any{"path": "internal/auth/auth.go", "start_line": 1, "end_line": 3}
+	for invocation := 0; invocation < 2; invocation++ {
+		if _, err := tool.Execute(context.Background(), input); err != nil {
+			t.Fatalf("read_file_context invocation %d: %v", invocation, err)
+		}
+	}
+	if got := len(client.filePaths); got != 2 {
+		t.Fatalf("GetFileContent calls = %d, want 2 (oversized file is not cached)", got)
+	}
+}
+
+func TestFileCacheRespectsCumulativeBudget(t *testing.T) {
+	client := newFakeClient()
+	big := strings.Repeat("b", 1<<20) // 1 MiB each
+	wantCached := maxCachedFileTotalBytes / len(big)
+	toolkit := NewToolkit(client, "owner", "repo", 12, Options{})
+	defer toolkit.Close()
+
+	tool := toolByName(t, toolkit, "read_file_context")
+	for i := 0; i <= wantCached; i++ {
+		path := fmt.Sprintf("f%d.go", i)
+		client.fileContents[path] = big
+		if _, err := tool.Execute(context.Background(), map[string]any{"path": path, "start_line": 1, "end_line": 2}); err != nil {
+			t.Fatalf("read_file_context %s: %v", path, err)
+		}
+	}
+
+	// Reading the file beyond the cumulative budget must hit the client again.
+	path := fmt.Sprintf("f%d.go", wantCached)
+	if _, err := tool.Execute(context.Background(), map[string]any{"path": path, "start_line": 1, "end_line": 2}); err != nil {
+		t.Fatalf("read_file_context %s again: %v", path, err)
+	}
+	if got := len(client.filePaths); got != wantCached+2 {
+		t.Fatalf("GetFileContent calls = %d, want %d (file beyond cumulative budget is not cached)", got, wantCached+2)
+	}
+
+	toolkit.mu.Lock()
+	cached := len(toolkit.fileCache)
+	bytes := toolkit.fileCacheBytes
+	toolkit.mu.Unlock()
+	if cached != wantCached || bytes != maxCachedFileTotalBytes {
+		t.Fatalf("cached entries = %d, bytes = %d; want %d entries / %d bytes", cached, bytes, wantCached, maxCachedFileTotalBytes)
 	}
 }
