@@ -232,8 +232,8 @@ func (b *RabbitBroker) publish(ctx context.Context, queue string, msg Message, d
 		return errors.New("rabbitmq broker is closed")
 	}
 	publisher := b.publisher
-	b.mu.RUnlock()
 	if publisher == nil {
+		b.mu.RUnlock()
 		// Nothing was sent on the wire yet, so retrying once after a
 		// successful reconnect cannot duplicate the message.
 		if reconnectErr := b.reconnect(); reconnectErr != nil {
@@ -242,13 +242,12 @@ func (b *RabbitBroker) publish(ctx context.Context, queue string, msg Message, d
 		}
 		b.mu.RLock()
 		publisher = b.publisher
-		b.mu.RUnlock()
 		if publisher == nil {
+			b.mu.RUnlock()
 			return errors.New("rabbitmq publisher is unavailable")
 		}
 	}
 
-	b.mu.RLock()
 	confirmation, err := publisher.PublishWithDeferredConfirmWithContext(
 		ctx,
 		"",
