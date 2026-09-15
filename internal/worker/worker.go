@@ -19,6 +19,12 @@ const recoveryScanInterval = 30 * time.Second
 const runningTaskStaleAfter = reviewTimeout + time.Minute
 const queuedTaskStaleAfter = time.Minute
 
+// lockTTLCleanupMargin is the headroom the PR lock needs beyond the review
+// timeout for the status writes that follow ReviewPR. It matches the
+// stale-running padding so a lock can never expire while its task is still
+// the authoritative owner of the PR.
+const lockTTLCleanupMargin = time.Minute
+
 type Reviewer interface {
 	ReviewPR(ctx context.Context, owner, repo string, number int, taskID uint64) error
 }
@@ -86,6 +92,15 @@ func New(taskStore TaskStore, reviewer Reviewer, client QueueClient, workers int
 	}
 	if options.LockTTL <= 0 {
 		options.LockTTL = 7 * time.Minute
+	}
+	// REVIEW_LOCK_TTL below the full review window plus cleanup margin would
+	// let the lock expire mid-review, so clamp it instead of failing startup.
+	if minLockTTL := reviewTimeout + lockTTLCleanupMargin; options.LockTTL < minLockTTL {
+		log.Printf(
+			"review lock ttl %s is below review timeout %s plus cleanup margin %s; raising to %s (check REVIEW_LOCK_TTL)",
+			options.LockTTL, reviewTimeout, lockTTLCleanupMargin, minLockTTL,
+		)
+		options.LockTTL = minLockTTL
 	}
 	if options.LockRetryDelay <= 0 {
 		options.LockRetryDelay = 2 * time.Second

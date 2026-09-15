@@ -574,3 +574,16 @@ func TestSupersededPersistenceFailureSchedulesRecovery(t *testing.T) {
 		t.Fatal("lost recovery after failed terminal update")
 	}
 }
+
+func TestNewClampsLockTTLBelowReviewWindow(t *testing.T) {
+	w := New(&fakeTaskGetter{}, nil, &captureConsumer{}, 1, Options{LockTTL: time.Minute})
+	if w.lockTTL < reviewTimeout+lockTTLCleanupMargin {
+		t.Fatalf("lockTTL = %s, want at least %s", w.lockTTL, reviewTimeout+lockTTLCleanupMargin)
+	}
+
+	// An explicit healthy TTL must be preserved.
+	w = New(&fakeTaskGetter{}, nil, &captureConsumer{}, 1, Options{LockTTL: 10 * time.Minute})
+	if w.lockTTL != 10*time.Minute {
+		t.Fatalf("healthy lockTTL = %s, want 10m untouched", w.lockTTL)
+	}
+}
