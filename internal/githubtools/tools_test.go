@@ -724,3 +724,73 @@ func TestChangedFilesToolReportsCoverageTruncation(t *testing.T) {
 		t.Fatalf("read_diff full output lacks coverage_truncated: %s", diffOutput)
 	}
 }
+
+func TestFileContextToolCachesFileContent(t *testing.T) {
+	client := newFakeClient()
+	toolkit := NewToolkit(client, "owner", "repo", 12, Options{})
+	defer toolkit.Close()
+
+	tool := toolByName(t, toolkit, "read_file_context")
+	input := func(start int) map[string]any {
+		return map[string]any{"path": "internal/auth/auth.go", "start_line": start, "end_line": start + 5}
+	}
+	for invocation := 0; invocation < 3; invocation++ {
+		if _, err := tool.Execute(context.Background(), input(1+invocation)); err != nil {
+			t.Fatalf("read_file_context invocation %d: %v", invocation, err)
+		}
+	}
+	if got := len(client.filePaths); got != 1 {
+		t.Fatalf("GetFileContent calls = %d, want 1 (same path, different ranges)", got)
+	}
+
+	// A different path must still hit the client.
+	if _, err := tool.Execute(context.Background(), map[string]any{"path": "internal/auth/token.go", "start_line": 1, "end_line": 3}); err != nil {
+		t.Fatalf("read_file_context new path: %v", err)
+	}
+	if got := len(client.filePaths); got != 2 {
+		t.Fatalf("GetFileContent calls = %d, want 2", got)
+	}
+}
+
+func TestFileCacheSkipsOversizedFiles(t *testing.T) {
+	client := newFakeClient()
+	client.fileContents["internal/auth/auth.go"] = strings.Repeat("a", maxCachedFileBytes+1)
+	toolkit := NewToolkit(client, "owner", "repo", 12, Options{})
+	defer toolkit.Close()
+
+	tool := toolByName(t, toolkit, "read_file_context")
+	input := map[string]any{"path": "internal/auth/auth.go", "start_line": 1, "end_line": 3}
+	for invocation := 0; invocation < 2; invocation++ {
+		if _, err := tool.Execute(context.Background(), input); err != nil {
+			t.Fatalf("read_file_context invocation %d: %v", invocation, err)
+		}
+	}
+	if got := len(client.filePaths); got != 2 {
+		t.Fatalf("GetFileContent calls = %d, want 2 (oversized file is not cached)", got)
+	}
+}
+
+func TestFileCacheRespectsCumulativeBudget(t *testing.T) {
+	client := newFakeClient()
+	big := strings.Repeat("b", 1<<20) // 1MB each
+	for _, path := range []string{"f1.go", "f2.go", "f3.go", "f4.go", "f5.go"} {
+		client.fileContents[path] = big
+	}
+	toolkit := NewToolkit(client, "owner", "repo", 12, Options{})
+	defer toolkit.Close()
+
+	tool := toolByName(t, toolkit, "read_file_context")
+	for _, path := range []string{"f1.go", "f2.go", "f3.go", "f4.go", "f5.go"} {
+		if _, err := tool.Execute(context.Background(), map[string]any{"path": path, "start_line": 1, "end_line": 2}); err != nil {
+			t.Fatalf("read_file_context %s: %v", path, err)
+		}
+	}
+
+	toolkit.mu.Lock()
+	cached := len(toolkit.fileCache)
+	bytes := toolkit.fileCacheBytes
+	toolkit.mu.Unlock()
+	if cached != 4 || bytes != 4<<20 {
+		t.Fatalf("cached entries = %d, bytes = %d; want 4 entries / %d bytes", cached, bytes, 4<<20)
+	}
+}

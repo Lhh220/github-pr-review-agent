@@ -24,6 +24,12 @@ const (
 	maxListedFiles             = 200
 	maxToolOutputChars         = 40000
 	maxPRBodyChars             = 12000
+
+	// A single file above maxCachedFileBytes is fetched but not cached, and
+	// the cache stops growing once the cumulative byte budget is reached, so
+	// the download optimization never turns into unbounded memory use.
+	maxCachedFileBytes      = 2 << 20
+	maxCachedFileTotalBytes = 16 << 20
 )
 
 type Client interface {
@@ -66,9 +72,14 @@ type Toolkit struct {
 	cachedFiles       []github.PullRequestFile
 	filesLoaded       bool
 	coverageTruncated bool
-	tarballFile       *os.File
-	tarballPath       string
-	tarballRef        string
+	// fileCache caches full file contents keyed by path for the toolkit's
+	// lifetime (one review, one fixed head SHA), so repeated read_file_context
+	// calls with different ranges do not re-hit the GitHub contents API.
+	fileCache      map[string]string
+	fileCacheBytes int
+	tarballFile    *os.File
+	tarballPath    string
+	tarballRef     string
 }
 
 func NewToolkit(client Client, owner, repo string, number int, options Options) *Toolkit {
@@ -129,6 +140,45 @@ func (t *Toolkit) PullRequest(ctx context.Context) (*github.PullRequest, error) 
 
 func (t *Toolkit) Files(ctx context.Context) ([]github.PullRequestFile, error) {
 	return t.files(ctx)
+}
+
+// cachedFileContent returns the full file content at ref, serving repeat
+// reads of the same path from an in-memory cache. Only successful reads are
+// cached; entries beyond the single-file or cumulative byte budgets are
+// fetched every time and simply not stored.
+func (t *Toolkit) cachedFileContent(ctx context.Context, path, ref string) (string, error) {
+	t.mu.Lock()
+	content, cached := t.fileCache[path]
+	t.mu.Unlock()
+	if cached {
+		return content, nil
+	}
+
+	content, err := t.client.GetFileContent(ctx, t.owner, t.repo, path, ref)
+	if err != nil {
+		return "", fmt.Errorf("get file content: %w", err)
+	}
+	t.storeFileCache(path, content)
+	return content, nil
+}
+
+func (t *Toolkit) storeFileCache(path, content string) {
+	if len(content) == 0 || len(content) > maxCachedFileBytes {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.fileCache == nil {
+		t.fileCache = make(map[string]string)
+	}
+	if _, exists := t.fileCache[path]; exists {
+		return
+	}
+	if t.fileCacheBytes+len(content) > maxCachedFileTotalBytes {
+		return
+	}
+	t.fileCache[path] = content
+	t.fileCacheBytes += len(content)
 }
 
 // CoverageTruncated reports whether the cached file list hit the GitHub
@@ -322,9 +372,9 @@ func (t fileContextTool) Execute(ctx context.Context, input map[string]any) (str
 	if err != nil {
 		return "", err
 	}
-	content, err := t.toolkit.client.GetFileContent(ctx, t.toolkit.owner, t.toolkit.repo, path, pr.Head.SHA)
+	content, err := t.toolkit.cachedFileContent(ctx, path, pr.Head.SHA)
 	if err != nil {
-		return "", fmt.Errorf("get file content: %w", err)
+		return "", err
 	}
 
 	startLine, err := optionalInt(input, "start_line", 0)
