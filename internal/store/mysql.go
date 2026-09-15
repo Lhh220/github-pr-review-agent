@@ -521,10 +521,11 @@ WHERE id = ? AND status = 'dead_letter'`,
 	if err != nil {
 		return fmt.Errorf("get requeue rows affected: %w", err)
 	}
+	// The row was already locked and read above, so zero affected rows can
+	// only mean the status guard failed. Never issue another pooled query
+	// here: it can wait on the same pool this transaction is holding a
+	// connection from.
 	if affected == 0 {
-		if _, err := s.GetTask(ctx, id); err != nil {
-			return err
-		}
 		return ErrTaskTransitionFailed
 	}
 

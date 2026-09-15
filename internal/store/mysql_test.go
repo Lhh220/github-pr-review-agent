@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -168,6 +169,12 @@ WHERE table_schema = DATABASE()
 	}
 	if got.Status != "queued" || got.AttemptCount != 0 || got.NextRetryAt != nil {
 		t.Fatalf("unexpected requeued task: %+v", got)
+	}
+
+	// Requeueing a task that is not dead_letter must fail on the status guard
+	// without issuing any extra query inside the open transaction.
+	if err := s.RequeueTask(ctx, task.ID); !errors.Is(err, ErrTaskTransitionFailed) {
+		t.Fatalf("requeue non-dead-letter task: err=%v, want ErrTaskTransitionFailed", err)
 	}
 
 	if _, err := s.db.ExecContext(ctx, `
