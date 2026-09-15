@@ -18,7 +18,7 @@ import (
 type GitHubClient interface {
 	ReviewPublisher
 	GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error)
-	GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, error)
+	GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, bool, error)
 	GetFileContent(ctx context.Context, owner, repo, path, ref string) (string, error)
 	CreatePullRequestReview(ctx context.Context, owner, repo string, number int, body string) error
 }
