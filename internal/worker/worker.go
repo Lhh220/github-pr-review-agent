@@ -21,8 +21,8 @@ const queuedTaskStaleAfter = time.Minute
 
 // lockTTLCleanupMargin is the headroom the PR lock needs beyond the review
 // timeout for the status writes that follow ReviewPR. It matches the
-// stale-running padding so a lock can never expire while its task is still
-// the authoritative owner of the PR.
+// stale-running padding. This assumes review operations honor cancellation;
+// it is not a renewable lease or a fencing guarantee.
 const lockTTLCleanupMargin = time.Minute
 
 type Reviewer interface {

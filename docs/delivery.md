@@ -47,7 +47,7 @@ go run ./cmd/eval -cases eval/holdout -live -runs 3 -timeout 30m
 | Evidence 精确校验 | 已完成 | raw diff / file context / JSON 工具输出均按 file + line + exact line 校验 |
 | 收尾代码补强 | 本地完成，待部署 | 无效模型输出报错重试；静态证据拒绝空摘录、成功、超时与启动错误；新增正常代码负样本、评测失败记录与逐样本报告 |
 | 评论发布恢复 | 本地完成，待部署 | 20 个模式/故障组合验证不重复分析或发评；发布凭证与 done、审计同事务；migration 4 实库通过 |
-| CI | 配置已添加，远端待运行 | push / PR 运行测试、MySQL 集成、vet、离线评测；不使用模型 Key |
+| CI | 历史 PR 已通过；当前提交需重跑 | push / PR 运行测试、MySQL 集成、vet、离线评测；不使用模型 Key |
 | Live 模型评测 | 已有基线，本轮复测待执行 | 2026-09-11 用户实际运行：27/27，0 失败，precision=0.50，recall=0.60，负样本误报率=0.25 |
 | 静态检查线上专项 | 待执行 | 需要在 Railway 开启配置并提交编译错误 PR |
 

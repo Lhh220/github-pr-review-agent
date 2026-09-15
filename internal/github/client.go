@@ -185,8 +185,8 @@ func (c *Client) GetPullRequest(ctx context.Context, owner, repo string, number 
 
 // GetPullRequestFiles returns up to maxPullRequestFilePages pages of changed
 // files. The second return value reports that the page cap was reached and
-// more files exist (confirmed by one extra probe page), meaning the caller's
-// view of the PR is incomplete.
+// more files exist or the extra probe failed, so complete coverage cannot
+// be established.
 func (c *Client) GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]PullRequestFile, bool, error) {
 	var files []PullRequestFile
 	for page := 1; page <= maxPullRequestFilePages; page++ {

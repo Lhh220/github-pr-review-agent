@@ -94,7 +94,7 @@ func (s *AgentService) ReviewPR(ctx context.Context, owner, repo string, number 
 	filesTruncated := toolkit.CoverageTruncated()
 	// A truncated list cannot support the docs-only conclusion: unseen files
 	// may contain code, so keep the normal review path in that case.
-	if len(files) == 0 || (!filesTruncated && isDocsOnlyPR(files)) {
+	if !filesTruncated && (len(files) == 0 || isDocsOnlyPR(files)) {
 		summary := "This pull request has no changed files relative to its base branch; review skipped."
 		rawResponse := "No changed files relative to the base branch."
 		if len(files) > 0 {
