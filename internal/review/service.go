@@ -171,12 +171,129 @@ func DiagnoseRejectedFindings(content string, evidenceCorpus ...string) []Reject
 	return rejected
 }
 
+// parsedEvidenceCorpus decodes each corpus source once per review instead of
+// re-unmarshaling for every finding and every evidence item. Semantics are
+// identical to the per-call decoding: a source that decodes into the JSON
+// shapes below never falls back to raw-text matching.
+type parsedEvidenceCorpus struct {
+	strings []string
+	sources []parsedCorpusSource
+}
+
+type parsedCorpusSource struct {
+	raw    string
+	refs   *referenceCorpusOutput
+	checks *staticCheckCorpusOutput
+}
+
+type referenceCorpusOutput struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+	Matches []struct {
+		Path    string `json:"path"`
+		Line    int    `json:"line"`
+		Snippet string `json:"snippet"`
+	} `json:"matches"`
+}
+
+type staticCheckCorpusOutput struct {
+	Checks []struct {
+		Command  string `json:"command"`
+		Output   string `json:"output"`
+		Error    string `json:"error"`
+		Success  *bool  `json:"success"`
+		ExitCode int    `json:"exit_code"`
+		TimedOut bool   `json:"timed_out"`
+	} `json:"checks"`
+}
+
+func parseEvidenceCorpus(corpus []string) *parsedEvidenceCorpus {
+	parsed := &parsedEvidenceCorpus{
+		strings: make([]string, 0, len(corpus)),
+	}
+	for _, source := range corpus {
+		entry := parsedCorpusSource{raw: source}
+		var refs referenceCorpusOutput
+		if json.Unmarshal([]byte(source), &refs) == nil {
+			entry.refs = &refs
+		}
+		var checks staticCheckCorpusOutput
+		if json.Unmarshal([]byte(source), &checks) == nil {
+			entry.checks = &checks
+		}
+		parsed.sources = append(parsed.sources, entry)
+
+		var decoded any
+		if err := json.Unmarshal([]byte(source), &decoded); err == nil {
+			parsed.strings = append(parsed.strings, jsonStrings(decoded)...)
+			continue
+		}
+		parsed.strings = append(parsed.strings, source)
+	}
+	return parsed
+}
+
+func (p *parsedEvidenceCorpus) containsString(target string) bool {
+	return containsString(p.strings, target)
+}
+
+func (p *parsedEvidenceCorpus) referenceEvidence(evidence store.Evidence) bool {
+	for _, source := range p.sources {
+		if source.refs != nil {
+			if source.refs.Path == evidence.File {
+				prefix := fmt.Sprintf("%d:", evidence.Line)
+				target := strings.TrimSpace(evidence.Text)
+				for _, contentLine := range strings.Split(source.refs.Content, "\n") {
+					contentLine = strings.TrimSpace(contentLine)
+					code := strings.TrimSpace(strings.TrimPrefix(contentLine, prefix))
+					if strings.HasPrefix(contentLine, prefix) && code == target {
+						return true
+					}
+				}
+			}
+			for _, match := range source.refs.Matches {
+				if match.Path == evidence.File && match.Line == evidence.Line &&
+					match.Snippet == strings.TrimSpace(evidence.Text) {
+					return true
+				}
+			}
+			continue
+		}
+		if rawReferenceEvidence(source.raw, evidence) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *parsedEvidenceCorpus) staticCheckEvidence(evidence store.Evidence) bool {
+	excerpt := strings.TrimSpace(evidence.Excerpt)
+	if excerpt == "" {
+		return false
+	}
+	for _, source := range p.sources {
+		if source.checks == nil {
+			continue
+		}
+		for _, check := range source.checks.Checks {
+			if check.Command != evidence.Command || check.Success == nil || *check.Success ||
+				check.ExitCode <= 0 || check.TimedOut || check.Error != "" {
+				continue
+			}
+			if strings.Contains(check.Output, excerpt) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func normalizeFindingsWithDiagnostics(findings []store.Finding, evidenceCorpus ...string) ([]store.Finding, []RejectedFinding) {
 	normalized := make([]store.Finding, 0, len(findings))
 	var rejected []RejectedFinding
-	corpusStrings := evidenceStrings(evidenceCorpus)
+	corpus := parseEvidenceCorpus(evidenceCorpus)
 	for _, finding := range findings {
-		evidence := supportedEvidence(finding, evidenceCorpus, corpusStrings)
+		evidence := supportedEvidence(finding, corpus)
 		if finding.File == "" || finding.Line <= 0 || len(evidence) == 0 {
 			reason := "no evidence matched the retrieved corpus at the claimed location"
 			if finding.File == "" || finding.Line <= 0 {
@@ -194,18 +311,18 @@ func normalizeFindingsWithDiagnostics(findings []store.Finding, evidenceCorpus .
 	return normalized, rejected
 }
 
-func supportedEvidence(finding store.Finding, corpus, corpusStrings []string) []store.Evidence {
+func supportedEvidence(finding store.Finding, corpus *parsedEvidenceCorpus) []store.Evidence {
 	supported := make([]store.Evidence, 0, len(finding.Evidence))
 	for _, evidence := range finding.Evidence {
 		switch evidence.Type {
 		case "reference":
 			if strings.TrimSpace(evidence.Text) == "" || evidence.File != finding.File || evidence.Line != finding.Line ||
-				!referenceEvidenceInCorpus(evidence, corpus) {
+				!corpus.referenceEvidence(evidence) {
 				continue
 			}
 		case "static_check":
-			if evidence.Command == "" || !containsString(corpusStrings, evidence.Command) ||
-				!staticCheckEvidenceInCorpus(evidence, corpus) {
+			if evidence.Command == "" || !corpus.containsString(evidence.Command) ||
+				!corpus.staticCheckEvidence(evidence) {
 				continue
 			}
 		default:
@@ -215,6 +332,11 @@ func supportedEvidence(finding store.Finding, corpus, corpusStrings []string) []
 	}
 	return supported
 }
+
+// The functions below re-implement evidence matching on the raw corpus the
+// way the production path did before corpus pre-parsing. They are kept as the
+// reference implementation for TestParsedCorpusMatchesLegacyMatching; change
+// them only together with parsedEvidenceCorpus.
 
 func referenceEvidenceInCorpus(evidence store.Evidence, corpus []string) bool {
 	for _, source := range corpus {
@@ -618,14 +740,14 @@ func validateReviewCandidate(content string, corpus []string) error {
 	if err != nil {
 		return err
 	}
-	corpusStrings := evidenceStrings(corpus)
+	parsedCorpus := parseEvidenceCorpus(corpus)
 	for i, finding := range parsed.Findings {
-		if len(supportedEvidence(finding, corpus, corpusStrings)) > 0 {
+		if len(supportedEvidence(finding, parsedCorpus)) > 0 {
 			continue
 		}
 		for _, evidence := range finding.Evidence {
 			if evidence.Type == "reference" && evidence.File != "" && evidence.Line > 0 &&
-				(finding.File != evidence.File || finding.Line != evidence.Line) && referenceEvidenceInCorpus(evidence, corpus) {
+				(finding.File != evidence.File || finding.Line != evidence.Line) && parsedCorpus.referenceEvidence(evidence) {
 				return fmt.Errorf("finding %d location does not match its verified reference evidence at %s:%d; anchor the finding to the failing usage if appropriate, or omit it; do not alter or invent the source quote", i+1, evidence.File, evidence.Line)
 			}
 		}
