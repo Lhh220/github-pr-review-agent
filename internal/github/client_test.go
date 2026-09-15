@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 )
 
@@ -41,18 +42,98 @@ func TestGetPullRequestFilesPaginates(t *testing.T) {
 	client := NewClient("test-token")
 	client.baseURL = server.URL
 
-	files, err := client.GetPullRequestFiles(context.Background(), "owner", "repo", 12)
+	files, truncated, err := client.GetPullRequestFiles(context.Background(), "owner", "repo", 12)
 	if err != nil {
 		t.Fatalf("GetPullRequestFiles() error = %v", err)
 	}
 	if len(files) != 102 {
 		t.Fatalf("file count = %d, want 102", len(files))
 	}
+	if truncated {
+		t.Fatal("short second page must not report truncation")
+	}
 	if got := <-requestedPages; got != "1" {
 		t.Fatalf("first page = %s, want 1", got)
 	}
 	if got := <-requestedPages; got != "2" {
 		t.Fatalf("second page = %s, want 2", got)
+	}
+}
+
+func TestGetPullRequestFilesDetectsCapTruncation(t *testing.T) {
+	requestedPages := make(chan string, maxPullRequestFilePages+1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		requestedPages <- page
+
+		// Every page including the probe page 11 is full, so truncation is
+		// confirmed by the probe.
+		files := make([]PullRequestFile, 100)
+		for i := range files {
+			files[i].Filename = "file.go"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(files); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient("test-token")
+	client.baseURL = server.URL
+
+	files, truncated, err := client.GetPullRequestFiles(context.Background(), "owner", "repo", 12)
+	if err != nil {
+		t.Fatalf("GetPullRequestFiles() error = %v", err)
+	}
+	if len(files) != 100*maxPullRequestFilePages {
+		t.Fatalf("file count = %d, want the page cap product", len(files))
+	}
+	if !truncated {
+		t.Fatal("full probe page must confirm truncation")
+	}
+	for index := 1; index <= maxPullRequestFilePages; index++ {
+		if got := <-requestedPages; got != strconv.Itoa(index) {
+			t.Fatalf("page %d = %s, want %d", index, got, index)
+		}
+	}
+	if got := <-requestedPages; got != "11" {
+		t.Fatalf("probe page = %s, want 11", got)
+	}
+}
+
+func TestGetPullRequestFilesExactCapIsNotTruncated(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		// Exactly 1000 files: the probe page 11 comes back empty, so the list
+		// is complete and must not be reported as truncated.
+		fileCount := 0
+		if page != "11" {
+			fileCount = 100
+		}
+		files := make([]PullRequestFile, fileCount)
+		for i := range files {
+			files[i].Filename = "file.go"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(files); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient("test-token")
+	client.baseURL = server.URL
+
+	files, truncated, err := client.GetPullRequestFiles(context.Background(), "owner", "repo", 12)
+	if err != nil {
+		t.Fatalf("GetPullRequestFiles() error = %v", err)
+	}
+	if len(files) != 100*maxPullRequestFilePages {
+		t.Fatalf("file count = %d, want the page cap product", len(files))
+	}
+	if truncated {
+		t.Fatal("empty probe page means the list is complete; truncation must not be reported")
 	}
 }
 

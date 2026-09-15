@@ -24,16 +24,17 @@ type fakeClient struct {
 	fileContents map[string]string
 	tarball      io.Reader
 
-	getPRCalls    int
-	getFilesCalls int
-	owners        []string
-	repos         []string
-	numbers       []int
-	commitLimits  []int
-	filePaths     []string
-	refs          []string
-	tarballRef    string
-	tarballCalls  int
+	getPRCalls     int
+	getFilesCalls  int
+	owners         []string
+	repos          []string
+	numbers        []int
+	commitLimits   []int
+	filePaths      []string
+	refs           []string
+	tarballRef     string
+	tarballCalls   int
+	filesTruncated bool
 }
 
 func (f *fakeClient) GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error) {
@@ -44,9 +45,9 @@ func (f *fakeClient) GetPullRequest(ctx context.Context, owner, repo string, num
 	return f.pr, nil
 }
 
-func (f *fakeClient) GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, error) {
+func (f *fakeClient) GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, bool, error) {
 	f.getFilesCalls++
-	return f.files, nil
+	return f.files, f.filesTruncated, nil
 }
 
 func (f *fakeClient) GetPullRequestCommits(ctx context.Context, owner, repo string, number, limit int) ([]github.PullRequestCommit, error) {
@@ -695,5 +696,31 @@ func TestToolsRejectNonIntegerArguments(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "start_line must be an integer") {
 		t.Fatalf("expected integer validation error, got %v", err)
+	}
+}
+
+func TestChangedFilesToolReportsCoverageTruncation(t *testing.T) {
+	client := newFakeClient()
+	client.filesTruncated = true
+	toolkit := NewToolkit(client, "owner", "repo", 12, Options{})
+	defer toolkit.Close()
+
+	output, err := toolByName(t, toolkit, "list_changed_files").Execute(context.Background(), map[string]any{})
+	if err != nil {
+		t.Fatalf("list_changed_files: %v", err)
+	}
+	if !strings.Contains(output, "\"coverage_truncated\":true") {
+		t.Fatalf("coverage_truncated missing from output: %s", output)
+	}
+	if !toolkit.CoverageTruncated() {
+		t.Fatal("CoverageTruncated() = false after loading truncated files")
+	}
+
+	diffOutput, err := toolByName(t, toolkit, "read_diff").Execute(context.Background(), map[string]any{})
+	if err != nil {
+		t.Fatalf("read_diff: %v", err)
+	}
+	if !strings.Contains(diffOutput, "\"coverage_truncated\":true") {
+		t.Fatalf("read_diff full output lacks coverage_truncated: %s", diffOutput)
 	}
 }

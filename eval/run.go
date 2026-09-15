@@ -59,7 +59,7 @@ func (c *fixtureGitHubClient) GetPullRequestFiles(
 	owner string,
 	repo string,
 	number int,
-) ([]github.PullRequestFile, error) {
+) ([]github.PullRequestFile, bool, error) {
 	files := make([]github.PullRequestFile, len(c.fixture.Files))
 	for index, file := range c.fixture.Files {
 		files[index] = github.PullRequestFile{
@@ -71,7 +71,7 @@ func (c *fixtureGitHubClient) GetPullRequestFiles(
 			Patch:     file.Patch,
 		}
 	}
-	return files, nil
+	return files, false, nil
 }
 
 func (c *fixtureGitHubClient) GetPullRequestCommits(

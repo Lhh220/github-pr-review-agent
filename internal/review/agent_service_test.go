@@ -53,8 +53,8 @@ func (f *fakeAgentGitHubClient) GetPullRequest(ctx context.Context, owner, repo 
 	return f.pr, nil
 }
 
-func (f *fakeAgentGitHubClient) GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, error) {
-	return f.files, nil
+func (f *fakeAgentGitHubClient) GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, bool, error) {
+	return f.files, false, nil
 }
 
 func (f *fakeAgentGitHubClient) GetPullRequestCommits(ctx context.Context, owner, repo string, number, limit int) ([]github.PullRequestCommit, error) {

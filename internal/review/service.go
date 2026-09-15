@@ -55,16 +55,22 @@ func New(gh GitHubClient, l LLMClient, results ResultStore, maxDiffLines, maxFil
 	}
 }
 
+// filesTruncatedSummaryNote is appended to review summaries when the GitHub
+// file-list pagination cap was hit, so readers know coverage is incomplete.
+const filesTruncatedSummaryNote = "Note: the changed-file list was truncated by the GitHub API pagination limit; more files exist and review coverage may be incomplete."
+
 func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int, taskID uint64) error {
 	pr, completed, err := resumeReview(ctx, s.GitHub, s.Results, owner, repo, number, taskID)
 	if err != nil || completed {
 		return err
 	}
-	files, err := s.GitHub.GetPullRequestFiles(ctx, owner, repo, number)
+	files, filesTruncated, err := s.GitHub.GetPullRequestFiles(ctx, owner, repo, number)
 	if err != nil {
 		return fmt.Errorf("get pull request files: %w", err)
 	}
-	if len(files) == 0 || isDocsOnlyPR(files) {
+	// A truncated list cannot support the docs-only conclusion: unseen files
+	// may contain code, so keep the normal review path in that case.
+	if len(files) == 0 || (!filesTruncated && isDocsOnlyPR(files)) {
 		summary := "This pull request has no changed files relative to its base branch; review skipped."
 		rawResponse := "No changed files relative to the base branch."
 		if len(files) > 0 {
@@ -96,9 +102,13 @@ func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int, 
 	if err != nil {
 		return err
 	}
+	summary := parsed.Summary
+	if filesTruncated {
+		summary += "\n\n" + filesTruncatedSummaryNote
+	}
 	return finishReview(ctx, s.GitHub, s.Results, owner, repo, number, store.NewReviewResult{
 		TaskID:        taskID,
-		Summary:       parsed.Summary,
+		Summary:       summary,
 		Findings:      parsed.Findings,
 		RawResponse:   response.Content,
 		Model:         response.Model,
