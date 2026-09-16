@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -29,8 +30,8 @@ func TestMySQLTaskStore(t *testing.T) {
 	if len(migrationStatuses) == 0 || !migrationStatuses[0].Applied {
 		t.Fatalf("unexpected migration status: %+v", migrationStatuses)
 	}
-	if len(migrationStatuses) != 3 || !migrationStatuses[1].Applied || !migrationStatuses[2].Applied {
-		t.Fatalf("expected migrations version 1, 2, and 3 to be applied: %+v", migrationStatuses)
+	if len(migrationStatuses) != 4 || !migrationStatuses[1].Applied || !migrationStatuses[2].Applied || !migrationStatuses[3].Applied {
+		t.Fatalf("expected migrations version 1 through 4 to be applied: %+v", migrationStatuses)
 	}
 
 	var createdPrecision, updatedPrecision int
@@ -168,6 +169,12 @@ WHERE table_schema = DATABASE()
 	}
 	if got.Status != "queued" || got.AttemptCount != 0 || got.NextRetryAt != nil {
 		t.Fatalf("unexpected requeued task: %+v", got)
+	}
+
+	// Requeueing a task that is not dead_letter must fail on the status guard
+	// without issuing any extra query inside the open transaction.
+	if err := s.RequeueTask(ctx, task.ID); !errors.Is(err, ErrTaskTransitionFailed) {
+		t.Fatalf("requeue non-dead-letter task: err=%v, want ErrTaskTransitionFailed", err)
 	}
 
 	if _, err := s.db.ExecContext(ctx, `

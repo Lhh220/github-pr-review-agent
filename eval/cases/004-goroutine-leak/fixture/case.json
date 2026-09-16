@@ -1,19 +1,22 @@
 {
   "title": "Process tasks in background",
-  "body": "Start one goroutine per task.",
+  "body": "Start one goroutine per task. Each task should be processed once.",
   "head_sha": "4444444444444444444444444444444444444444",
   "files": [
     {
       "filename": "internal/worker/worker.go",
-      "status": "modified",
-      "additions": 6,
+      "status": "added",
+      "additions": 12,
       "deletions": 0,
-      "changes": 6,
-      "patch": "@@ -4,3 +4,9 @@\n func Start(tasks []Task) error {\n+\tfor _, task := range tasks {\n+\t\tgo func() {\n+\t\t\tfor {\n+\t\t\t\tprocess(task)\n+\t\t\t}\n+\t\t}()\n+\t}\n+\treturn nil"
+      "changes": 12,
+      "patch": "@@ -0,0 +1,12 @@\n+package worker\n+\n+func Start(tasks []Task) error {\n+\tfor _, task := range tasks {\n+\t\tgo func() {\n+\t\t\tfor {\n+\t\t\t\tprocess(task)\n+\t\t\t}\n+\t\t}()\n+\t}\n+\treturn nil\n+}"
     }
   ],
   "file_contents": {
     "internal/worker/worker.go": "package worker\n\nfunc Start(tasks []Task) error {\n\tfor _, task := range tasks {\n\t\tgo func() {\n\t\t\tfor {\n\t\t\t\tprocess(task)\n\t\t\t}\n\t\t}()\n\t}\n\treturn nil\n}\n"
   },
-  "repository": {}
+  "repository": {
+    "go.mod": "module example.com/review\n\ngo 1.25\n",
+    "internal/worker/task.go": "package worker\n\ntype Task struct { Run func() }\n\nfunc process(task Task) {\n if task.Run != nil { task.Run() }\n}\n"
+  }
 }

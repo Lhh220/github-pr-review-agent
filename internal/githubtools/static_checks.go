@@ -2,6 +2,7 @@ package githubtools
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -35,15 +37,17 @@ type staticCheckRunner func(
 ) (staticCheckCommandResult, error)
 
 type staticCheckCommandResult struct {
-	Name            string `json:"name"`
-	Command         string `json:"command"`
-	Success         bool   `json:"success"`
-	ExitCode        int    `json:"exit_code"`
-	TimedOut        bool   `json:"timed_out"`
-	DurationMS      int64  `json:"duration_ms"`
-	Output          string `json:"output"`
-	OutputTruncated bool   `json:"output_truncated"`
-	Error           string `json:"error,omitempty"`
+	Name            string            `json:"name"`
+	Command         string            `json:"command"`
+	Success         bool              `json:"success"`
+	ExitCode        int               `json:"exit_code"`
+	TimedOut        bool              `json:"timed_out"`
+	DurationMS      int64             `json:"duration_ms"`
+	Output          string            `json:"output"`
+	OutputTruncated bool              `json:"output_truncated"`
+	Error           string            `json:"error,omitempty"`
+	ResourcesBefore map[string]string `json:"resources_before"`
+	ResourcesAfter  map[string]string `json:"resources_after"`
 }
 
 type staticChecksTool struct {
@@ -102,14 +106,9 @@ func (t staticChecksTool) Execute(ctx context.Context, input map[string]any) (st
 	}
 	defer os.RemoveAll(repoDir)
 
-	archive, err := t.toolkit.client.GetRepositoryTarball(
-		ctx,
-		t.toolkit.owner,
-		t.toolkit.repo,
-		pr.Head.SHA,
-	)
+	archive, err := t.toolkit.cachedTarball(ctx, pr.Head.SHA)
 	if err != nil {
-		return "", fmt.Errorf("get repository tarball: %w", err)
+		return "", err
 	}
 	defer archive.Close()
 	if err := extractStaticCheckArchive(archive, repoDir); err != nil {
@@ -133,23 +132,30 @@ func (t staticChecksTool) Execute(ctx context.Context, input map[string]any) (st
 		args := staticCheckCommands[check]
 		started := time.Now()
 		runCtx, cancel := context.WithTimeout(ctx, t.toolkit.staticCheckTimeout)
+		before := staticCheckResources()
 		result, runErr := t.toolkit.staticCheckRunner(runCtx, args, repoDir, env)
 		cancel()
+		result.ResourcesBefore = before
+		result.ResourcesAfter = staticCheckResources()
 		result.Name = check
 		result.Command = "go " + strings.Join(args, " ")
 		result.DurationMS = time.Since(started).Milliseconds()
 		if runErr != nil {
 			result.Error = runErr.Error()
 		}
-		result.Output, result.OutputTruncated = clampString(result.Output, maxStaticCheckOutputChars)
+		output, truncated := clampString(result.Output, maxStaticCheckOutputChars)
+		result.Output = output
+		result.OutputTruncated = result.OutputTruncated || truncated
 		results = append(results, result)
 	}
 
 	return encodeJSON(map[string]any{
-		"supported": true,
-		"ref":       pr.Head.SHA,
-		"checks":    results,
-		"timeout":   t.toolkit.staticCheckTimeout.String(),
+		"execution_environment": staticCheckDiagnosticEnvironment(env),
+		"resource_scope":        "container cgroup v2 root; counters are shared by all processes, not attributable to this command alone",
+		"supported":             true,
+		"ref":                   pr.Head.SHA,
+		"checks":                results,
+		"timeout":               t.toolkit.staticCheckTimeout.String(),
 	})
 }
 
@@ -281,7 +287,8 @@ func staticCheckEnvironment(baseDir, goProxy string) []string {
 		"GOTOOLCHAIN=local",
 		"GOENV=off",
 		"GOPROXY=" + goProxy,
-		"GOFLAGS=-mod=mod",
+		"GOFLAGS=-mod=mod -p=1",
+		"GOMAXPROCS=2",
 		"CGO_ENABLED=1",
 	}
 }
@@ -296,10 +303,16 @@ func runStaticCheckCommand(
 	command.Dir = dir
 	command.Env = env
 
-	output, err := command.CombinedOutput()
+	command.WaitDelay = 2 * time.Second
+	configureStaticProcess(command)
+	output := &boundedCheckOutput{}
+	command.Stdout = output
+	command.Stderr = output
+	err := command.Run()
 	result := staticCheckCommandResult{
-		Success: err == nil,
-		Output:  string(output),
+		Success:         err == nil,
+		Output:          output.String(),
+		OutputTruncated: output.truncated,
 	}
 	if err == nil {
 		return result, nil
@@ -316,4 +329,58 @@ func runStaticCheckCommand(
 		return result, nil
 	}
 	return result, fmt.Errorf("start go command: %w", err)
+}
+
+// Bound memory while the process runs, rather than truncating only after exit.
+type boundedCheckOutput struct {
+	mu        sync.Mutex
+	data      bytes.Buffer
+	truncated bool
+}
+
+func (b *boundedCheckOutput) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := len(p)
+	remaining := maxStaticCheckOutputChars - b.data.Len()
+	if len(p) > remaining {
+		b.truncated = true
+		p = p[:remaining]
+	}
+	_, _ = b.data.Write(p)
+	return n, nil
+}
+func (b *boundedCheckOutput) String() string { return b.data.String() }
+
+// Whitelist only execution settings, never the application's inherited environment.
+func staticCheckDiagnosticEnvironment(env []string) map[string]string {
+	result := map[string]string{}
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok && (key == "GOFLAGS" || key == "GOMAXPROCS" || key == "GOTOOLCHAIN" || key == "CGO_ENABLED") {
+			result[key] = value
+		}
+	}
+	return result
+}
+
+func staticCheckResources() map[string]string {
+	return readStaticCheckResources("/sys/fs/cgroup")
+}
+
+// Missing files mean unavailable (including non-Linux/v1), never zero usage.
+func readStaticCheckResources(root string) map[string]string {
+	result := map[string]string{}
+	for _, name := range []string{"memory.current", "memory.max", "memory.peak", "memory.events"} {
+		file, err := os.Open(filepath.Join(root, name))
+		if err != nil {
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(file, 4096))
+		file.Close()
+		if err == nil {
+			result[name] = strings.TrimSpace(string(data))
+		}
+	}
+	return result
 }

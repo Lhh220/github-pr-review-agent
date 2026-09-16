@@ -1,11 +1,11 @@
 {
   "findings": [
     {
-      "category": "performance",
+      "category": "bug",
       "file": "internal/worker/worker.go",
       "line": 6,
-      "severity": "medium",
-      "confidence": "needs_verification"
+      "severity": "high",
+      "confidence": "confirmed"
     }
   ]
 }

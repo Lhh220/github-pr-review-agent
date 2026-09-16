@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/liaohonghui/github-pr-review-agent/internal/llm"
@@ -125,7 +127,7 @@ func TestAgentRunsToolCallingLoop(t *testing.T) {
 	}
 
 	messages := provider.requests[1].Messages
-	if len(messages) != 4 ||
+	if len(messages) != 5 ||
 		messages[2].Role != "assistant" || messages[2].ToolCalls[0].ID != "call-1" ||
 		messages[3].Role != "tool" || messages[3].ToolCallID != "call-1" ||
 		messages[3].Content != `{"language":"Go"}` {
@@ -227,5 +229,178 @@ func TestAgentForcesFinalAnswerAfterToolBudget(t *testing.T) {
 	lastRequest := provider.requests[len(provider.requests)-1]
 	if len(lastRequest.Tools) != 0 || lastRequest.Messages[len(lastRequest.Messages)-1].Role != "user" {
 		t.Fatalf("expected forced final request: %+v", lastRequest)
+	}
+}
+
+func TestFinalResponseRepairIsBounded(t *testing.T) {
+	for _, exhausted := range []bool{false, true} {
+		for _, repair := range []string{`{"summary":"clean","findings":[]}`, "still invalid"} {
+			t.Run(fmt.Sprintf("exhausted=%v/repair=%s", exhausted, repair), func(t *testing.T) {
+				registry, err := NewRegistry(echoTool{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				responses := []llm.ChatResponse{}
+				if exhausted {
+					responses = append(responses, llm.ChatResponse{ToolCalls: []llm.ToolCall{{ID: "call", Name: "echo_language", Arguments: `{"language":"Go"}`}}})
+				}
+				responses = append(responses, llm.ChatResponse{Content: "The code looks good.\n" + `{"summary":"clean","findings":[]}`, Usage: llm.Usage{TotalTokens: 10}}, llm.ChatResponse{Content: repair, Usage: llm.Usage{TotalTokens: 7}})
+				provider := &scriptedProvider{responses: responses}
+				runner, err := New(provider, registry, Options{MaxSteps: 1, ValidateResponse: func(s string) error {
+					if !json.Valid([]byte(s)) {
+						return fmt.Errorf("invalid JSON")
+					}
+					return nil
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				result, err := runner.Run(context.Background(), Request{SystemPrompt: "Return JSON", UserPrompt: "Review"})
+				if (err != nil) != (repair == "still invalid") {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				wantCalls := 2
+				if exhausted {
+					wantCalls++
+				}
+				if len(provider.requests) != wantCalls || result.ProviderCalls != wantCalls || result.Usage.TotalTokens != 17 {
+					t.Fatalf("unbounded retry or lost usage: %+v", result)
+				}
+				last := provider.requests[len(provider.requests)-1]
+				if len(last.Tools) != 0 {
+					t.Fatal("repair must not offer tools")
+				}
+				if exhausted {
+					found := false
+					for _, m := range last.Messages {
+						if m.Role == "tool" {
+							found = true
+						}
+					}
+					if !found {
+						t.Fatal("repair lost collected evidence")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestReadCacheIsCanonicalAndRunScoped(t *testing.T) {
+	registry, _ := NewRegistry(echoTool{})
+	provider := &scriptedProvider{}
+	runner, _ := New(provider, registry, Options{CacheableTools: []string{"echo_language"}})
+	for run := 0; run < 2; run++ {
+		provider.responses = []llm.ChatResponse{
+			{ToolCalls: []llm.ToolCall{{ID: "second", Name: "echo_language", Arguments: `{ "language" : "Go" }`}}},
+			{Content: "done"},
+		}
+		result, err := runner.Run(context.Background(), Request{SystemPrompt: "system", UserPrompt: "user",
+			InitialToolCalls: []llm.ToolCall{{ID: "first", Name: "echo_language", Arguments: `{"language":"Go"}`}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.ToolCalls[0].Cached || !result.ToolCalls[1].Cached || !strings.Contains(result.ToolCalls[1].Output, "first") {
+			t.Fatalf("cache results: %+v", result.ToolCalls)
+		}
+	}
+}
+
+func TestOutputBudgetRejectsWholePayloadAndAllowsSmallerRead(t *testing.T) {
+	registry, _ := NewRegistry(echoTool{})
+	provider := &scriptedProvider{responses: []llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{{ID: "large", Name: "echo_language", Arguments: `{"language":"` + strings.Repeat("x", 100) + `"}`}}},
+		{ToolCalls: []llm.ToolCall{{ID: "small", Name: "echo_language", Arguments: `{"language":"Go"}`}}},
+		{Content: "done"},
+	}}
+	runner, _ := New(provider, registry, Options{MaxToolOutputBytes: 30})
+	result, err := runner.Run(context.Background(), Request{SystemPrompt: "system", UserPrompt: "user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ToolCalls[0].Output != "" || result.ToolCalls[0].Error == "" || result.ToolCalls[1].Error != "" {
+		t.Fatalf("unexpected results: %+v", result)
+	}
+}
+
+func TestContextBudgetAlsoGuardsRepair(t *testing.T) {
+	registry, _ := NewRegistry(echoTool{})
+	provider := &scriptedProvider{responses: []llm.ChatResponse{{Content: strings.Repeat("x", 4096)}}}
+	runner, _ := New(provider, registry, Options{MaxContextBytes: 2048, ValidateResponse: func(string) error { return fmt.Errorf("invalid JSON") }})
+	_, err := runner.Run(context.Background(), Request{SystemPrompt: "system", UserPrompt: "user"})
+	if err == nil || !strings.Contains(err.Error(), "context budget exceeded") || len(provider.requests) != 1 {
+		t.Fatalf("err=%v requests=%d", err, len(provider.requests))
+	}
+	_, err = runner.Run(context.Background(), Request{SystemPrompt: "system", UserPrompt: strings.Repeat("x", 4096)})
+	if err == nil || len(provider.requests) != 1 {
+		t.Fatal("oversized initial request reached provider")
+	}
+}
+
+type countedEchoTool struct {
+	echoTool
+	calls    int
+	failOnce bool
+}
+
+func (t *countedEchoTool) Execute(ctx context.Context, input map[string]any) (string, error) {
+	t.calls++
+	if t.failOnce {
+		t.failOnce = false
+		return "", fmt.Errorf("temporary failure")
+	}
+	return t.echoTool.Execute(ctx, input)
+}
+func TestCacheSkipsExecutionButRetriesFailures(t *testing.T) {
+	tool := &countedEchoTool{failOnce: true}
+	registry, _ := NewRegistry(tool)
+	provider := &scriptedProvider{responses: []llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{{ID: "one", Name: "echo_language", Arguments: `{"language":"Go"}`}}},
+		{ToolCalls: []llm.ToolCall{{ID: "two", Name: "echo_language", Arguments: `{"language":"Go"}`}}},
+		{ToolCalls: []llm.ToolCall{{ID: "three", Name: "echo_language", Arguments: `{"language":"Go"}`}}},
+		{Content: "done"},
+	}}
+	runner, _ := New(provider, registry, Options{CacheableTools: []string{"echo_language"}})
+	result, err := runner.Run(context.Background(), Request{SystemPrompt: "system", UserPrompt: "user"})
+	if err != nil || tool.calls != 2 || !result.ToolCalls[2].Cached {
+		t.Fatalf("err=%v calls=%d result=%+v", err, tool.calls, result)
+	}
+}
+
+func TestLowBudgetFinishesWithoutMoreReads(t *testing.T) {
+	tool := &countedEchoTool{}
+	registry, _ := NewRegistry(tool)
+	provider := &scriptedProvider{responses: []llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{{ID: "one", Name: "echo_language", Arguments: `{"language":"` + strings.Repeat("x", 80) + `"}`}, {ID: "two", Name: "echo_language", Arguments: `{"language":"Go"}`}}},
+		{Content: "partial review"},
+	}}
+	runner, _ := New(provider, registry, Options{MaxToolOutputBytes: 100})
+	result, err := runner.Run(context.Background(), Request{SystemPrompt: "system", UserPrompt: "user"})
+	if err != nil || tool.calls != 1 || result.ToolCalls[1].Error == "" {
+		t.Fatalf("err=%v calls=%d result=%+v", err, tool.calls, result)
+	}
+	last := provider.requests[len(provider.requests)-1]
+	if len(last.Tools) != 0 || !strings.Contains(last.Messages[len(last.Messages)-1].Content, "uninspected") {
+		t.Fatal("missing forced final/coverage notice")
+	}
+	if !strings.Contains(provider.requests[0].Messages[2].Content, "100 bytes") {
+		t.Fatal("missing upfront budget")
+	}
+}
+
+func TestRepeatedOversizeReadsStopWithinBatch(t *testing.T) {
+	tool := &countedEchoTool{}
+	registry, _ := NewRegistry(tool)
+	call := llm.ToolCall{Name: "echo_language", Arguments: `{"language":"` + strings.Repeat("x", 200) + `"}`}
+	provider := &scriptedProvider{responses: []llm.ChatResponse{{ToolCalls: []llm.ToolCall{call, call, call}}, {Content: "partial review"}}}
+	runner, _ := New(provider, registry, Options{MaxToolOutputBytes: 100})
+	result, err := runner.Run(context.Background(), Request{SystemPrompt: "system", UserPrompt: "user"})
+	if err != nil || tool.calls != 2 || len(result.ToolCalls) != 3 || len(provider.requests[1].Tools) != 0 {
+		t.Fatalf("err=%v calls=%d result=%+v", err, tool.calls, result)
+	}
+	for _, call := range result.ToolCalls {
+		if call.Output != "" || call.Error == "" {
+			t.Fatal("rejected output entered evidence")
+		}
 	}
 }

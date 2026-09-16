@@ -14,7 +14,7 @@
     "model": "fixture"
   },
   {
-    "content": "{\"summary\":\"The background loop may never terminate.\",\"findings\":[{\"category\":\"performance\",\"file\":\"internal/worker/worker.go\",\"line\":6,\"severity\":\"medium\",\"comment\":\"These goroutines run an unbounded loop and may leak workers after Start returns.\",\"suggestion\":\"Pass a context and select on ctx.Done with a bounded work loop.\",\"confidence\":\"confirmed\",\"evidence\":[{\"type\":\"reference\",\"file\":\"internal/worker/worker.go\",\"line\":6,\"text\":\"for {\"}]}]}",
+    "content": "{\"summary\": \"The background loop may never terminate.\", \"findings\": [{\"category\": \"bug\", \"file\": \"internal/worker/worker.go\", \"line\": 6, \"severity\": \"high\", \"comment\": \"The unbounded loop executes each task repeatedly, violating the one-execution contract.\", \"suggestion\": \"Pass a context and select on ctx.Done with a bounded work loop.\", \"confidence\": \"confirmed\", \"evidence\": [{\"type\": \"reference\", \"file\": \"internal/worker/worker.go\", \"line\": 6, \"text\": \"for {\"}]}]}",
     "input_tokens": 240,
     "output_tokens": 88,
     "total_tokens": 328,

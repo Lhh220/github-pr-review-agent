@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/liaohonghui/github-pr-review-agent/internal/github"
@@ -21,6 +22,7 @@ import (
 )
 
 type RunnerOptions struct {
+	OnProgress          func(string)
 	MaxSteps            int
 	ToolTimeout         time.Duration
 	MaxDiffLines        int
@@ -57,7 +59,7 @@ func (c *fixtureGitHubClient) GetPullRequestFiles(
 	owner string,
 	repo string,
 	number int,
-) ([]github.PullRequestFile, error) {
+) ([]github.PullRequestFile, bool, error) {
 	files := make([]github.PullRequestFile, len(c.fixture.Files))
 	for index, file := range c.fixture.Files {
 		files[index] = github.PullRequestFile{
@@ -69,7 +71,7 @@ func (c *fixtureGitHubClient) GetPullRequestFiles(
 			Patch:     file.Patch,
 		}
 	}
-	return files, nil
+	return files, false, nil
 }
 
 func (c *fixtureGitHubClient) GetPullRequestCommits(
@@ -206,8 +208,10 @@ func (p *scriptProvider) ChatWithTools(
 }
 
 type memoryStore struct {
-	result    *store.ReviewResult
-	toolCalls []store.ToolCallLog
+	delivery   *store.ReviewDelivery
+	result     *store.ReviewResult
+	toolCalls  []store.ToolCallLog
+	toolInputs []string
 }
 
 func (s *memoryStore) CreateReviewResult(
@@ -234,6 +238,7 @@ func (s *memoryStore) CreateToolCallLog(
 	ctx context.Context,
 	input store.NewToolCallLog,
 ) (*store.ToolCallLog, error) {
+	s.toolInputs = append(s.toolInputs, input.Input)
 	s.toolCalls = append(s.toolCalls, store.ToolCallLog{
 		ID:         uint64(len(s.toolCalls) + 1),
 		TaskID:     input.TaskID,
@@ -254,7 +259,8 @@ func RunCase(
 ) (RunResult, error) {
 	gh := &fixtureGitHubClient{fixture: evaluationCase.Fixture}
 	resultStore := &memoryStore{}
-	service := review.NewAgent(gh, provider, resultStore, review.AgentOptions{
+	recorder := &recordingProvider{provider: provider, onProgress: options.OnProgress}
+	service := review.NewAgent(gh, recorder, resultStore, review.AgentOptions{
 		MaxSteps:            options.MaxSteps,
 		ToolTimeout:         options.ToolTimeout,
 		MaxDiffLines:        options.MaxDiffLines,
@@ -268,38 +274,44 @@ func RunCase(
 	})
 
 	started := time.Now()
-	if err := service.ReviewPR(ctx, "eval-owner", "eval-repo", 12, 1); err != nil {
-		return RunResult{}, fmt.Errorf("run case %s: %w", evaluationCase.Name, err)
+	runErr := service.ReviewPR(ctx, "eval-owner", "eval-repo", 12, 1)
+	result := RunResult{Findings: []store.Finding{}, Responses: recorder.responses, LatencyMS: time.Since(started).Milliseconds()}
+	var corpus []string
+	for i, call := range resultStore.toolCalls {
+		result.Tools = append(result.Tools, ToolTrace{Name: call.ToolName, Input: resultStore.toolInputs[i], Output: call.Output, Error: call.Error, DurationMS: call.DurationMS})
+		if call.Error == "" {
+			corpus = append(corpus, call.Output)
+		}
+	}
+	for _, trace := range recorder.responses {
+		result.InputTokens += trace.Response.Usage.InputTokens
+		result.OutputTokens += trace.Response.Usage.OutputTokens
+		result.TotalTokens += trace.Response.Usage.TotalTokens
+	}
+	if len(recorder.responses) > 0 {
+		last := recorder.responses[len(recorder.responses)-1]
+		if last.Error == "" && len(last.Response.ToolCalls) == 0 {
+			result.RejectedFindings = review.DiagnoseRejectedFindings(last.Response.Content, corpus...)
+		}
+	}
+	if runErr != nil {
+		return result, fmt.Errorf("run case %s: %w", evaluationCase.Name, runErr)
 	}
 	if resultStore.result == nil {
-		return RunResult{}, fmt.Errorf("case %s produced no review result", evaluationCase.Name)
+		return result, fmt.Errorf("case %s produced no review result", evaluationCase.Name)
 	}
-
-	findings := resultStore.result.Findings
-	if findings == nil {
-		findings = []store.Finding{}
+	saved := resultStore.result
+	result.Findings = saved.Findings
+	if result.Findings == nil {
+		result.Findings = []store.Finding{}
 	}
-	tools := make([]ToolTrace, len(resultStore.toolCalls))
-	for index, call := range resultStore.toolCalls {
-		tools[index] = ToolTrace{Name: call.ToolName, DurationMS: call.DurationMS}
+	if saved.Model == "none" {
+		result.SkippedReason = saved.Summary
 	}
-	skippedReason := ""
-	if resultStore.result.Model == "none" {
-		skippedReason = resultStore.result.Summary
+	if saved.LLMDurationMS > result.LatencyMS {
+		result.LatencyMS = saved.LLMDurationMS
 	}
-	latencyMS := time.Since(started).Milliseconds()
-	if resultStore.result.LLMDurationMS > latencyMS {
-		latencyMS = resultStore.result.LLMDurationMS
-	}
-	return RunResult{
-		Findings:      findings,
-		InputTokens:   resultStore.result.InputTokens,
-		OutputTokens:  resultStore.result.OutputTokens,
-		TotalTokens:   resultStore.result.TotalTokens,
-		LatencyMS:     latencyMS,
-		Tools:         tools,
-		SkippedReason: skippedReason,
-	}, nil
+	return result, nil
 }
 
 func WriteReport(filePath string, report Report) error {
@@ -315,4 +327,25 @@ func WriteReport(filePath string, report Report) error {
 		return fmt.Errorf("write eval report: %w", err)
 	}
 	return nil
+}
+
+// Record at the provider boundary so failed parses and exhausted steps retain diagnostics.
+type recordingProvider struct {
+	provider   review.AgentProvider
+	responses  []ModelTrace
+	onProgress func(string)
+}
+
+func (p *recordingProvider) ChatWithTools(ctx context.Context, request llm.ChatRequest) (llm.ChatResponse, error) {
+	repair := len(request.Messages) > 0 && request.Messages[len(request.Messages)-1].Role == "user" && strings.HasPrefix(request.Messages[len(request.Messages)-1].Content, "Your final response failed validation:")
+	if p.onProgress != nil {
+		p.onProgress(fmt.Sprintf("model_call=%d repair=%t", len(p.responses)+1, repair))
+	}
+	response, err := p.provider.ChatWithTools(ctx, request)
+	trace := ModelTrace{Response: response, Repair: repair}
+	if err != nil {
+		trace.Error = err.Error()
+	}
+	p.responses = append(p.responses, trace)
+	return response, err
 }

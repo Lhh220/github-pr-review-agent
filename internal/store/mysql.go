@@ -295,13 +295,27 @@ func (s *Store) UpdateTaskStatus(ctx context.Context, id uint64, status, taskErr
 	if err != nil {
 		return fmt.Errorf("lock review task for update: %w", err)
 	}
+	if oldStatus == "superseded" {
+		if status == "superseded" {
+			return tx.Commit()
+		}
+		return ErrTaskTransitionFailed
+	}
+	if status == "superseded" && oldStatus != "running" {
+		return ErrTaskTransitionFailed
+	}
+	// Delivery confirmation already completes the task atomically with its audit log.
+	if oldStatus == "done" && status == "done" && errorMessage == nil {
+		return tx.Commit()
+	}
 
 	if _, err := tx.ExecContext(ctx, `
 UPDATE review_task
-SET status = ?, error = ?
+SET status = ?, error = ?, next_retry_at = CASE WHEN ? = 'superseded' THEN NULL ELSE next_retry_at END
 WHERE id = ?`,
 		status,
 		errorMessage,
+		status,
 		id,
 	); err != nil {
 		return fmt.Errorf("update review task status: %w", err)
@@ -507,10 +521,11 @@ WHERE id = ? AND status = 'dead_letter'`,
 	if err != nil {
 		return fmt.Errorf("get requeue rows affected: %w", err)
 	}
+	// The row was already locked and read above, so zero affected rows can
+	// only mean the status guard failed. Never issue another pooled query
+	// here: it can wait on the same pool this transaction is holding a
+	// connection from.
 	if affected == 0 {
-		if _, err := s.GetTask(ctx, id); err != nil {
-			return err
-		}
 		return ErrTaskTransitionFailed
 	}
 
