@@ -100,33 +100,35 @@ func Extract(request Request) Result {
 	return result
 }
 
-var (
-	// treeSitterMu guards treeSitterParsers: tree-sitter parsers keep C-level
-	// mutable state and are not safe for concurrent use, so each supported
-	// language gets exactly one parser reused behind a global lock instead of
-	// being re-allocated on every Extract call.
-	treeSitterMu      sync.Mutex
-	treeSitterParsers = map[string]*treesitter.Parser{}
-)
+// Each language owns one process-lifetime parser. Same-language parsing is
+// serialized because Parser holds mutable C state; other languages can proceed.
+type cachedParser struct {
+	mu     sync.Mutex
+	parser *treesitter.Parser
+}
+
+// Immutable keys keep parser allocation bounded to the supported languages.
+var treeSitterParsers = map[string]*cachedParser{
+	"go": {}, "python": {}, "javascript": {},
+}
 
 func parseWithCachedParser(name, content string) *treesitter.Tree {
-	treeSitterMu.Lock()
-	defer treeSitterMu.Unlock()
-
-	constructor, supported := parserLanguage(name)
+	slot, supported := treeSitterParsers[name]
 	if !supported {
 		return nil
 	}
-	parser, cached := treeSitterParsers[name]
-	if !cached {
-		parser = treesitter.NewParser()
+	slot.mu.Lock()
+	defer slot.mu.Unlock()
+	if slot.parser == nil {
+		constructor, _ := parserLanguage(name)
+		parser := treesitter.NewParser()
 		if err := parser.SetLanguage(treesitter.NewLanguage(constructor())); err != nil {
 			parser.Close()
 			return nil
 		}
-		treeSitterParsers[name] = parser
+		slot.parser = parser
 	}
-	return parser.Parse([]byte(content), nil)
+	return slot.parser.Parse([]byte(content), nil)
 }
 
 func languageForPath(path string) string {

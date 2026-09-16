@@ -182,7 +182,7 @@ func (t *Toolkit) storeFileCache(path, content string) {
 }
 
 // CoverageTruncated reports whether the cached file list hit the GitHub
-// pagination cap and more changed files exist. Meaningful after Files or a
+// pagination cap and more files exist or the probe failed. Meaningful after Files or a
 // file-based tool call succeeded; false before that.
 func (t *Toolkit) CoverageTruncated() bool {
 	t.mu.Lock()

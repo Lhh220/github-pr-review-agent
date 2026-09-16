@@ -8,7 +8,7 @@ import (
 // DefaultMaxErrorBodyBytes caps error response bodies embedded into error
 // strings so a huge upstream body cannot balloon process memory or the
 // database error column downstream.
-const DefaultMaxErrorBodyBytes = 64 << 10
+const DefaultMaxErrorBodyBytes = 8 << 10
 
 // ReadErrorBody reads at most limit+1 bytes: the single extra byte
 // distinguishes "exactly limit bytes" from "more were available". It returns
@@ -23,7 +23,8 @@ func ReadErrorBody(body io.Reader, limit int) string {
 	if truncated {
 		raw = raw[:limit]
 	}
-	value := strings.TrimSpace(string(raw))
+	// A byte limit may split UTF-8; keep error strings valid for utf8mb4 storage.
+	value := strings.TrimSpace(strings.ToValidUTF8(string(raw), "?"))
 	if truncated {
 		if value == "" {
 			return "[response body truncated]"

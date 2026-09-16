@@ -232,3 +232,20 @@ func TestGetRepositoryTarball(t *testing.T) {
 		t.Fatalf("content = %q, want empty", content)
 	}
 }
+
+func TestFilePageProbeFailurePreservesUnknownCoverage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "11" {
+			http.Error(w, "probe unavailable", http.StatusBadGateway)
+			return
+		}
+		json.NewEncoder(w).Encode(make([]PullRequestFile, 100))
+	}))
+	defer server.Close()
+	client := NewClient("test-token")
+	client.baseURL = server.URL
+	files, incomplete, err := client.GetPullRequestFiles(context.Background(), "o", "r", 1)
+	if err != nil || !incomplete || len(files) != 1000 {
+		t.Fatalf("count=%d incomplete=%v err=%v", len(files), incomplete, err)
+	}
+}

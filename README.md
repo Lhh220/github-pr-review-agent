@@ -59,7 +59,7 @@ MVP 已经跑通并部署到 Railway：
 - 关键状态变更与审查结果创建会同步写入 `audit_log`，任务数据和审计数据保持同一事务
 - MySQL 结构通过版本化 migration 管理，服务启动自动执行，也提供 `cmd/migrate` CLI
 
-Day 5 的审计表和观测统计已完成本地与线上验收，阶段二收官。阶段三 Day 1 的 Agent 框架、Day 2 的 5 个基础 GitHub 工具、Day 3 的 tree-sitter 上下文裁剪、Day 4 的跨文件引用检索、Day 5 的受限静态检查工具、Day 6 的 evidence / confidence 结构化输出、Day 7 的基础评测集已完成本地验收；Day 7 已部署并通过 PR #23 线上冒烟，`/healthz` 返回正常。线上默认仍是 `AGENT_MODE=legacy`，把 Railway 变量改成 `AGENT_MODE=tool_calling` 后即可启用 Agent 审查链路。
+Day 5 的审计表和观测统计已完成本地与线上验收，阶段二收官。阶段三 Day 1 的 Agent 框架、Day 2 的 5 个基础 GitHub 工具、Day 3 的 tree-sitter 上下文裁剪、Day 4 的跨文件引用检索、Day 5 的受限静态检查工具、Day 6 的 evidence / confidence 结构化输出、Day 7 的基础评测集已完成本地验收；Day 7 已部署并通过 PR #23 线上冒烟，`/healthz` 返回正常。代码默认配置为 `AGENT_MODE=legacy`；已有线上 Task 29–32 展示了 tool_calling 链路，实际部署模式以环境变量为准。静态检查仍出现依赖编译被终止，不能把任务 done 当成静态检查通过。
 
 当前线上示例：
 
@@ -584,3 +584,8 @@ Day 5 线上验收步骤：
 - 公开多租户场景升级独立沙箱 runner
 
 开发节奏见 [docs/roadmap.md](docs/roadmap.md)。
+
+
+### 2026-09-15 工程加固
+
+main 已包含错误响应体有界读取、Requeue 连接池等待修复、大 PR 覆盖范围提示、审查内文件缓存、发布前重连恢复、证据语料预解析及锁 TTL 下限校验。缓存、资源预算和 Parser 基准的适用范围见 [设计说明](docs/design.md)。这些机制不代替线上静态检查验收，也不构成跨数据库和评论发布的严格 exactly-once。

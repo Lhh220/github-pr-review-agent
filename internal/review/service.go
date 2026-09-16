@@ -57,7 +57,7 @@ func New(gh GitHubClient, l LLMClient, results ResultStore, maxDiffLines, maxFil
 
 // filesTruncatedSummaryNote is appended to review summaries when the GitHub
 // file-list pagination cap was hit, so readers know coverage is incomplete.
-const filesTruncatedSummaryNote = "Note: the changed-file list was truncated by the GitHub API pagination limit; more files exist and review coverage may be incomplete."
+const filesTruncatedSummaryNote = "Note: review coverage may be incomplete: the changed-file pagination limit was reached, and additional files exist or could not be ruled out."
 
 func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int, taskID uint64) error {
 	pr, completed, err := resumeReview(ctx, s.GitHub, s.Results, owner, repo, number, taskID)
@@ -70,7 +70,7 @@ func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int, 
 	}
 	// A truncated list cannot support the docs-only conclusion: unseen files
 	// may contain code, so keep the normal review path in that case.
-	if len(files) == 0 || (!filesTruncated && isDocsOnlyPR(files)) {
+	if !filesTruncated && (len(files) == 0 || isDocsOnlyPR(files)) {
 		summary := "This pull request has no changed files relative to its base branch; review skipped."
 		rawResponse := "No changed files relative to the base branch."
 		if len(files) > 0 {
@@ -171,7 +171,7 @@ func DiagnoseRejectedFindings(content string, evidenceCorpus ...string) []Reject
 	return rejected
 }
 
-// parsedEvidenceCorpus decodes each corpus source once per review instead of
+// parsedEvidenceCorpus decodes each corpus source into reusable shapes per validation pass instead of
 // re-unmarshaling for every finding and every evidence item. Semantics are
 // identical to the per-call decoding: a source that decodes into the JSON
 // shapes below never falls back to raw-text matching.
