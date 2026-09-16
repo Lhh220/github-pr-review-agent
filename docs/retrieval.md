@@ -32,7 +32,15 @@ docker compose -p pr-review-demo up -d --build app
 
 ## 对照评测
 
-新增 `eval/retrieval` 两个独立跨文件配对样本：新增写入方法，构造函数分别未初始化和已初始化 map。离线脚本仅验证工具、行号和证据过滤接通，不代表模型质量提升。
+`eval/retrieval` 现有 6 个独立样本（3 组正反例），全部包含 go.mod：
+
+| 样本 | 检验内容 |
+| --- | --- |
+| 001 / 002 | 构造函数是否初始化 map |
+| 003 / 004 | 多个包有同名 Validate，必须检查调用所在包的校验是否排除零 |
+| 005 / 006 | 算术位于长函数尾部，Top-1 未包含前面的保护逻辑，需继续读上下文 |
+
+最后一组使用明确标注的填充注释构造窗口边界，是合成回归样本，不代表真实代码复杂度。`retrieval.json` 仅用于测试指定查询是否返回关键源码行，不进入模型输入。离线测试同时检查完整上下文的补读、最终 finding 和所有工具错误；脚本不证明模型会自行选择正确查询或正确补读。
 
 ```powershell
 go run ./cmd/eval -cases eval/retrieval -enable-retrieval
@@ -47,4 +55,29 @@ go run ./cmd/eval -cases eval/retrieval -live -enable-retrieval -runs 3 -timeout
 
 报告包含 `retrieval_enabled`，可核对 `dataset_hash` 相同。对比 failed_cases、precision、recall、false_positive_rate、confirmed_precision、avg_total_tokens 和 avg_latency_ms；查看 case_results 的 tools 确认模型实际调用了 retrieve_code_context。仅打开开关却没有调用，不能当作检索有效的证据。
 
-两个样本只够冒烟：还需补充真实跨文件漏报及防误报样本，开启检索重跑主集和 holdout，确认没有退化。live 测量、真实 PR 验收及收益判断尚待执行；线上静态检查资源验收仍单独进行。
+## 已完成的旧版 live 基线
+
+2026-09-16，旧版两个跨文件样本各跑 3 次，开关两组均 6/6 完成，precision/recall/confirmed_precision 为 1，误报率 0。实验组 6 次均成功调用新工具。平均 token 从 14208.5 增至 14552（+2.4%），平均耗时从 4921 ms 降至 4367.5 ms（-11.2%）。少量顺序运行无法证明稳定提速或准确率收益。
+
+开启检索的主集 27/27、holdout 12/12 完成，质量指标均满分；主集调用新工具 1 次，holdout 未调用。原始报告分别为 report-20260916T074918.577781300Z.json、report-20260916T075025.412187800Z.json、report-20260916T075355.663471700Z.json、report-20260916T075545.525813600Z.json，保留在本地，不提交报告。
+
+本轮补齐 go.mod 并扩充到 6 个样本后，dataset_hash 已变化，必须重跑两组，不能直接拿旧版 2 个样本的均值和新版比较。上述 A/B 命令现在各执行 18 次。六个合成样本仍不足以证明普遍收益，后续应加入真实跨文件漏报案例；线上静态检查资源验收继续单独进行。
+
+## 真实 PR 部署验收（待执行）
+
+1. 先提交本次改动，将包含检索工具的代码部署到审查服务；在部署配置中设置 AGENT_MODE=tool_calling、AGENT_ENABLE_RETRIEVAL=true。按上文重建 app，再执行：
+
+   ```powershell
+   docker compose -p pr-review-demo ps
+   Invoke-RestMethod http://localhost:8080/healthz
+   ```
+
+   healthy 和 healthz=ok 只代表服务就绪，不代表检索已验收。
+
+2. 在 GitHub App 已安装的测试仓库创建专用分支和 PR，标明“验收专用，请勿合并”。可使用 003 样本的 quota/share.go、quota/validate.go 以及同名干扰文件，保留真实项目的 go.mod。文件源码可从 fixture/case.json 的 file_contents 和 repository 字段取得；不要把 JSON 本身当作待审查代码。
+3. 在 PR 描述要求检查 Share 的调用链，并使用 retrieve_code_context 检索相关校验。等待任务完成后，检查工具记录确实调用成功，输出 ref 等于任务 head SHA、路径/行号/源码准确，报告定位到实际除零语句。若模型未调用工具，只能认定普通审查成功，不能认定检索验收通过。
+4. 把 quota.Validate 从 count >= 0 改成 count > 0 并 push。核对新任务指向新 SHA，工具返回更新后的防护代码，不能继续发布旧的除零结论。保留前后任务 ID、commit、工具输出与最终评论作为验收记录。
+5. 另用 006 长函数反例验证防误报：工具只检索出除法片段后，应继续读完整函数，看到空输入保护，最终不发布除零 finding。记录扫描/输出截断标记以及是否因预算而未完成补读；信息不足不能算无缺陷证明。
+6. 检查 CI 通过后关闭验收 PR，不合并探针代码。如果需要回退检索，设 AGENT_ENABLE_RETRIEVAL=false 并重建 app。
+
+本轮只完成本地样本与回归，不自动发布 PR、修改线上配置或使用 API Key 运行付费模型。真实 PR 验收完成后，再根据漏检原因决定是否优化排序、分块或引入向量检索。

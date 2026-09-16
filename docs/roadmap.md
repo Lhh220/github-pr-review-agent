@@ -113,4 +113,6 @@
 - [x] 修复 read_diff JSON patch 未进入 reference 证据验证的问题，补充 diff-only 正反例回归。
 - [ ] 更新部署后验证真实 PR 的 diff-only finding，并复跑 live/holdout；无法从缺失原始候选的 Task 37 文本断言四条候选都应该恢复。
 - [x] 加入可选 retrieve_code_context、commit 隔离、扫描/输出限额和独立跨文件正反例。
-- [ ] 执行检索开关 A/B live 评测、主集/holdout 回归和真实 PR 验收；根据召回率与成本决定是否引入向量检索。
+- [x] 旧版两个跨文件样本的 A/B live、开启检索的主集/holdout 回归通过；尚未证明准确率提升。
+- [x] 补齐样本 go.mod，扩充至 6 个跨文件正反例；直接验证检索关键行和长函数补读。
+- [ ] 对新数据集重跑 A/B live（每组 18 次），按 docs/retrieval.md 完成真实 PR、head SHA 更新及防误报验收。

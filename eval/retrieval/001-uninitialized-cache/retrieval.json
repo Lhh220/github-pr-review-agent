@@ -1,0 +1,20 @@
+{
+  "input": {
+    "query": "session cache",
+    "top_k": 3
+  },
+  "required": [
+    {
+      "type": "reference",
+      "file": "session/session.go",
+      "line": 5,
+      "text": "func New() *Session { return &Session{} }"
+    },
+    {
+      "type": "reference",
+      "file": "session/put.go",
+      "line": 4,
+      "text": "s.cache[key] = value"
+    }
+  ]
+}

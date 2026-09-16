@@ -17,6 +17,7 @@
   },
   "repository": {
     "session/session.go": "package session\n\ntype Session struct { cache map[string]string }\n\nfunc New() *Session { return &Session{cache: make(map[string]string)} }\n",
-    "session/session_test.go": "package session\n\nfunc ExampleSession() { New().Put(\"key\", \"value\") }\n"
+    "session/session_test.go": "package session\n\nfunc ExampleSession() { New().Put(\"key\", \"value\") }\n",
+    "go.mod": "module example.com/retrieval\n\ngo 1.25\n"
   }
 }

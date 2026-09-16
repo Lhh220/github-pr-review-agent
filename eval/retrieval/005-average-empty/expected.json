@@ -1,0 +1,11 @@
+{
+  "findings": [
+    {
+      "category": "bug",
+      "file": "aggregate/average.go",
+      "line": 33,
+      "severity": "high",
+      "confidence": "confirmed"
+    }
+  ]
+}

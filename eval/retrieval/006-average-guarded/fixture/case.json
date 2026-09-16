@@ -1,0 +1,22 @@
+{
+  "title": "Add public calculation entry point",
+  "body": "Review the added entry point and the helpers it calls. Inputs may be empty or zero.",
+  "head_sha": "3333333333333333333333333333333333333333",
+  "files": [
+    {
+      "filename": "api/average.go",
+      "status": "added",
+      "additions": 7,
+      "deletions": 0,
+      "changes": 7,
+      "patch": "@@ -0,0 +1,7 @@\n+package api\n+\n+import \"example.com/retrieval/aggregate\"\n+\n+func Average(values []int) int {\n+\treturn aggregate.Average(values)\n+}"
+    }
+  ],
+  "file_contents": {
+    "api/average.go": "package api\n\nimport \"example.com/retrieval/aggregate\"\n\nfunc Average(values []int) int {\n\treturn aggregate.Average(values)\n}\n"
+  },
+  "repository": {
+    "aggregate/average.go": "package aggregate\n\nfunc Average(values []int) int {\n\tif len(values) == 0 { return 0 }\n\t// This synthetic fixture separates the guard from the arithmetic.\n\t// Padding for the chunk-boundary regression: 00.\n\t// Padding for the chunk-boundary regression: 01.\n\t// Padding for the chunk-boundary regression: 02.\n\t// Padding for the chunk-boundary regression: 03.\n\t// Padding for the chunk-boundary regression: 04.\n\t// Padding for the chunk-boundary regression: 05.\n\t// Padding for the chunk-boundary regression: 06.\n\t// Padding for the chunk-boundary regression: 07.\n\t// Padding for the chunk-boundary regression: 08.\n\t// Padding for the chunk-boundary regression: 09.\n\t// Padding for the chunk-boundary regression: 10.\n\t// Padding for the chunk-boundary regression: 11.\n\t// Padding for the chunk-boundary regression: 12.\n\t// Padding for the chunk-boundary regression: 13.\n\t// Padding for the chunk-boundary regression: 14.\n\t// Padding for the chunk-boundary regression: 15.\n\t// Padding for the chunk-boundary regression: 16.\n\t// Padding for the chunk-boundary regression: 17.\n\t// Padding for the chunk-boundary regression: 18.\n\t// Padding for the chunk-boundary regression: 19.\n\t// Padding for the chunk-boundary regression: 20.\n\t// Padding for the chunk-boundary regression: 21.\n\t// Padding for the chunk-boundary regression: 22.\n\t// Padding for the chunk-boundary regression: 23.\n\ttotal := 0\n\tfor _, value := range values { total += value }\n\tcount := len(values)\n\treturn total / count\n}\n",
+    "go.mod": "module example.com/retrieval\n\ngo 1.25\n"
+  }
+}

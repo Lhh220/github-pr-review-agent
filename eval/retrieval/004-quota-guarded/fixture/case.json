@@ -1,0 +1,24 @@
+{
+  "title": "Add public calculation entry point",
+  "body": "Review the added entry point and the helpers it calls. Inputs may be empty or zero.",
+  "head_sha": "3333333333333333333333333333333333333333",
+  "files": [
+    {
+      "filename": "quota/share.go",
+      "status": "added",
+      "additions": 6,
+      "deletions": 0,
+      "changes": 6,
+      "patch": "@@ -0,0 +1,6 @@\n+package quota\n+\n+func Share(total, count int) int {\n+\tif !Validate(count) { return 0 }\n+\treturn total / count\n+}"
+    }
+  ],
+  "file_contents": {
+    "quota/share.go": "package quota\n\nfunc Share(total, count int) int {\n\tif !Validate(count) { return 0 }\n\treturn total / count\n}\n"
+  },
+  "repository": {
+    "quota/validate.go": "package quota\n\nfunc Validate(count int) bool { return count > 0 }\n",
+    "profile/validate.go": "package profile\n\nfunc Validate(count int) bool { return count > 0 }\n",
+    "archive/validate.go": "package archive\n\nfunc Validate(count int) bool { return count >= 0 }\n",
+    "go.mod": "module example.com/retrieval\n\ngo 1.25\n"
+  }
+}
