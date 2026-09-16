@@ -172,9 +172,9 @@ func DiagnoseRejectedFindings(content string, evidenceCorpus ...string) []Reject
 }
 
 // parsedEvidenceCorpus decodes each corpus source into reusable shapes per validation pass instead of
-// re-unmarshaling for every finding and every evidence item. Semantics are
-// identical to the per-call decoding: a source that decodes into the JSON
-// shapes below never falls back to raw-text matching.
+// re-unmarshaling for every finding and every evidence item. Existing content/
+// matches JSON-versus-raw semantics are preserved; diff tool JSON is decoded
+// independently and validated against its new-side hunk lines.
 type parsedEvidenceCorpus struct {
 	strings []string
 	sources []parsedCorpusSource
@@ -182,6 +182,7 @@ type parsedEvidenceCorpus struct {
 
 type parsedCorpusSource struct {
 	raw    string
+	diffs  *diffCorpusOutput
 	refs   *referenceCorpusOutput
 	checks *staticCheckCorpusOutput
 }
@@ -213,6 +214,10 @@ func parseEvidenceCorpus(corpus []string) *parsedEvidenceCorpus {
 	}
 	for _, source := range corpus {
 		entry := parsedCorpusSource{raw: source}
+		var diffs diffCorpusOutput
+		if json.Unmarshal([]byte(source), &diffs) == nil {
+			entry.diffs = &diffs
+		}
 		var refs referenceCorpusOutput
 		if json.Unmarshal([]byte(source), &refs) == nil {
 			entry.refs = &refs
@@ -239,6 +244,9 @@ func (p *parsedEvidenceCorpus) containsString(target string) bool {
 
 func (p *parsedEvidenceCorpus) referenceEvidence(evidence store.Evidence) bool {
 	for _, source := range p.sources {
+		if source.diffs != nil && source.diffs.matches(evidence) {
+			return true
+		}
 		if source.refs != nil {
 			if source.refs.Path == evidence.File {
 				prefix := fmt.Sprintf("%d:", evidence.Line)

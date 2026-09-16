@@ -1,0 +1,14 @@
+[
+  {
+    "tool_calls": [
+      {
+        "id": "retrieve-session",
+        "name": "retrieve_code_context",
+        "arguments": "{\"query\": \"session cache\", \"top_k\": 3}"
+      }
+    ]
+  },
+  {
+    "content": "{\"summary\": \"Constructor leaves the map nil.\", \"findings\": [{\"category\": \"bug\", \"file\": \"session/put.go\", \"line\": 4, \"severity\": \"high\", \"confidence\": \"confirmed\", \"comment\": \"New leaves cache nil; Put writes to a nil map and panics.\", \"suggestion\": \"Initialize cache in New.\", \"evidence\": [{\"type\": \"reference\", \"file\": \"session/session.go\", \"line\": 5, \"text\": \"func New() *Session { return &Session{} }\"}, {\"type\": \"reference\", \"file\": \"session/put.go\", \"line\": 4, \"text\": \"s.cache[key] = value\"}]}]}"
+  }
+]

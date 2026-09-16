@@ -1,0 +1,11 @@
+{
+  "findings": [
+    {
+      "category": "bug",
+      "file": "session/put.go",
+      "line": 4,
+      "severity": "high",
+      "confidence": "confirmed"
+    }
+  ]
+}

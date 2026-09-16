@@ -104,4 +104,15 @@
 - [ ] 当前 main 的 live/holdout 复验，比较质量与上下文预算影响。
 - [ ] 静态检查线上完整成功验收：历史任务有 compile signal: killed，资源诊断已补，不能据此标记通过。
 
-阶段四 RAG 尚未实现。先完成上述部署与质量验收，再基于跨文件漏报样本决定检索方案。
+阶段四已加入默认关闭的词法仓库检索原型，见 [检索增强验收](retrieval.md)。部署与质量验收继续跟进，尚未证明 live 收益。
+
+
+### 2026-09-16 质量基线更新
+
+- [x] 用户完成修复前 live 主集 27/27、holdout 12/12，0 失败，precision/recall 均 1.00，误报率 0；共 13 个不同样本。
+- [x] 修复 read_diff JSON patch 未进入 reference 证据验证的问题，补充 diff-only 正反例回归。
+- [ ] 更新部署后验证真实 PR 的 diff-only finding，并复跑 live/holdout；无法从缺失原始候选的 Task 37 文本断言四条候选都应该恢复。
+- [x] 加入可选 retrieve_code_context、commit 隔离、扫描/输出限额和独立跨文件正反例。
+- [x] 旧版两个跨文件样本的 A/B live、开启检索的主集/holdout 回归通过；尚未证明准确率提升。
+- [x] 补齐样本 go.mod，扩充至 6 个跨文件正反例；直接验证检索关键行和长函数补读。
+- [ ] 对新数据集重跑 A/B live（每组 18 次），按 docs/retrieval.md 完成真实 PR、head SHA 更新及防误报验收。

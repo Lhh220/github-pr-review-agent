@@ -111,6 +111,7 @@ type CaseResult struct {
 }
 
 type Report struct {
+	RetrievalEnabled      bool         `json:"retrieval_enabled"`
 	LocationPrecision     float64      `json:"location_precision"`
 	LocationRecall        float64      `json:"location_recall"`
 	DatasetHash           string       `json:"dataset_hash,omitempty"`

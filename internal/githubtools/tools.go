@@ -45,6 +45,7 @@ type Options struct {
 	MaxFileContextLines int
 	MaxCommitHistory    int
 	MaxReferenceResults int
+	EnableRetrieval     bool
 	EnableStaticChecks  bool
 	StaticCheckTimeout  time.Duration
 	StaticCheckWorkDir  string
@@ -61,6 +62,7 @@ type Toolkit struct {
 	maxFileContextLines int
 	maxCommitHistory    int
 	maxReferenceResults int
+	enableRetrieval     bool
 	enableStaticChecks  bool
 	staticCheckTimeout  time.Duration
 	staticCheckWorkDir  string
@@ -111,6 +113,7 @@ func NewToolkit(client Client, owner, repo string, number int, options Options) 
 		maxFileContextLines: options.MaxFileContextLines,
 		maxCommitHistory:    options.MaxCommitHistory,
 		maxReferenceResults: options.MaxReferenceResults,
+		enableRetrieval:     options.EnableRetrieval,
 		enableStaticChecks:  options.EnableStaticChecks,
 		staticCheckTimeout:  options.StaticCheckTimeout,
 		staticCheckWorkDir:  options.StaticCheckWorkDir,
@@ -127,6 +130,9 @@ func (t *Toolkit) Tools() []agent.Tool {
 		fileContextTool{toolkit: t},
 		searchReferencesTool{toolkit: t},
 		commitHistoryTool{toolkit: t},
+	}
+	if t.enableRetrieval {
+		tools = append(tools, retrieveCodeTool{toolkit: t})
 	}
 	if t.enableStaticChecks {
 		tools = append(tools, staticChecksTool{toolkit: t})

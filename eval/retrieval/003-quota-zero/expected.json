@@ -1,0 +1,11 @@
+{
+  "findings": [
+    {
+      "category": "bug",
+      "file": "quota/share.go",
+      "line": 5,
+      "severity": "high",
+      "confidence": "confirmed"
+    }
+  ]
+}

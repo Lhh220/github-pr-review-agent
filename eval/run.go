@@ -29,6 +29,7 @@ type RunnerOptions struct {
 	MaxFileContextLines int
 	MaxCommitHistory    int
 	MaxReferenceResults int
+	EnableRetrieval     bool
 	EnableStaticChecks  bool
 	StaticCheckTimeout  time.Duration
 	StaticCheckWorkDir  string
@@ -267,6 +268,7 @@ func RunCase(
 		MaxFileContextLines: options.MaxFileContextLines,
 		MaxCommitHistory:    options.MaxCommitHistory,
 		MaxReferenceResults: options.MaxReferenceResults,
+		EnableRetrieval:     options.EnableRetrieval,
 		EnableStaticChecks:  options.EnableStaticChecks,
 		StaticCheckTimeout:  options.StaticCheckTimeout,
 		StaticCheckWorkDir:  options.StaticCheckWorkDir,

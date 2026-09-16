@@ -1,0 +1,23 @@
+{
+  "title": "Add session cache writes",
+  "body": "Sessions are created through New. Review the new Put method together with the constructor.",
+  "head_sha": "2222222222222222222222222222222222222222",
+  "files": [
+    {
+      "filename": "session/put.go",
+      "status": "added",
+      "additions": 5,
+      "deletions": 0,
+      "changes": 5,
+      "patch": "@@ -0,0 +1,5 @@\n+package session\n+\n+func (s *Session) Put(key, value string) {\n+\ts.cache[key] = value\n+}"
+    }
+  ],
+  "file_contents": {
+    "session/put.go": "package session\n\nfunc (s *Session) Put(key, value string) {\n\ts.cache[key] = value\n}\n"
+  },
+  "repository": {
+    "session/session.go": "package session\n\ntype Session struct { cache map[string]string }\n\nfunc New() *Session { return &Session{} }\n",
+    "session/session_test.go": "package session\n\nfunc ExampleSession() { New().Put(\"key\", \"value\") }\n",
+    "go.mod": "module example.com/retrieval\n\ngo 1.25\n"
+  }
+}

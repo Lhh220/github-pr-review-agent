@@ -507,3 +507,18 @@ go test ./internal/codecontext -run '^$' -bench '^BenchmarkParserLifecycle$' -be
 - RequeueTask 使用已锁定行确认存在性，UPDATE 不生效直接返回状态转换失败；不再通过池申请第二条连接。锁 TTL 默认 7 分钟，低于 5 分钟审查超时加 1 分钟余量时提高到 6 分钟并告警；它依赖操作遵守 context 取消，不是续租或 fencing，未实现无限时长任务保证。
 
 近期变更未发现其他足以阻塞本轮提交的确定性问题，但缓存命中率、跨语言 Parser 基准不等于端到端收益。live/holdout、实际 broker 故障和部署静态检查仍按 roadmap 验收，不将本地单测通过表述为全部线上边界已验证。
+
+
+### JSON diff 证据校验修复（2026-09-16）
+
+read_diff 返回单文件 `{path, patch, found}` 或多文件 `{files:[{path,patch}]}`。此前 reference 校验只读取 content/matches，JSON 解码成功便跳过 raw 回退，导致仅有 diff 支持的候选也会被误拒。本轮为 diff JSON 添加独立解码与匹配，不改变旧 content/matches 与 rawReferenceEvidence 的回退规则。
+
+证据必须匹配文件路径、hunk 新侧行号和整行文本（沿用首尾空白归一化）；新增行和上下文行可支持证据，删除行不能支持新版本定位。拒绝 found=false、removed 文件、畸形 hunk、超过声明行数和未返回内容。截断标记不自动否定已经返回的有效行，也不允许推断缺失尾部；`+++` 开头的 hunk 内容按新增代码处理，不能误认成文件头。测试覆盖单/多文件工具输出、定位和原文错误、截断边界，以及最终 finding 保留/拒绝。
+
+用户提供的 2026-09-16 live 报告为本修复前基线：主集 27/27、holdout 12/12，均 failed_cases=0，precision/recall/confirmed_precision=1，false_positive_rate=0、overconfirmed_findings=0。报告分别为 report-20260916T042424.963806900Z.json、report-20260916T042555.702998900Z.json，不纳入版本控制。9+4 个不同样本各重复 3 次，不能当作 39 个独立样本或泛化质量保证。JSON-diff-only 的误拒由新增回归覆盖，不能由这批修复前满分报告证明已解决。
+
+这为小范围仓库检索增强实验提供了可用基线。RAG 首先用独立跨文件样本对比现有工具与检索增强的质量/成本，保持 commit 隔离和证据预算；上线前仍需对本修复做真实 PR 验证，并重跑 live/holdout。线上静态检查资源问题继续单独验收，不将 done 或评测满分等同于 go test/go vet 成功。
+
+### 可选仓库检索增强原型
+
+`AGENT_ENABLE_RETRIEVAL=true` 在 tool_calling 链路注册 `retrieve_code_context`，基于当前 head SHA 的缓存 tarball 做多关键词代码块排序，返回可校验的行级引用。默认关闭，无额外依赖；扫描、结果和 Agent 总上下文均有上限。实现与 A/B 验收见 [仓库检索增强](retrieval.md)，尚未验证 live 收益。

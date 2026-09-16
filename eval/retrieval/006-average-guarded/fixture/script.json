@@ -1,0 +1,23 @@
+[
+  {
+    "tool_calls": [
+      {
+        "id": "retrieve_code_context",
+        "name": "retrieve_code_context",
+        "arguments": "{\"query\": \"total count\", \"top_k\": 1}"
+      }
+    ]
+  },
+  {
+    "tool_calls": [
+      {
+        "id": "read_file_context",
+        "name": "read_file_context",
+        "arguments": "{\"path\": \"aggregate/average.go\", \"start_line\": 1, \"end_line\": 40}"
+      }
+    ]
+  },
+  {
+    "content": "{\"summary\": \"Review completed after checking the called helper.\", \"findings\": []}"
+  }
+]
