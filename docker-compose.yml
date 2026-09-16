@@ -14,6 +14,7 @@ services:
       RABBITMQ_URL: "amqp://review:${RABBITMQ_PASSWORD:-review-local}@rabbitmq:5672/"
       REDIS_URL: redis://redis:6379/0
       AGENT_MODE: ${AGENT_MODE:-tool_calling}
+      AGENT_ENABLE_RETRIEVAL: ${AGENT_ENABLE_RETRIEVAL:-false}
       AGENT_ENABLE_STATIC_CHECKS: "false"
       REVIEW_WORKERS: "2"
     ports:

@@ -25,6 +25,7 @@ func main() {
 		timeout            = flag.Duration("timeout", 5*time.Minute, "total evaluation timeout")
 		maxSteps           = flag.Int("max-steps", 8, "maximum agent steps")
 		toolTimeout        = flag.Duration("tool-timeout", 20*time.Second, "timeout for each tool call")
+		enableRetrieval    = flag.Bool("enable-retrieval", false, "register lexical repository retrieval")
 		enableStaticChecks = flag.Bool("enable-static-checks", false, "register run_static_checks")
 		staticTimeout      = flag.Duration("static-check-timeout", 2*time.Minute, "timeout for each static check command")
 		staticWorkDir      = flag.String("static-check-work-dir", "", "static check work directory")
@@ -85,6 +86,7 @@ evaluation:
 				},
 				MaxSteps:           *maxSteps,
 				ToolTimeout:        *toolTimeout,
+				EnableRetrieval:    *enableRetrieval,
 				EnableStaticChecks: *enableStaticChecks,
 				StaticCheckTimeout: *staticTimeout,
 				StaticCheckWorkDir: *staticWorkDir,
@@ -108,6 +110,7 @@ evaluation:
 			fmt.Printf("[%d/%d] case=%s status=%s elapsed=%s calls=%d tokens=%d findings=%d rejected=%d\n", len(inputs)+1, len(cases)**runs, evaluationCase.Name, status, time.Since(started).Round(time.Millisecond), len(result.Responses), result.TotalTokens, len(result.Findings), len(result.RejectedFindings))
 			inputs = append(inputs, input)
 			report = eval.Evaluate(inputs)
+			report.RetrievalEnabled = *enableRetrieval
 			report.DatasetHash = datasetHash
 			report.Runs = *runs
 			report.PlannedCases = len(cases) * *runs

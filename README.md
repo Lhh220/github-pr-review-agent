@@ -589,3 +589,7 @@ Day 5 线上验收步骤：
 ### 2026-09-15 工程加固
 
 main 已包含错误响应体有界读取、Requeue 连接池等待修复、大 PR 覆盖范围提示、审查内文件缓存、发布前重连恢复、证据语料预解析及锁 TTL 下限校验。缓存、资源预算和 Parser 基准的适用范围见 [设计说明](docs/design.md)。这些机制不代替线上静态检查验收，也不构成跨数据库和评论发布的严格 exactly-once。
+
+### 可选仓库检索增强
+
+设置 `AGENT_MODE=tool_calling` 和 `AGENT_ENABLE_RETRIEVAL=true` 可启用按 PR head SHA 检索相关代码块的 `retrieve_code_context`。默认关闭；实现范围、限额和 A/B 验收命令见 [仓库检索增强](docs/retrieval.md)。当前为词法检索原型，live 质量收益尚待验证。

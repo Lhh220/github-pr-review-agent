@@ -518,3 +518,7 @@ read_diff 返回单文件 `{path, patch, found}` 或多文件 `{files:[{path,pat
 用户提供的 2026-09-16 live 报告为本修复前基线：主集 27/27、holdout 12/12，均 failed_cases=0，precision/recall/confirmed_precision=1，false_positive_rate=0、overconfirmed_findings=0。报告分别为 report-20260916T042424.963806900Z.json、report-20260916T042555.702998900Z.json，不纳入版本控制。9+4 个不同样本各重复 3 次，不能当作 39 个独立样本或泛化质量保证。JSON-diff-only 的误拒由新增回归覆盖，不能由这批修复前满分报告证明已解决。
 
 这为小范围仓库检索增强实验提供了可用基线。RAG 首先用独立跨文件样本对比现有工具与检索增强的质量/成本，保持 commit 隔离和证据预算；上线前仍需对本修复做真实 PR 验证，并重跑 live/holdout。线上静态检查资源问题继续单独验收，不将 done 或评测满分等同于 go test/go vet 成功。
+
+### 可选仓库检索增强原型
+
+`AGENT_ENABLE_RETRIEVAL=true` 在 tool_calling 链路注册 `retrieve_code_context`，基于当前 head SHA 的缓存 tarball 做多关键词代码块排序，返回可校验的行级引用。默认关闭，无额外依赖；扫描、结果和 Agent 总上下文均有上限。实现与 A/B 验收见 [仓库检索增强](retrieval.md)，尚未验证 live 收益。

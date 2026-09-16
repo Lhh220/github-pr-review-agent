@@ -146,6 +146,7 @@ func startServer(
 			MaxFileContextLines: cfg.MaxFileContextLines,
 			MaxCommitHistory:    cfg.AgentMaxCommitHistory,
 			MaxReferenceResults: cfg.AgentMaxReferenceResults,
+			EnableRetrieval:     cfg.AgentEnableRetrieval,
 			EnableStaticChecks:  cfg.AgentEnableStaticChecks,
 			StaticCheckTimeout:  cfg.AgentStaticCheckTimeout,
 			StaticCheckWorkDir:  cfg.AgentStaticCheckWorkDir,
