@@ -30,12 +30,18 @@ type Expected struct {
 	Findings []ExpectedFinding `json:"findings"`
 }
 
+type FindingLocation struct {
+	File string `json:"file"`
+	Line int    `json:"line"`
+}
+
 type ExpectedFinding struct {
-	Category   string `json:"category"`
-	File       string `json:"file"`
-	Line       int    `json:"line"`
-	Severity   string `json:"severity"`
-	Confidence string `json:"confidence"`
+	AcceptedLocations []FindingLocation `json:"accepted_locations,omitempty"`
+	Category          string            `json:"category"`
+	File              string            `json:"file"`
+	Line              int               `json:"line"`
+	Severity          string            `json:"severity"`
+	Confidence        string            `json:"confidence"`
 }
 
 type ScriptResponse struct {
@@ -111,6 +117,9 @@ type CaseResult struct {
 }
 
 type Report struct {
+	ScoringVersion        string       `json:"scoring_version"`
+	RescoredFrom          string       `json:"rescored_from,omitempty"`
+	SourceDatasetHash     string       `json:"source_dataset_hash,omitempty"`
 	RetrievalEnabled      bool         `json:"retrieval_enabled"`
 	LocationPrecision     float64      `json:"location_precision"`
 	LocationRecall        float64      `json:"location_recall"`
@@ -138,7 +147,7 @@ type Report struct {
 }
 
 func Evaluate(inputs []CaseInput) Report {
-	report := Report{GeneratedAt: time.Now().UTC(), CaseResults: make([]CaseResult, 0, len(inputs))}
+	report := Report{ScoringVersion: "explicit-locations-v2", GeneratedAt: time.Now().UTC(), CaseResults: make([]CaseResult, 0, len(inputs))}
 	var (
 		truePositiveCount      int
 		locationDetected       int
@@ -257,6 +266,19 @@ func Evaluate(inputs []CaseInput) Report {
 }
 
 func findingsMatch(expected ExpectedFinding, actual store.Finding) bool {
+	if primaryLocationMatches(expected, actual) {
+		return true
+	}
+	for _, location := range expected.AcceptedLocations {
+		// Alternatives are exact, explicitly reviewed anchors, not whole-file exemptions.
+		if location.File != "" && location.Line > 0 && location.File == actual.File && location.Line == actual.Line {
+			return true
+		}
+	}
+	return false
+}
+
+func primaryLocationMatches(expected ExpectedFinding, actual store.Finding) bool {
 	if expected.File != actual.File {
 		return false
 	}
@@ -296,7 +318,7 @@ func countLocationMatches(expected []ExpectedFinding, actual []store.Finding) in
 	var assign func(int, []bool) bool
 	assign = func(p int, seen []bool) bool {
 		for e := range expected {
-			if seen[e] || !findingsMatch(expected[e], actual[p]) {
+			if seen[e] || !primaryLocationMatches(expected[e], actual[p]) {
 				continue
 			}
 			seen[e] = true

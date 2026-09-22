@@ -17,6 +17,7 @@ func main() {
 	var (
 		caseRoot           = flag.String("cases", "eval/cases", "evaluation case directory")
 		reportPath         = flag.String("report", "", "report output path")
+		rescore            = flag.String("rescore", "", "rescore saved report with current expectations; no model calls")
 		live               = flag.Bool("live", false, "call DeepSeek instead of using fixture scripts")
 		runs               = flag.Int("runs", 1, "times to run each case")
 		apiKey             = flag.String("api-key", os.Getenv("DEEPSEEK_API_KEY"), "DeepSeek API key")
@@ -54,6 +55,29 @@ func main() {
 		fatal(err)
 	}
 	datasetHash := fmt.Sprintf("%x", sha256.Sum256(dataset))
+
+	if *rescore != "" {
+		if *live {
+			fatal(fmt.Errorf("-rescore cannot be combined with -live"))
+		}
+		data, err := os.ReadFile(*rescore)
+		if err != nil {
+			fatal(err)
+		}
+		var source eval.Report
+		if err := json.Unmarshal(data, &source); err != nil {
+			fatal(err)
+		}
+		report, err := eval.Rescore(source, cases, *rescore, datasetHash)
+		if err != nil {
+			fatal(err)
+		}
+		if err := eval.WriteReport(*reportPath, report); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("rescored saved outputs only: precision=%.4f recall=%.4f primary_location_precision=%.4f failed=%d report=%s\n", report.Precision, report.Recall, report.LocationPrecision, report.FailedCases, *reportPath)
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()

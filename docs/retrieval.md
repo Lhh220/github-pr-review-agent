@@ -81,3 +81,20 @@ go run ./cmd/eval -cases eval/retrieval -live -enable-retrieval -runs 3 -timeout
 6. 检查 CI 通过后关闭验收 PR，不合并探针代码。如果需要回退检索，设 AGENT_ENABLE_RETRIEVAL=false 并重建 app。
 
 本轮只完成本地样本与回归，不自动发布 PR、修改线上配置或使用 API Key 运行付费模型。真实 PR 验收完成后，再根据漏检原因决定是否优化排序、分块或引入向量检索。
+
+## 定位与离线重评分
+
+预期 finding 可用 `accepted_locations` 明确列出合理备选位置；备选必须精确匹配文件和行号，不能把整个文件设为通过。005 的新增生产调用方 api/average.go:6 可暴露同一个除零问题，因此列为备选；001 的测试示例不列为备选。重复报告同一缺陷仍只匹配一次。
+
+precision/recall 使用首选或显式备选位置并核对 category；location_precision/location_recall 保留原有首选位置规则（同文件、行号 ±3），不因备选而提高。两种指标都属于位置匹配评分，不等同于自动语义审查。新版 scoring_version 为 explicit-locations-v2。
+
+可以不调用模型，使用新预期重新评分已有输出：
+
+```powershell
+go run ./cmd/eval -cases eval/retrieval -rescore eval/report-20260916T080945.616586900Z.json
+go run ./cmd/eval -cases eval/retrieval -rescore eval/report-20260916T081207.012777600Z.json
+```
+
+默认写入新时间戳文件，不覆盖原始报告。rescored_from 和 source_dataset_hash 保存来源；dataset_hash 指向当前评测集。该操作只应用当前预期，不重新执行工具或验证证据，也不验证历史 fixture 与当前 fixture 是否完全相同；只应对已人工核对的预期变更使用，不能当作新提示词的 live 结果。错误用例仍保留失败状态，不隐藏失败。
+
+Agent 提示词同时明确：优先定位实际失败操作或缺失防护的生产位置，必要时允许新增生产调用方；不要因测试示例能触发故障就把它作为主要定位，也不得把未修改文件称为新增。提示词效果需后续同模型 A/B live 验证，重评分不能证明定位已修复。
