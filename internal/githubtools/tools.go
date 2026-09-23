@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,11 +24,17 @@ const (
 	maxListedFiles             = 200
 	maxToolOutputChars         = 40000
 	maxPRBodyChars             = 12000
+
+	// A single file above maxCachedFileBytes is fetched but not cached, and
+	// the cache stops growing once the cumulative byte budget is reached, so
+	// the download optimization never turns into unbounded memory use.
+	maxCachedFileBytes      = 2 << 20
+	maxCachedFileTotalBytes = 16 << 20
 )
 
 type Client interface {
 	GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error)
-	GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, error)
+	GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, bool, error)
 	GetPullRequestCommits(ctx context.Context, owner, repo string, number, limit int) ([]github.PullRequestCommit, error)
 	GetFileContent(ctx context.Context, owner, repo, path, ref string) (string, error)
 	GetRepositoryTarball(ctx context.Context, owner, repo, ref string) (io.ReadCloser, error)
@@ -38,6 +45,7 @@ type Options struct {
 	MaxFileContextLines int
 	MaxCommitHistory    int
 	MaxReferenceResults int
+	EnableRetrieval     bool
 	EnableStaticChecks  bool
 	StaticCheckTimeout  time.Duration
 	StaticCheckWorkDir  string
@@ -54,16 +62,26 @@ type Toolkit struct {
 	maxFileContextLines int
 	maxCommitHistory    int
 	maxReferenceResults int
+	enableRetrieval     bool
 	enableStaticChecks  bool
 	staticCheckTimeout  time.Duration
 	staticCheckWorkDir  string
 	staticCheckGoProxy  string
 	staticCheckRunner   staticCheckRunner
 
-	mu          sync.Mutex
-	cachedPR    *github.PullRequest
-	cachedFiles []github.PullRequestFile
-	filesLoaded bool
+	mu                sync.Mutex
+	cachedPR          *github.PullRequest
+	cachedFiles       []github.PullRequestFile
+	filesLoaded       bool
+	coverageTruncated bool
+	// fileCache caches full file contents keyed by path for the toolkit's
+	// lifetime (one review, one fixed head SHA), so repeated read_file_context
+	// calls with different ranges do not re-hit the GitHub contents API.
+	fileCache      map[string]string
+	fileCacheBytes int
+	tarballFile    *os.File
+	tarballPath    string
+	tarballRef     string
 }
 
 func NewToolkit(client Client, owner, repo string, number int, options Options) *Toolkit {
@@ -95,6 +113,7 @@ func NewToolkit(client Client, owner, repo string, number int, options Options) 
 		maxFileContextLines: options.MaxFileContextLines,
 		maxCommitHistory:    options.MaxCommitHistory,
 		maxReferenceResults: options.MaxReferenceResults,
+		enableRetrieval:     options.EnableRetrieval,
 		enableStaticChecks:  options.EnableStaticChecks,
 		staticCheckTimeout:  options.StaticCheckTimeout,
 		staticCheckWorkDir:  options.StaticCheckWorkDir,
@@ -112,6 +131,9 @@ func (t *Toolkit) Tools() []agent.Tool {
 		searchReferencesTool{toolkit: t},
 		commitHistoryTool{toolkit: t},
 	}
+	if t.enableRetrieval {
+		tools = append(tools, retrieveCodeTool{toolkit: t})
+	}
 	if t.enableStaticChecks {
 		tools = append(tools, staticChecksTool{toolkit: t})
 	}
@@ -124,6 +146,54 @@ func (t *Toolkit) PullRequest(ctx context.Context) (*github.PullRequest, error) 
 
 func (t *Toolkit) Files(ctx context.Context) ([]github.PullRequestFile, error) {
 	return t.files(ctx)
+}
+
+// cachedFileContent returns the full file content at ref, serving repeat
+// reads of the same path from an in-memory cache. Only successful reads are
+// cached; entries beyond the single-file or cumulative byte budgets are
+// fetched every time and simply not stored.
+func (t *Toolkit) cachedFileContent(ctx context.Context, path, ref string) (string, error) {
+	t.mu.Lock()
+	content, cached := t.fileCache[path]
+	t.mu.Unlock()
+	if cached {
+		return content, nil
+	}
+
+	content, err := t.client.GetFileContent(ctx, t.owner, t.repo, path, ref)
+	if err != nil {
+		return "", fmt.Errorf("get file content: %w", err)
+	}
+	t.storeFileCache(path, content)
+	return content, nil
+}
+
+func (t *Toolkit) storeFileCache(path, content string) {
+	if len(content) == 0 || len(content) > maxCachedFileBytes {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.fileCache == nil {
+		t.fileCache = make(map[string]string)
+	}
+	if _, exists := t.fileCache[path]; exists {
+		return
+	}
+	if t.fileCacheBytes+len(content) > maxCachedFileTotalBytes {
+		return
+	}
+	t.fileCache[path] = content
+	t.fileCacheBytes += len(content)
+}
+
+// CoverageTruncated reports whether the cached file list hit the GitHub
+// pagination cap and more files exist or the probe failed. Meaningful after Files or a
+// file-based tool call succeeded; false before that.
+func (t *Toolkit) CoverageTruncated() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.coverageTruncated
 }
 
 func (t *Toolkit) pullRequest(ctx context.Context) (*github.PullRequest, error) {
@@ -148,11 +218,12 @@ func (t *Toolkit) files(ctx context.Context) ([]github.PullRequestFile, error) {
 	if t.filesLoaded {
 		return t.cachedFiles, nil
 	}
-	files, err := t.client.GetPullRequestFiles(ctx, t.owner, t.repo, t.number)
+	files, truncated, err := t.client.GetPullRequestFiles(ctx, t.owner, t.repo, t.number)
 	if err != nil {
 		return nil, fmt.Errorf("get pull request files: %w", err)
 	}
 	t.cachedFiles = files
+	t.coverageTruncated = truncated
 	t.filesLoaded = true
 	return files, nil
 }
@@ -223,9 +294,10 @@ func (t changedFilesTool) Execute(ctx context.Context, input map[string]any) (st
 		})
 	}
 	return encodeJSON(map[string]any{
-		"total_files": len(files),
-		"truncated":   truncated,
-		"files":       summaries,
+		"total_files":        len(files),
+		"truncated":          truncated,
+		"coverage_truncated": t.toolkit.CoverageTruncated(),
+		"files":              summaries,
 	})
 }
 
@@ -261,7 +333,7 @@ func (t diffTool) Execute(ctx context.Context, input map[string]any) (string, er
 	if strings.TrimSpace(path) != "" {
 		return fileDiff(files, strings.TrimSpace(path), t.toolkit.maxDiffLines)
 	}
-	return fullDiff(files, t.toolkit.maxDiffLines)
+	return fullDiff(files, t.toolkit.CoverageTruncated(), t.toolkit.maxDiffLines)
 }
 
 type fileContextTool struct {
@@ -306,9 +378,9 @@ func (t fileContextTool) Execute(ctx context.Context, input map[string]any) (str
 	if err != nil {
 		return "", err
 	}
-	content, err := t.toolkit.client.GetFileContent(ctx, t.toolkit.owner, t.toolkit.repo, path, pr.Head.SHA)
+	content, err := t.toolkit.cachedFileContent(ctx, path, pr.Head.SHA)
 	if err != nil {
-		return "", fmt.Errorf("get file content: %w", err)
+		return "", err
 	}
 
 	startLine, err := optionalInt(input, "start_line", 0)
@@ -529,7 +601,7 @@ func fileDiff(files []github.PullRequestFile, path string, maxLines int) (string
 	return encodeJSON(map[string]any{"path": path, "found": false})
 }
 
-func fullDiff(files []github.PullRequestFile, maxLines int) (string, error) {
+func fullDiff(files []github.PullRequestFile, coverageTruncated bool, maxLines int) (string, error) {
 	remaining := maxLines
 	patches := make([]map[string]any, 0, len(files))
 	truncated := false
@@ -556,10 +628,11 @@ func fullDiff(files []github.PullRequestFile, maxLines int) (string, error) {
 		}
 	}
 	return encodeJSON(map[string]any{
-		"total_files": len(files),
-		"max_lines":   maxLines,
-		"truncated":   truncated,
-		"files":       patches,
+		"total_files":        len(files),
+		"max_lines":          maxLines,
+		"truncated":          truncated,
+		"coverage_truncated": coverageTruncated,
+		"files":              patches,
 	})
 }
 

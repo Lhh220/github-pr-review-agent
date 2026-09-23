@@ -1,0 +1,35 @@
+{
+  "input": {
+    "query": "total count",
+    "top_k": 1
+  },
+  "required": [
+    {
+      "type": "reference",
+      "file": "aggregate/average.go",
+      "line": 33,
+      "text": "return total / count"
+    }
+  ],
+  "follow_up": {
+    "input": {
+      "path": "aggregate/average.go",
+      "start_line": 1,
+      "end_line": 40
+    },
+    "required": [
+      {
+        "type": "reference",
+        "file": "aggregate/average.go",
+        "line": 4,
+        "text": "// Empty input is not checked here."
+      },
+      {
+        "type": "reference",
+        "file": "aggregate/average.go",
+        "line": 33,
+        "text": "return total / count"
+      }
+    ]
+  }
+}

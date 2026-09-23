@@ -1,0 +1,16 @@
+[
+  {
+    "tool_calls": [
+      {
+        "id": "read",
+        "name": "read_file_context",
+        "arguments": "{\"path\":\"sample.go\"}"
+      }
+    ],
+    "model": "fixture"
+  },
+  {
+    "content": "{\"summary\": \"Review complete.\", \"findings\": []}",
+    "model": "fixture"
+  }
+]

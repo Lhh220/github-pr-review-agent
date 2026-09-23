@@ -1,0 +1,23 @@
+[
+  {
+    "tool_calls": [
+      {
+        "id": "retrieve_code_context",
+        "name": "retrieve_code_context",
+        "arguments": "{\"query\": \"total count\", \"top_k\": 1}"
+      }
+    ]
+  },
+  {
+    "tool_calls": [
+      {
+        "id": "read_file_context",
+        "name": "read_file_context",
+        "arguments": "{\"path\": \"aggregate/average.go\", \"start_line\": 1, \"end_line\": 40}"
+      }
+    ]
+  },
+  {
+    "content": "{\"summary\": \"Review completed after checking the called helper.\", \"findings\": [{\"category\": \"bug\", \"file\": \"aggregate/average.go\", \"line\": 33, \"severity\": \"high\", \"confidence\": \"confirmed\", \"comment\": \"The new public entry point passes empty values to Average, which divides by zero.\", \"suggestion\": \"Return before division when values is empty.\", \"evidence\": [{\"type\": \"reference\", \"file\": \"aggregate/average.go\", \"line\": 33, \"text\": \"return total / count\"}]}]}"
+  }
+]

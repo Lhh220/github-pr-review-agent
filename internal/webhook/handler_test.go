@@ -275,3 +275,27 @@ func TestHandleMarksTaskFailedWhenPublishFails(t *testing.T) {
 		}
 	}
 }
+
+func TestHandleRejectsOversizedBodyBeforeSignatureCheck(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	original := maxWebhookBodyBytes
+	maxWebhookBodyBytes = 64
+	defer func() { maxWebhookBodyBytes = original }()
+
+	handler := New("secret", &fakePublisher{}, &fakeTaskStore{task: newWebhookTestTask(), created: true})
+	router := gin.New()
+	router.POST("/webhook/github", handler.Handle)
+
+	// Correctly signed: the rejection must come from the size cap alone.
+	body := make([]byte, 65)
+	req := signedRequest(http.MethodPost, "/webhook/github", body, "pull_request", "secret")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusRequestEntityTooLarge, w.Body.String())
+	}
+	if store := handler.Store.(*fakeTaskStore); store.createCalls != 0 {
+		t.Fatalf("oversized body must not create a task, calls=%d", store.createCalls)
+	}
+}

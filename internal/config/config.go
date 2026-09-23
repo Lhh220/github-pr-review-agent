@@ -45,6 +45,7 @@ type Config struct {
 	AgentToolTimeout         time.Duration
 	AgentMaxCommitHistory    int
 	AgentMaxReferenceResults int
+	AgentEnableRetrieval     bool
 	AgentEnableStaticChecks  bool
 	AgentStaticCheckTimeout  time.Duration
 	AgentStaticCheckWorkDir  string
@@ -90,6 +91,7 @@ func Load() *Config {
 		AgentToolTimeout:         getEnvDuration("AGENT_TOOL_TIMEOUT", 20*time.Second),
 		AgentMaxCommitHistory:    getEnvInt("AGENT_MAX_COMMIT_HISTORY", 20),
 		AgentMaxReferenceResults: getEnvInt("AGENT_MAX_REFERENCE_RESULTS", 100),
+		AgentEnableRetrieval:     getEnvBool("AGENT_ENABLE_RETRIEVAL", false),
 		AgentEnableStaticChecks:  getEnvBool("AGENT_ENABLE_STATIC_CHECKS", false),
 		AgentStaticCheckTimeout:  getEnvDuration("AGENT_STATIC_CHECK_TIMEOUT", 2*time.Minute),
 		AgentStaticCheckWorkDir:  getEnv("AGENT_STATIC_CHECK_WORK_DIR", ".static-checks"),

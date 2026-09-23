@@ -43,10 +43,19 @@ type payload struct {
 	} `json:"repository"`
 }
 
+// GitHub caps webhook payloads at 25 MiB. The cap applies while reading and
+// before signature verification, so an unauthenticated oversized request
+// cannot balloon process memory.
+var maxWebhookBodyBytes = 25 << 20
+
 func (h *Handler) Handle(c *gin.Context) {
-	body, err := io.ReadAll(c.Request.Body)
+	body, err := io.ReadAll(io.LimitReader(c.Request.Body, int64(maxWebhookBodyBytes)+1))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "read body"})
+		return
+	}
+	if len(body) > maxWebhookBodyBytes {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "payload too large"})
 		return
 	}
 	signature := c.GetHeader("X-Hub-Signature-256")

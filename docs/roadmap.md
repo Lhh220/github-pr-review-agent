@@ -48,7 +48,7 @@
 
 任务：
 - [x] Day 1：Tool Calling 框架、工具注册、Agent Loop、DeepSeek tool calls、tool_call_log、`/tasks/:id/tool-calls`
-- [x] Day 2：实现 get_pr_meta / list_changed_files / read_diff / read_file_context / get_commit_history（本地完成，待线上 tool_calling 验收）
+- [x] Day 2：实现 get_pr_meta / list_changed_files / read_diff / read_file_context / get_commit_history（已通过线上工具调用记录验证）
 - [x] Day 2.5：轻量开发者后台 `/admin`，可视化任务、审查结果、工具调用、审计和死信管理
 - [x] Day 3：tree-sitter 函数级上下文裁剪（本地与线上部署完成）
 - [x] Day 4：search_references，检索被删除或改名符号的跨文件引用（线上 tool_calling 验收完成）
@@ -57,7 +57,12 @@
 - [x] Day 7：基础评测集 + 准确率/误报率统计（本地完成）
 - [x] Day 8：线上健康与 PR #23 冒烟验收、文档和简历收尾
 - [x] Day 8 本地补强：异常模型输出重试、静态检查证据状态校验、正常代码负样本、类别与过度确认指标、逐样本保存评测失败与结果
-- [ ] Day 8 专项补充：live 模型评测、静态检查线上专项验收
+- [x] Day 8 发布恢复：持久化发布标识与 commit、重试复用结果、GitHub 评论对账、发布凭证与 done 同事务、故障注入和 MySQL 本地集成验收；添加 CI 工作流（历史 PR CI 已通过，新提交仍需重跑）
+- [x] Day 8 live 基线：2026-09-11 完成 27/27，0 失败；precision=0.50、recall=0.60、负样本误报率=0.25（本轮修复前）
+- [x] Day 8 质量整改代码：证据定位纠正、摘要一致性、Go 版本预读、上下文越界修复、评测进度与报告防覆盖、标签校准及独立复验集
+- [x] 静态执行本地加固：运行时输出上限；Linux 超时取消进程组，非 Linux 保留直接子进程取消；尚非强隔离沙箱
+- [ ] Day 8 专项补充：本轮 live 复测、静态检查线上专项验收
+- [x] 首轮 live 后本地修复：严格 JSON 包装解析、失败响应与工具诊断留存、证据过滤原因、样本契约与标签修正、辅助位置指标和数据集指纹；全量测试、vet、三轮离线评测通过。live 质量提升仍待复验，步骤见 [live 复验说明](live-eval-followup.md)。
 
 验收：
 - Agent 能多步调工具
@@ -78,9 +83,36 @@
 
 ## 阶段 4：交付（几天）
 
-- Docker Compose 一键部署
-- README：架构图、运行方式、demo 截图
-- 录一个 30 秒演示视频
-- 整理面试问答点
+- [x] Docker Compose 完整编排、健康检查、本地配置示例；语法校验通过
+- [x] CI 增加 Compose 构建、启动、健康与鉴权冒烟；历史 PR 已通过，新提交仍需重跑
+- [x] README 与 [交付指南](quickstart.md)：架构图、运行方式、停止与故障处理
+- [x] 整理 30 秒演示脚本、截图清单和面试问答
+- [ ] 在干净 Docker 环境启动完整项目（本机引擎无响应，尚未验收）
+- [ ] 保存真实 demo 截图，录制 30 秒演示视频
 
 验收：别人按 README 能跑起来；面试时能讲清每个模块。
+
+
+## 2026-09-15 main 收尾状态
+
+- [x] 上游错误响应正文读取限额 8 KiB，截断提示和 UTF-8 修复，为 MySQL TEXT 错误前缀留余量。
+- [x] RequeueTask 状态不合法时直接返回，不在持有事务连接时再申请连接查询。
+- [x] 文件分页上限后探测，覆盖未知/不完整时禁止仅文档跳过并追加覆盖范围说明。
+- [x] Toolkit 文件缓存（单文件 2 MiB、累计 16 MiB），tarball 下载上限及复用，Parser 分语言锁。
+- [x] 证据预解析复用、原实现对照测试；RabbitMQ 未发送分支重连后继续发布；锁 TTL 最低 6 分钟。
+- [ ] 新提交的 MySQL CI 和 Compose 验证；RabbitMQ 成功重连/confirm 丢失仍需真实 broker 故障验收，当前单测未覆盖完整协议。
+- [ ] 当前 main 的 live/holdout 复验，比较质量与上下文预算影响。
+- [ ] 静态检查线上完整成功验收：历史任务有 compile signal: killed，资源诊断已补，不能据此标记通过。
+
+阶段四已加入默认关闭的词法仓库检索原型，见 [检索增强验收](retrieval.md)。部署与质量验收继续跟进，尚未证明 live 收益。
+
+
+### 2026-09-16 质量基线更新
+
+- [x] 用户完成修复前 live 主集 27/27、holdout 12/12，0 失败，precision/recall 均 1.00，误报率 0；共 13 个不同样本。
+- [x] 修复 read_diff JSON patch 未进入 reference 证据验证的问题，补充 diff-only 正反例回归。
+- [ ] 更新部署后验证真实 PR 的 diff-only finding，并复跑 live/holdout；无法从缺失原始候选的 Task 37 文本断言四条候选都应该恢复。
+- [x] 加入可选 retrieve_code_context、commit 隔离、扫描/输出限额和独立跨文件正反例。
+- [x] 旧版两个跨文件样本的 A/B live、开启检索的主集/holdout 回归通过；尚未证明准确率提升。
+- [x] 补齐样本 go.mod，扩充至 6 个跨文件正反例；直接验证检索关键行和长函数补读。
+- [ ] 对新数据集重跑 A/B live（每组 18 次），按 docs/retrieval.md 完成真实 PR、head SHA 更新及防误报验收。

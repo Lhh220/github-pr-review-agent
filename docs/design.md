@@ -427,11 +427,98 @@ go run ./cmd/eval -live -runs 3 -timeout 30m -report eval/report-live.json
 
 离线报告输出到 `eval/report.json`，适合提交为回归基线；live 模式复用 fixture GitHub 客户端，只调用真实模型，不回写 GitHub 评论。live 支持 `-runs` 重复执行并记录轮次，用于观察模型输出波动。评测集随项目迭代，优先补充真实 MR 中出现过的误报和漏报样本。
 
-每个 case 完成或失败后立即保存报告；单个错误记录在 `case_results[].error` 后继续后续样本，总超时后停止。存在失败或未完成样本时 CLI 返回非零状态。`mode` 区分 offline/live，live 报告记录配置的 `model`。平均 token 与延迟仅统计成功执行，失败调用的费用不包含在内。7 个样本中有 2 个正常代码负样本（已初始化 map、参数化 SQL），会经过模型和工具链；文档样本只验证跳过逻辑。
+每个 case 完成或失败后立即保存报告；单个错误记录在 `case_results[].error` 后继续后续样本，总超时后停止。存在失败或未完成样本时 CLI 返回非零状态。`mode` 区分 offline/live，live 报告记录配置的 `model`。平均 token 与延迟仅统计成功执行，失败调用的费用不包含在内。9 个样本中有 4 个正常代码负样本（已初始化 map、参数化 SQL、diff 格式契约、审查输出策略），会经过模型和工具链；文档样本只验证跳过逻辑。
 
 ## 9. 后续可选扩展
+
+### 发布一致性
+
+发布状态拆为：`review_delivery` 保存首次分析的 commit 和随机标识，`review_result` 保存不可覆盖的模型结果，非零 `github_review_id` 表示已确认远端 review。两种审查模式及跳过路径复用同一套恢复流程。提交前保存结果；收到错误或重启后先查已保存结果，再分页核对 GitHub 的已提交 review，匹配标识和 commit 后仅确认本地状态。查询不完整时拒绝发布。确认 Review ID、更新 done、写入状态审计在同一 MySQL 事务执行，重复确认同一 ID 无副作用，不同 ID 被拒绝。
+
+参考 [GitHub Review API](https://docs.github.com/en/rest/pulls/reviews)：POST 显式传入 commit_id，GET 列表用于失败后对账。PR 级 Redis 锁串行化正常执行，但 GitHub 没有参与数据库事务；远端可见性延迟、失锁或外部修改等情况仍限制 exactly-once 保证。已有结果只恢复原版本发布；生成前和保存前比对 head，不能将检查结果归到重试时的新 head。旧版任务缺少可靠的发布快照时停止自动补发并要求人工核对。
+
+审查质量回归：Task 26 的误报被整理为 `008-diff-section-contract` 和 `009-review-output-policy` 两个精简样本，保留相关实现与测试。两种模式共用 `ReviewQualityRules`：报错前核对实现、调用方、测试和契约，陈述具体触发条件与影响；needs_verification 不用于包装无依据的猜测。超时、OOM、依赖下载或工具链问题在 summary 中说明验证限制，不能据此断定 PR 有缺陷或声称未观察到的测试通过。
+
+离线脚本只验证这些样本能经过真实工具链并产生预期报告，不能证明提示词降低了模型误报。需要使用 live 模式对这两个样本做人工复核，并确认原有正样本仍能检出，避免通过过度压制 finding 降低召回率。
 
 - 支持 GitLab / Gitea。
 - 支持增量审查：只审查相对上次审查的新 commit。
 - 支持 MCP 协议工具层，和金山实习的 MCP 工具形成对比。
 - 接入向量库，检索相似历史 PR。
+
+
+### 过期任务与审查资源预算
+
+- 尚未保存审查结果的任务，如果 webhook commit 与当前 PR head 不一致，返回可识别的 `ErrTaskSuperseded`。Worker 将其写为 `superseded` 并确认消息，不增加重试次数、不投递死信；状态写入失败仍走基础设施恢复。首次执行也使用 webhook 快照，防止排队期间发生 push 后错审新 commit。
+- 已保存结果继续按原 commit 和 marker 对账，保持已有发布恢复语义；不能因为 PR 有新提交就跳过已发评论的回执恢复。历史 dead_letter 不自动改写。`superseded` 可在后台筛选，状态分布单独展示，不计入成功率的 done/failed/dead_letter 分母。
+- 静态检查子进程固定 `GOFLAGS=-mod=mod -p=1` 和 `GOMAXPROCS=2`，减少包级并行编译和进程内部并发。命令仍为 `go test ./...` / `go vet ./...`。这不是内存上限，单个编译器仍可能被平台终止，需要部署后验证。
+- Agent 每次 Run 缓存指定的只读工具成功输出，以工具名和规范化 JSON 参数作为键。重复请求只返回原调用 ID 引用，不重复执行、不重复注入正文；失败不缓存，静态检查不缓存，不同 Run 不共享。
+- 累计接纳工具正文默认最多 48 KiB；单次序列化 ChatRequest 默认最多 96 KiB，包含历史消息和工具定义，最终回答及 JSON 修复也检查。均为字节预算，不是精确 token 限额或整次任务计费上限。正文超限时整段拒绝并提示缩小范围，拒绝内容不加入证据；请求超限返回明确错误，不发送给模型。原有 MaxSteps 继续约束轮数。
+- Task 29 的附件记录包含 15 次工具调用，无相同参数的重复读取；128,560 total tokens 主要应关注多轮历史累积。上线后用相同规模 PR 比较 token、工具调用和遗漏率，不能仅根据缓存命中宣称质量或成本改善。
+
+验收：更新部署后触发一次新审查，确认静态检查可完整执行；连续 push 时旧未完成任务应成为 superseded，新 commit 任务正常完成。若仍出现 `signal: killed`，检查平台内存指标。保留旧评测报告，使用新报告路径重跑 live/holdout，对照失败数、precision/recall 和 token，尤其检查预算拒绝是否造成漏报。
+
+
+### 预算收尾与静态检查诊断补充
+
+Agent 在每轮请求中刷新剩余工具正文预算和剩余轮数（提示不累积），要求优先变更生产代码、疑似问题及跨文件验证，避免整仓 diff、生成报告和无关上下文。默认剩余正文不超过 2 KiB 时，或连续两次正文超限时，不再执行新的读取；同一批剩余调用仍返回配对的工具错误，随后禁用工具生成最终回答，并要求披露未检查范围。较小自定义预算使用总预算的 10% 作为收尾阈值。一次超限后仍可请求更小片段，成功接纳正文会清零连续拒绝计数。该策略限制无效读取，不保证覆盖整个大 PR；质量须用 live/holdout 验证。
+
+`run_static_checks` 输出增加 `execution_environment`（仅 GOFLAGS、GOMAXPROCS、GOTOOLCHAIN、CGO_ENABLED 白名单）和每项检查的 `resources_before` / `resources_after`。在容器 cgroup v2 根目录可读时记录 memory.current、memory.max、memory.peak、memory.events；不可读/v1/非 Linux 时缺项表示未知，不能当成零。数值单位和语义保留内核原文，max 表示该层无有限内存上限，peak 为 cgroup 历史峰值，不是该次检查的单独峰值。
+
+部署后先确认 execution_environment 中 GOFLAGS 包含 -p=1、GOMAXPROCS 为 2。若仍出现 signal: killed，对比检查前后的 memory.events 中 oom/oom_kill，并结合平台同期内存曲线和限制判断。计数属于整个 cgroup，增长只能证明该范围内出现事件，不能单独归因给本次编译；祖先 cgroup 限制和平台外部终止也可能不在这些文件中体现。不自动提升资源额度、不把 kill 推断成 PR 缺陷。
+
+
+### 下载与文件上下文边界
+
+仓库 tarball 缓存限制压缩下载大小为 32 MiB（额外读取最多 1 字节以判断超限），独立于解压/搜索大小限制。超限会关闭流、删除临时文件且不缓存失败；合法缓存仍按 SHA 复用。该限制是每份压缩包的上限，不是所有任务的总磁盘配额，大仓库可能明确失败。
+
+legacy 文件上下文按输入顺序分批拉取，每批不超过 4 个，也不超过剩余成功名额。失败和空内容不占 MaxFileContexts 名额，继续补取后续可读文件；达到成功上限或 context 取消后不再启动新批次。并发回归采用同步屏障验证，避免以短耗时阈值造成 CI 偶发失败。
+
+
+### Parser 复用验证（2026-09-15）
+
+Go、Python、JavaScript 各保留一个进程生命周期的 Parser，改为各自独立互斥锁；同语言仍串行解析，不同语言不再共用解析锁。每次生成的 Tree 仍由 Extract 关闭；没有引入对象池，也没有缓存文件解析结果。并发回归同时覆盖同语言不同文件和不同语言，验证符号名、行号及完整 Result 与串行结果一致。
+
+新增 BenchmarkParserLifecycle，保留每次创建（fresh）、原全局锁（global_lock）、当前分语言锁（per_language）三种对照，覆盖 1/100 个函数、串行/混合语言并发。复现命令（PowerShell）：
+
+```powershell
+go test ./internal/codecontext -run '^$' -bench '^BenchmarkParserLifecycle$' -benchmem -benchtime=300ms -count=3 -cpu=4
+```
+
+本机 Windows amd64、i5-12500H、GOMAXPROCS=4，三次中位数（微秒/次；并发为摊销耗时，不是单请求延迟）：
+
+| 输入与模式 | fresh | global_lock | per_language |
+| --- | ---: | ---: | ---: |
+| 1 函数串行 | 30.61 | 19.96 | 20.00 |
+| 1 函数混合语言并发 | 34.58 | 24.61 | 19.42 |
+| 100 函数串行 | 1850.47 | 1898.37 | 1766.52 |
+| 100 函数混合语言并发 | 1065.75 | 1432.35 | 1172.40 |
+
+结论：分语言锁缓解全局锁的跨语言竞争，保留小文件复用收益；不保证所有负载最优，100 函数并发样本中 fresh 仍更快。暂不引入对象池。数据仅为本机解析与 Tree 清理的短基准，不涵盖 Extract 后续处理、网络、模型及静态检查，也不等于端到端收益。Go B/op、allocs/op 不包含 C 分配；不能据此声称原生内存下降。生产主要处理 Go 时，分语言锁不会提高同语言解析并发；只有实际解析成为瓶颈才进一步考虑有界 Parser 池。部署平台应重跑基准，并单独观测 RSS。
+
+
+### main 工程加固核对（2026-09-15）
+
+- GitHub 普通 API/tarball 和 DeepSeek 非成功响应通过共享 ReadErrorBody 读取，默认正文 8 KiB，额外 1 字节用于探测超限，追加截断标记。修复截断产生的无效 UTF-8，为 MySQL TEXT（65535 字节）的外层错误前缀留余量；这不是所有错误字符串的数据库统一大小保证。先前 64 KiB 正文加前缀可能使状态错误写入失败。
+- PR 文件最多接纳 10 页（1000 项），第 11 页只用于探测。探测为空表示完整；存在更多文件或探测失败均保守设置 coverage_truncated。该布尔值表示不能保证完整覆盖，不能一律断言已确认更多文件。工具输出和最终 summary 传播此限制，legacy/agent 都禁止根据不完整列表跳过审查。
+- Toolkit 文件内容缓存以 path 为键，依赖一次 Toolkit 固定同一 PR head SHA 的生命周期；不同范围复用正文。单文件超过 2 MiB、累计超过 16 MiB 的内容不入缓存，失败/空内容不缓存；这些是驻留缓存限制，不是 HTTP 成功响应体或解析临时内存上限。并发未命中可能重复请求，目前 Agent 顺序执行工具，不增加 singleflight 依赖。
+- 每次证据校验过程预解析并复用，而非保证整个 review 只解析一次；reference、static checks、通用字符串分别解码，以保持原类型不匹配和 rawReferenceEvidence 回退语义。JSON 修复及最终规范化可再次校验，不宣称已有常数时间证据索引。
+- RabbitMQ publisher 不存在、消息尚未发送时，重连后继续尝试一次发布；发送错误/confirm 丢失不在当前调用中重发。仍属于至少一次系统，不能据此承诺无重复；当前单测仅覆盖关闭与重连失败，真实成功重连和确认丢失待专项验收。
+- RequeueTask 使用已锁定行确认存在性，UPDATE 不生效直接返回状态转换失败；不再通过池申请第二条连接。锁 TTL 默认 7 分钟，低于 5 分钟审查超时加 1 分钟余量时提高到 6 分钟并告警；它依赖操作遵守 context 取消，不是续租或 fencing，未实现无限时长任务保证。
+
+近期变更未发现其他足以阻塞本轮提交的确定性问题，但缓存命中率、跨语言 Parser 基准不等于端到端收益。live/holdout、实际 broker 故障和部署静态检查仍按 roadmap 验收，不将本地单测通过表述为全部线上边界已验证。
+
+
+### JSON diff 证据校验修复（2026-09-16）
+
+read_diff 返回单文件 `{path, patch, found}` 或多文件 `{files:[{path,patch}]}`。此前 reference 校验只读取 content/matches，JSON 解码成功便跳过 raw 回退，导致仅有 diff 支持的候选也会被误拒。本轮为 diff JSON 添加独立解码与匹配，不改变旧 content/matches 与 rawReferenceEvidence 的回退规则。
+
+证据必须匹配文件路径、hunk 新侧行号和整行文本（沿用首尾空白归一化）；新增行和上下文行可支持证据，删除行不能支持新版本定位。拒绝 found=false、removed 文件、畸形 hunk、超过声明行数和未返回内容。截断标记不自动否定已经返回的有效行，也不允许推断缺失尾部；`+++` 开头的 hunk 内容按新增代码处理，不能误认成文件头。测试覆盖单/多文件工具输出、定位和原文错误、截断边界，以及最终 finding 保留/拒绝。
+
+用户提供的 2026-09-16 live 报告为本修复前基线：主集 27/27、holdout 12/12，均 failed_cases=0，precision/recall/confirmed_precision=1，false_positive_rate=0、overconfirmed_findings=0。报告分别为 report-20260916T042424.963806900Z.json、report-20260916T042555.702998900Z.json，不纳入版本控制。9+4 个不同样本各重复 3 次，不能当作 39 个独立样本或泛化质量保证。JSON-diff-only 的误拒由新增回归覆盖，不能由这批修复前满分报告证明已解决。
+
+这为小范围仓库检索增强实验提供了可用基线。RAG 首先用独立跨文件样本对比现有工具与检索增强的质量/成本，保持 commit 隔离和证据预算；上线前仍需对本修复做真实 PR 验证，并重跑 live/holdout。线上静态检查资源问题继续单独验收，不将 done 或评测满分等同于 go test/go vet 成功。
+
+### 可选仓库检索增强原型
+
+`AGENT_ENABLE_RETRIEVAL=true` 在 tool_calling 链路注册 `retrieve_code_context`，基于当前 head SHA 的缓存 tarball 做多关键词代码块排序，返回可校验的行级引用。默认关闭，无额外依赖；扫描、结果和 Agent 总上下文均有上限。实现与 A/B 验收见 [仓库检索增强](retrieval.md)，尚未验证 live 收益。

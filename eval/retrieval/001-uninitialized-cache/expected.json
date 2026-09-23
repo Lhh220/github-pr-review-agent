@@ -1,0 +1,17 @@
+{
+  "findings": [
+    {
+      "category": "bug",
+      "file": "session/put.go",
+      "line": 4,
+      "severity": "high",
+      "confidence": "confirmed",
+      "accepted_locations": [
+        {
+          "file": "session/session.go",
+          "line": 5
+        }
+      ]
+    }
+  ]
+}

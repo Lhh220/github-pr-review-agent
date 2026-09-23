@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/liaohonghui/github-pr-review-agent/eval"
@@ -54,6 +55,9 @@ func TestCLIRecordsFailureAndContinues(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected failing exit status: %s", output)
 	}
+	if !strings.Contains(string(output), "case=a-failed started") || !strings.Contains(string(output), "status=failed") || !strings.Contains(string(output), "status=ok") {
+		t.Fatalf("missing progress: %s", output)
+	}
 	data, err := os.ReadFile(reportPath)
 	if err != nil {
 		t.Fatalf("missing checkpoint: %v; output=%s", err, output)
@@ -65,5 +69,23 @@ func TestCLIRecordsFailureAndContinues(t *testing.T) {
 	if report.FailedCases != 1 || report.Cases != 2 || report.PlannedCases != 2 || report.ScoredCases != 1 ||
 		report.CaseResults[0].Error == "" || report.CaseResults[1].TruePositives != 1 || report.Mode != "offline" {
 		t.Fatalf("unexpected report: %+v", report)
+	}
+}
+
+func TestCLIRefusesToOverwriteBaseline(t *testing.T) {
+	reportPath := filepath.Join(t.TempDir(), "baseline.json")
+	baseline := []byte("existing report")
+	if err := os.WriteFile(reportPath, baseline, 0600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(os.Args[0], "-test.run=^TestEvalCLIHelper$")
+	command.Env = append(os.Environ(), "EVAL_TEST_CASES=../../eval/cases", "EVAL_TEST_REPORT="+reportPath)
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "report already exists") {
+		t.Fatalf("expected refusal: %v %s", err, output)
+	}
+	got, err := os.ReadFile(reportPath)
+	if err != nil || string(got) != string(baseline) {
+		t.Fatal("baseline changed")
 	}
 }

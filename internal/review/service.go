@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/liaohonghui/github-pr-review-agent/internal/github"
 	"github.com/liaohonghui/github-pr-review-agent/internal/llm"
@@ -15,8 +16,9 @@ import (
 )
 
 type GitHubClient interface {
+	ReviewPublisher
 	GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error)
-	GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, error)
+	GetPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]github.PullRequestFile, bool, error)
 	GetFileContent(ctx context.Context, owner, repo, path, ref string) (string, error)
 	CreatePullRequestReview(ctx context.Context, owner, repo string, number int, body string) error
 }
@@ -26,6 +28,10 @@ type LLMClient interface {
 }
 
 type ResultStore interface {
+	GetReviewResultByTaskID(context.Context, uint64) (*store.ReviewResult, error)
+	GetReviewDelivery(context.Context, uint64) (*store.ReviewDelivery, error)
+	PrepareReviewDelivery(context.Context, uint64, string) (*store.ReviewDelivery, error)
+	MarkReviewDelivered(context.Context, uint64, uint64) error
 	CreateReviewResult(ctx context.Context, input store.NewReviewResult) (*store.ReviewResult, error)
 }
 
@@ -49,37 +55,35 @@ func New(gh GitHubClient, l LLMClient, results ResultStore, maxDiffLines, maxFil
 	}
 }
 
+// filesTruncatedSummaryNote is appended to review summaries when the GitHub
+// file-list pagination cap was hit, so readers know coverage is incomplete.
+const filesTruncatedSummaryNote = "Note: review coverage may be incomplete: the changed-file pagination limit was reached, and additional files exist or could not be ruled out."
+
 func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int, taskID uint64) error {
-	pr, err := s.GitHub.GetPullRequest(ctx, owner, repo, number)
-	if err != nil {
-		return fmt.Errorf("get pull request: %w", err)
+	pr, completed, err := resumeReview(ctx, s.GitHub, s.Results, owner, repo, number, taskID)
+	if err != nil || completed {
+		return err
 	}
-	files, err := s.GitHub.GetPullRequestFiles(ctx, owner, repo, number)
+	files, filesTruncated, err := s.GitHub.GetPullRequestFiles(ctx, owner, repo, number)
 	if err != nil {
 		return fmt.Errorf("get pull request files: %w", err)
 	}
-	if len(files) == 0 || isDocsOnlyPR(files) {
+	// A truncated list cannot support the docs-only conclusion: unseen files
+	// may contain code, so keep the normal review path in that case.
+	if !filesTruncated && (len(files) == 0 || isDocsOnlyPR(files)) {
 		summary := "This pull request has no changed files relative to its base branch; review skipped."
 		rawResponse := "No changed files relative to the base branch."
 		if len(files) > 0 {
 			summary = "This pull request only changes documentation; code review skipped."
 			rawResponse = "Documentation-only pull request; code review skipped."
 		}
-		result, err := s.Results.CreateReviewResult(ctx, store.NewReviewResult{
+		return finishReview(ctx, s.GitHub, s.Results, owner, repo, number, store.NewReviewResult{
 			TaskID:      taskID,
 			Summary:     summary,
 			Findings:    []store.Finding{},
 			RawResponse: rawResponse,
 			Model:       "none",
 		})
-		if err != nil {
-			return fmt.Errorf("create no-diff review result: %w", err)
-		}
-		comment := buildReviewComment(*result, taskID, pr.Head.SHA)
-		if err := s.GitHub.CreatePullRequestReview(ctx, owner, repo, number, comment); err != nil {
-			return fmt.Errorf("create no-diff review: %w", err)
-		}
-		return nil
 	}
 	diff := buildDiff(files, s.MaxDiffLines)
 	if strings.TrimSpace(diff) == "" {
@@ -98,9 +102,13 @@ func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int, 
 	if err != nil {
 		return err
 	}
-	result, err := s.Results.CreateReviewResult(ctx, store.NewReviewResult{
+	summary := parsed.Summary
+	if filesTruncated {
+		summary += "\n\n" + filesTruncatedSummaryNote
+	}
+	return finishReview(ctx, s.GitHub, s.Results, owner, repo, number, store.NewReviewResult{
 		TaskID:        taskID,
-		Summary:       parsed.Summary,
+		Summary:       summary,
 		Findings:      parsed.Findings,
 		RawResponse:   response.Content,
 		Model:         response.Model,
@@ -109,14 +117,6 @@ func (s *Service) ReviewPR(ctx context.Context, owner, repo string, number int, 
 		TotalTokens:   response.Usage.TotalTokens,
 		LLMDurationMS: response.DurationMS,
 	})
-	if err != nil {
-		return fmt.Errorf("create review result: %w", err)
-	}
-	comment := buildReviewComment(*result, taskID, pr.Head.SHA)
-	if err := s.GitHub.CreatePullRequestReview(ctx, owner, repo, number, comment); err != nil {
-		return fmt.Errorf("create pull request review: %w", err)
-	}
-	return nil
 }
 
 type parsedReviewResponse struct {
@@ -124,7 +124,7 @@ type parsedReviewResponse struct {
 	Findings []store.Finding `json:"findings"`
 }
 
-func parseReviewResponse(content string, evidenceCorpus ...string) (parsedReviewResponse, error) {
+func decodeReviewResponse(content string) (parsedReviewResponse, error) {
 	cleaned := extractJSONObject(content)
 	var parsed parsedReviewResponse
 	if err := json.Unmarshal([]byte(cleaned), &parsed); err != nil {
@@ -133,16 +133,181 @@ func parseReviewResponse(content string, evidenceCorpus ...string) (parsedReview
 	if strings.TrimSpace(parsed.Summary) == "" || parsed.Findings == nil {
 		return parsedReviewResponse{}, fmt.Errorf("parse review response: summary and findings array are required")
 	}
-	parsed.Findings = normalizeFindings(parsed.Findings, evidenceCorpus...)
+	return parsed, nil
+}
+
+func parseReviewResponse(content string, evidenceCorpus ...string) (parsedReviewResponse, error) {
+	parsed, err := decodeReviewResponse(content)
+	if err != nil {
+		return parsedReviewResponse{}, err
+	}
+	var rejected []RejectedFinding
+	parsed.Findings, rejected = normalizeFindingsWithDiagnostics(parsed.Findings, evidenceCorpus...)
+	if len(rejected) > 0 {
+		// The original summary may repeat rejected claims. Keep it only in RawResponse.
+		parsed.Summary = fmt.Sprintf("Review completed with %d evidence-validated finding(s). %d candidate(s) were omitted because their evidence could not be validated. This does not establish that the PR is defect-free.", len(parsed.Findings), len(rejected))
+	}
 	return parsed, nil
 }
 
 func normalizeFindings(findings []store.Finding, evidenceCorpus ...string) []store.Finding {
+	normalized, _ := normalizeFindingsWithDiagnostics(findings, evidenceCorpus...)
+	return normalized
+}
+
+type RejectedFinding struct {
+	Finding store.Finding `json:"finding"`
+	Reason  string        `json:"reason"`
+}
+
+// DiagnoseRejectedFindings uses the production evidence policy for eval reports.
+// Invalid responses are reported by parseReviewResponse, not as filtered findings.
+func DiagnoseRejectedFindings(content string, evidenceCorpus ...string) []RejectedFinding {
+	var parsed parsedReviewResponse
+	if json.Unmarshal([]byte(extractJSONObject(content)), &parsed) != nil {
+		return nil
+	}
+	_, rejected := normalizeFindingsWithDiagnostics(parsed.Findings, evidenceCorpus...)
+	return rejected
+}
+
+// parsedEvidenceCorpus decodes each corpus source into reusable shapes per validation pass instead of
+// re-unmarshaling for every finding and every evidence item. Existing content/
+// matches JSON-versus-raw semantics are preserved; diff tool JSON is decoded
+// independently and validated against its new-side hunk lines.
+type parsedEvidenceCorpus struct {
+	strings []string
+	sources []parsedCorpusSource
+}
+
+type parsedCorpusSource struct {
+	raw    string
+	diffs  *diffCorpusOutput
+	refs   *referenceCorpusOutput
+	checks *staticCheckCorpusOutput
+}
+
+type referenceCorpusOutput struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+	Matches []struct {
+		Path    string `json:"path"`
+		Line    int    `json:"line"`
+		Snippet string `json:"snippet"`
+	} `json:"matches"`
+}
+
+type staticCheckCorpusOutput struct {
+	Checks []struct {
+		Command  string `json:"command"`
+		Output   string `json:"output"`
+		Error    string `json:"error"`
+		Success  *bool  `json:"success"`
+		ExitCode int    `json:"exit_code"`
+		TimedOut bool   `json:"timed_out"`
+	} `json:"checks"`
+}
+
+func parseEvidenceCorpus(corpus []string) *parsedEvidenceCorpus {
+	parsed := &parsedEvidenceCorpus{
+		strings: make([]string, 0, len(corpus)),
+	}
+	for _, source := range corpus {
+		entry := parsedCorpusSource{raw: source}
+		var diffs diffCorpusOutput
+		if json.Unmarshal([]byte(source), &diffs) == nil {
+			entry.diffs = &diffs
+		}
+		var refs referenceCorpusOutput
+		if json.Unmarshal([]byte(source), &refs) == nil {
+			entry.refs = &refs
+		}
+		var checks staticCheckCorpusOutput
+		if json.Unmarshal([]byte(source), &checks) == nil {
+			entry.checks = &checks
+		}
+		parsed.sources = append(parsed.sources, entry)
+
+		var decoded any
+		if err := json.Unmarshal([]byte(source), &decoded); err == nil {
+			parsed.strings = append(parsed.strings, jsonStrings(decoded)...)
+			continue
+		}
+		parsed.strings = append(parsed.strings, source)
+	}
+	return parsed
+}
+
+func (p *parsedEvidenceCorpus) containsString(target string) bool {
+	return containsString(p.strings, target)
+}
+
+func (p *parsedEvidenceCorpus) referenceEvidence(evidence store.Evidence) bool {
+	for _, source := range p.sources {
+		if source.diffs != nil && source.diffs.matches(evidence) {
+			return true
+		}
+		if source.refs != nil {
+			if source.refs.Path == evidence.File {
+				prefix := fmt.Sprintf("%d:", evidence.Line)
+				target := strings.TrimSpace(evidence.Text)
+				for _, contentLine := range strings.Split(source.refs.Content, "\n") {
+					contentLine = strings.TrimSpace(contentLine)
+					code := strings.TrimSpace(strings.TrimPrefix(contentLine, prefix))
+					if strings.HasPrefix(contentLine, prefix) && code == target {
+						return true
+					}
+				}
+			}
+			for _, match := range source.refs.Matches {
+				if match.Path == evidence.File && match.Line == evidence.Line &&
+					match.Snippet == strings.TrimSpace(evidence.Text) {
+					return true
+				}
+			}
+			continue
+		}
+		if rawReferenceEvidence(source.raw, evidence) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *parsedEvidenceCorpus) staticCheckEvidence(evidence store.Evidence) bool {
+	excerpt := strings.TrimSpace(evidence.Excerpt)
+	if excerpt == "" {
+		return false
+	}
+	for _, source := range p.sources {
+		if source.checks == nil {
+			continue
+		}
+		for _, check := range source.checks.Checks {
+			if check.Command != evidence.Command || check.Success == nil || *check.Success ||
+				check.ExitCode <= 0 || check.TimedOut || check.Error != "" {
+				continue
+			}
+			if strings.Contains(check.Output, excerpt) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func normalizeFindingsWithDiagnostics(findings []store.Finding, evidenceCorpus ...string) ([]store.Finding, []RejectedFinding) {
 	normalized := make([]store.Finding, 0, len(findings))
-	corpusStrings := evidenceStrings(evidenceCorpus)
+	var rejected []RejectedFinding
+	corpus := parseEvidenceCorpus(evidenceCorpus)
 	for _, finding := range findings {
-		evidence := supportedEvidence(finding, evidenceCorpus, corpusStrings)
+		evidence := supportedEvidence(finding, corpus)
 		if finding.File == "" || finding.Line <= 0 || len(evidence) == 0 {
+			reason := "no evidence matched the retrieved corpus at the claimed location"
+			if finding.File == "" || finding.Line <= 0 {
+				reason = "missing file or invalid line"
+			}
+			rejected = append(rejected, RejectedFinding{Finding: finding, Reason: reason})
 			continue
 		}
 		if finding.Confidence != "confirmed" || finding.Category == "performance" {
@@ -151,21 +316,21 @@ func normalizeFindings(findings []store.Finding, evidenceCorpus ...string) []sto
 		finding.Evidence = evidence
 		normalized = append(normalized, finding)
 	}
-	return normalized
+	return normalized, rejected
 }
 
-func supportedEvidence(finding store.Finding, corpus, corpusStrings []string) []store.Evidence {
+func supportedEvidence(finding store.Finding, corpus *parsedEvidenceCorpus) []store.Evidence {
 	supported := make([]store.Evidence, 0, len(finding.Evidence))
 	for _, evidence := range finding.Evidence {
 		switch evidence.Type {
 		case "reference":
 			if strings.TrimSpace(evidence.Text) == "" || evidence.File != finding.File || evidence.Line != finding.Line ||
-				!referenceEvidenceInCorpus(evidence, corpus) {
+				!corpus.referenceEvidence(evidence) {
 				continue
 			}
 		case "static_check":
-			if evidence.Command == "" || !containsString(corpusStrings, evidence.Command) ||
-				!staticCheckEvidenceInCorpus(evidence, corpus) {
+			if evidence.Command == "" || !corpus.containsString(evidence.Command) ||
+				!corpus.staticCheckEvidence(evidence) {
 				continue
 			}
 		default:
@@ -175,6 +340,11 @@ func supportedEvidence(finding store.Finding, corpus, corpusStrings []string) []
 	}
 	return supported
 }
+
+// The functions below re-implement evidence matching on the raw corpus the
+// way the production path did before corpus pre-parsing. They are kept as the
+// reference implementation for TestParsedCorpusMatchesLegacyMatching; change
+// them only together with parsedEvidenceCorpus.
 
 func referenceEvidenceInCorpus(evidence store.Evidence, corpus []string) bool {
 	for _, source := range corpus {
@@ -410,19 +580,14 @@ func isDocumentationFile(filename string) bool {
 
 func extractJSONObject(content string) string {
 	trimmed := strings.TrimSpace(content)
-	if strings.HasPrefix(trimmed, "```") {
-		lines := strings.Split(trimmed, "\n")
-		if len(lines) > 1 {
-			trimmed = strings.Join(lines[1:], "\n")
+	// Accept one complete Markdown envelope, never extract an arbitrary object
+	// from prose, multiple responses, or tool-call markup.
+	lines := strings.Split(trimmed, "\n")
+	if len(lines) >= 3 {
+		opening := strings.TrimSpace(lines[0])
+		if (opening == "```json" || opening == "```") && strings.TrimSpace(lines[len(lines)-1]) == "```" {
+			return strings.TrimSpace(strings.Join(lines[1:len(lines)-1], "\n"))
 		}
-		if idx := strings.LastIndex(trimmed, "```"); idx >= 0 {
-			trimmed = trimmed[:idx]
-		}
-	}
-	start := strings.Index(trimmed, "{")
-	end := strings.LastIndex(trimmed, "}")
-	if start >= 0 && end > start {
-		return trimmed[start : end+1]
 	}
 	return trimmed
 }
@@ -453,7 +618,7 @@ func buildReviewComment(result store.ReviewResult, taskID uint64, commitSHA stri
 			}
 		}
 	} else {
-		b.WriteString("\n\nNo issues found.")
+		b.WriteString("\n\nNo evidence-validated findings to publish.")
 	}
 	b.WriteString(fmt.Sprintf("\n\n---\n%s", footer))
 	return b.String()
@@ -476,28 +641,57 @@ func shortCommitSHA(commitSHA string) string {
 	return commitSHA
 }
 
+// fileFetchConcurrency bounds parallel GitHub contents API calls so a large
+// PR does not burst the API or the shared GitHub rate limiter.
+const fileFetchConcurrency = 4
+
+// fetchFileContents fetches up to MaxFileContexts readable files concurrently.
+// Failures and empty files are skipped individually, and result order follows
+// the input file order so the assembled prompt stays deterministic.
 func (s *Service) fetchFileContents(ctx context.Context, owner, repo, ref string, files []github.PullRequestFile) []github.FileContent {
 	contents := make([]github.FileContent, 0)
 	if s.MaxFileContexts <= 0 {
 		return contents
 	}
-	for _, file := range files {
-		if len(contents) >= s.MaxFileContexts {
-			break
+
+	// Fetch small ordered batches; failures do not consume successful-context slots.
+	for next := 0; next < len(files) && len(contents) < s.MaxFileContexts && ctx.Err() == nil; {
+		size := min(fileFetchConcurrency, s.MaxFileContexts-len(contents))
+		selected := make([]github.PullRequestFile, 0, size)
+		for next < len(files) && len(selected) < size {
+			file := files[next]
+			next++
+			if hasReadableExtension(file.Filename) {
+				selected = append(selected, file)
+			}
 		}
-		if !hasReadableExtension(file.Filename) {
-			continue
+		fetched := make([]github.FileContent, len(selected))
+		var wg sync.WaitGroup
+		for index, file := range selected {
+			wg.Add(1)
+			go func(index int, filename string) {
+				defer wg.Done()
+				if ctx.Err() != nil {
+					return
+				}
+				content, err := s.GitHub.GetFileContent(ctx, owner, repo, filename, ref)
+				if err != nil {
+					log.Printf("read file context failed: owner=%s repo=%s file=%s error=%v", owner, repo, filename, err)
+					return
+				}
+				if strings.TrimSpace(content) != "" {
+					fetched[index] = github.FileContent{Path: filename, Content: content}
+				}
+			}(index, file.Filename)
 		}
-		content, err := s.GitHub.GetFileContent(ctx, owner, repo, file.Filename, ref)
-		if err != nil {
-			log.Printf("read file context failed: owner=%s repo=%s file=%s error=%v", owner, repo, file.Filename, err)
-			continue
+		wg.Wait()
+		for _, content := range fetched {
+			if content.Path != "" {
+				contents = append(contents, content)
+			}
 		}
-		if strings.TrimSpace(content) == "" {
-			continue
-		}
-		contents = append(contents, github.FileContent{Path: file.Filename, Content: content})
 	}
+
 	return contents
 }
 
@@ -545,4 +739,26 @@ func buildDiff(files []github.PullRequestFile, maxLines int) string {
 		lineCount += strings.Count(f.Patch, "\n") + 1
 	}
 	return b.String()
+}
+
+// A genuine quote at a different location can be corrected by the model;
+// it must never be silently moved or accepted as proof at the claimed location.
+func validateReviewCandidate(content string, corpus []string) error {
+	parsed, err := decodeReviewResponse(content)
+	if err != nil {
+		return err
+	}
+	parsedCorpus := parseEvidenceCorpus(corpus)
+	for i, finding := range parsed.Findings {
+		if len(supportedEvidence(finding, parsedCorpus)) > 0 {
+			continue
+		}
+		for _, evidence := range finding.Evidence {
+			if evidence.Type == "reference" && evidence.File != "" && evidence.Line > 0 &&
+				(finding.File != evidence.File || finding.Line != evidence.Line) && parsedCorpus.referenceEvidence(evidence) {
+				return fmt.Errorf("finding %d location does not match its verified reference evidence at %s:%d; first preserve the production defect location and attach its exact source quote from the already retrieved tool results (including diff and retrieval matches). Supporting evidence from another file does not require moving the finding there. If necessary, use a verified production fix location; do not move a production defect to a test or example merely because it demonstrates the failure. If no appropriate location has retrieved evidence, omit it; do not alter or invent the source quote", i+1, evidence.File, evidence.Line)
+			}
+		}
+	}
+	return nil
 }

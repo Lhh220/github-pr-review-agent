@@ -15,6 +15,7 @@ import (
 )
 
 type Store interface {
+	GetReviewDelivery(context.Context, uint64) (*store.ReviewDelivery, error)
 	GetTask(ctx context.Context, id uint64) (*store.Task, error)
 	ListTasks(ctx context.Context, filter store.ListFilter) ([]store.Task, error)
 	GetReviewResultByTaskID(ctx context.Context, taskID uint64) (*store.ReviewResult, error)
@@ -184,9 +185,15 @@ func (h *Handler) result(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "get review result"})
 		return
 	}
+	delivery, err := h.store.GetReviewDelivery(c.Request.Context(), id)
+	if err != nil && !errors.Is(err, store.ErrReviewDeliveryNotFound) {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "get review delivery"})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"task":   newTaskResponse(*task),
-		"result": newReviewResultResponse(*result),
+		"task":     newTaskResponse(*task),
+		"result":   newReviewResultResponse(*result),
+		"delivery": delivery,
 	})
 }
 

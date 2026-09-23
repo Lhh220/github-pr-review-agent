@@ -546,3 +546,44 @@ func TestStartUsesConsumerHandler(t *testing.T) {
 		t.Fatalf("statuses = %v, want [running done]", got)
 	}
 }
+
+func TestSupersededTaskDoesNotRetryOrDeadLetter(t *testing.T) {
+	db := &fakeTaskGetter{task: &store.Task{ID: 28, Repo: "o/r", PRNumber: 1, Status: "queued"}, claimResult: true}
+	reviewer := &fakeReviewer{err: store.ErrTaskSuperseded}
+	client := &captureConsumer{}
+	w := New(db, reviewer, client, 1, Options{})
+	if got := w.process(queue.Message{TaskID: 28}); got != queue.Ack {
+		t.Fatalf("action=%v", got)
+	}
+	if len(db.statuses) != 2 || db.statuses[1] != "superseded" || len(client.retries) != 0 || len(client.deadLetters) != 0 {
+		t.Fatalf("statuses=%v retries=%v deadletters=%v", db.statuses, client.retries, client.deadLetters)
+	}
+	db.task.Status = "superseded"
+	w.process(queue.Message{TaskID: 28, Attempt: 3})
+	if len(reviewer.calls) != 1 {
+		t.Fatal("terminal task reviewed again")
+	}
+}
+
+func TestSupersededPersistenceFailureSchedulesRecovery(t *testing.T) {
+	db := &fakeTaskGetter{task: &store.Task{ID: 28, Repo: "o/r", PRNumber: 1, Status: "queued"}, claimResult: true, updateErr: errors.New("database unavailable")}
+	client := &captureConsumer{}
+	w := New(db, &fakeReviewer{err: store.ErrTaskSuperseded}, client, 1, Options{})
+	w.process(queue.Message{TaskID: 28})
+	if len(client.retries) != 1 || len(db.retries) != 1 {
+		t.Fatal("lost recovery after failed terminal update")
+	}
+}
+
+func TestNewClampsLockTTLBelowReviewWindow(t *testing.T) {
+	w := New(&fakeTaskGetter{}, nil, &captureConsumer{}, 1, Options{LockTTL: time.Minute})
+	if w.lockTTL < reviewTimeout+lockTTLCleanupMargin {
+		t.Fatalf("lockTTL = %s, want at least %s", w.lockTTL, reviewTimeout+lockTTLCleanupMargin)
+	}
+
+	// An explicit healthy TTL must be preserved.
+	w = New(&fakeTaskGetter{}, nil, &captureConsumer{}, 1, Options{LockTTL: 10 * time.Minute})
+	if w.lockTTL != 10*time.Minute {
+		t.Fatalf("healthy lockTTL = %s, want 10m untouched", w.lockTTL)
+	}
+}

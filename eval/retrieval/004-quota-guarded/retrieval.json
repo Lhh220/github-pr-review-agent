@@ -1,0 +1,21 @@
+{
+  "input": {
+    "query": "quota Validate count",
+    "top_k": 3
+  },
+  "required": [
+    {
+      "type": "reference",
+      "file": "quota/validate.go",
+      "line": 3,
+      "text": "func Validate(count int) bool { return count > 0 }"
+    },
+    {
+      "type": "reference",
+      "file": "quota/share.go",
+      "line": 5,
+      "text": "return total / count"
+    }
+  ],
+  "follow_up": null
+}

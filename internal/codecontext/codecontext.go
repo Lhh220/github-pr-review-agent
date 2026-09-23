@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"unsafe"
 
 	treesitter "github.com/tree-sitter/go-tree-sitter"
@@ -77,22 +78,7 @@ func Extract(request Request) Result {
 		return result
 	}
 
-	language, supported := parserLanguage(result.Language)
-	if !supported {
-		result.Content = fallbackContent(lines, targetLines, request.MaxLines)
-		result.Truncated = strings.Contains(result.Content, "[context truncated")
-		return result
-	}
-
-	parser := treesitter.NewParser()
-	defer parser.Close()
-	if err := parser.SetLanguage(treesitter.NewLanguage(language())); err != nil {
-		result.Content = fallbackContent(lines, targetLines, request.MaxLines)
-		result.Truncated = strings.Contains(result.Content, "[context truncated")
-		return result
-	}
-
-	tree := parser.Parse([]byte(request.Content), nil)
+	tree := parseWithCachedParser(result.Language, request.Content)
 	if tree == nil {
 		result.Content = fallbackContent(lines, targetLines, request.MaxLines)
 		result.Truncated = strings.Contains(result.Content, "[context truncated")
@@ -112,6 +98,37 @@ func Extract(request Request) Result {
 	result.Symbols = symbols
 	result.Content, result.Truncated = buildSymbolContent(lines, symbols, targetLines, request.MaxLines)
 	return result
+}
+
+// Each language owns one process-lifetime parser. Same-language parsing is
+// serialized because Parser holds mutable C state; other languages can proceed.
+type cachedParser struct {
+	mu     sync.Mutex
+	parser *treesitter.Parser
+}
+
+// Immutable keys keep parser allocation bounded to the supported languages.
+var treeSitterParsers = map[string]*cachedParser{
+	"go": {}, "python": {}, "javascript": {},
+}
+
+func parseWithCachedParser(name, content string) *treesitter.Tree {
+	slot, supported := treeSitterParsers[name]
+	if !supported {
+		return nil
+	}
+	slot.mu.Lock()
+	defer slot.mu.Unlock()
+	if slot.parser == nil {
+		constructor, _ := parserLanguage(name)
+		parser := treesitter.NewParser()
+		if err := parser.SetLanguage(treesitter.NewLanguage(constructor())); err != nil {
+			parser.Close()
+			return nil
+		}
+		slot.parser = parser
+	}
+	return slot.parser.Parse([]byte(content), nil)
 }
 
 func languageForPath(path string) string {
@@ -318,7 +335,10 @@ func firstTargetInRange(symbol Symbol, targetLines []int) int {
 
 func fallbackContent(lines []string, targetLines []int, maxLines int) string {
 	start := targetLines[0]
-	end := targetLines[len(targetLines)-1]
+	if start > len(lines) {
+		return ""
+	}
+	end := min(targetLines[len(targetLines)-1], len(lines))
 	truncated := false
 	if end-start+1 > maxLines {
 		end = start + maxLines - 1

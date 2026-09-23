@@ -9,13 +9,15 @@
       "additions": 0,
       "deletions": 1,
       "changes": 1,
-      "patch": "@@ -3,4 +3,3 @@\n type Config struct {\n \tRepo string\n-\tMaxDiffLines int\n \tToken string\n }"
+      "patch": "@@ -3,5 +3,4 @@\n type Config struct {\n \tRepo string\n-\tMaxDiffLines int\n \tToken string\n }"
     }
   ],
   "file_contents": {
     "internal/config/config.go": "package config\n\ntype Config struct {\n\tRepo string\n\tToken string\n}\n"
   },
   "repository": {
-    "cmd/server/main.go": "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tcfg := LoadConfig()\n\tfmt.Println(cfg.Repo)\n\tfmt.Println(cfg.MaxDiffLines)\n}\n"
+    "cmd/server/main.go": "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tcfg := LoadConfig()\n\tfmt.Println(cfg.Repo)\n\tfmt.Println(cfg.MaxDiffLines)\n}\n",
+    "go.mod": "module example.com/review\n\ngo 1.25\n",
+    "cmd/server/config.go": "package main\n\nimport \"example.com/review/internal/config\"\n\nfunc LoadConfig() config.Config { return config.Config{} }\n"
   }
 }
