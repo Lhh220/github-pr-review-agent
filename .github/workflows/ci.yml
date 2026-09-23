@@ -35,6 +35,7 @@ jobs:
       - run: go run ./cmd/eval -report /tmp/eval-report.json
 
       - run: go run ./cmd/eval -cases eval/holdout -report /tmp/eval-holdout.json
+      - run: go run ./cmd/eval -cases eval/review-regressions -report /tmp/eval-review-regressions.json
 
   compose-smoke:
     runs-on: ubuntu-latest

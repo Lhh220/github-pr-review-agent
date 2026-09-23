@@ -1,0 +1,21 @@
+[
+  {
+    "tool_calls": [
+      {
+        "id": "test",
+        "name": "read_file_context",
+        "arguments": "{\"path\": \"internal/github/auth_test.go\", \"start_line\": 32, \"end_line\": 90}"
+      },
+      {
+        "id": "impl",
+        "name": "read_file_context",
+        "arguments": "{\"path\": \"internal/github/auth.go\", \"start_line\": 139, \"end_line\": 196}"
+      }
+    ],
+    "model": "fixture"
+  },
+  {
+    "content": "{\"summary\": \"Review complete.\", \"findings\": []}",
+    "model": "fixture"
+  }
+]

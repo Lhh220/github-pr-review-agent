@@ -1,0 +1,21 @@
+{
+  "findings": [
+    {
+      "category": "bug",
+      "file": "internal/github/auth_test.go",
+      "line": 49,
+      "severity": "medium",
+      "confidence": "confirmed",
+      "accepted_locations": [
+        {
+          "file": "internal/github/auth_test.go",
+          "line": 53
+        },
+        {
+          "file": "internal/github/auth_test.go",
+          "line": 59
+        }
+      ]
+    }
+  ]
+}

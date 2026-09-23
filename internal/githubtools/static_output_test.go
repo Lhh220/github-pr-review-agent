@@ -27,7 +27,7 @@ func TestStaticCheckEnvironmentBoundsCompilation(t *testing.T) {
 	for _, v := range env {
 		found[v] = true
 	}
-	if !found["GOFLAGS=-mod=mod -p=1"] || !found["GOMAXPROCS=2"] {
+	if !found["GOFLAGS=-mod=mod -p=1"] || !found["GOMAXPROCS=2"] || !found["GOMEMLIMIT=512MiB"] {
 		t.Fatalf("missing concurrency limits: %v", env)
 	}
 }

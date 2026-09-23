@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
@@ -8,8 +9,10 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 )
@@ -39,14 +42,27 @@ func TestCreateInstallationTokenTimesOutOnHungUpstream(t *testing.T) {
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
 
+	received := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received <- struct{}{}
 		// Hold the connection open until the client gives up.
 		<-r.Context().Done()
 	}))
 	defer server.Close()
 
 	original := authHTTPClient
-	authHTTPClient = &http.Client{Timeout: 100 * time.Millisecond}
+	target, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &http.Transport{Proxy: nil}
+	defer transport.CloseIdleConnections()
+	authHTTPClient = &http.Client{Timeout: 200 * time.Millisecond, Transport: tokenTestTransport(func(req *http.Request) (*http.Response, error) {
+		local := req.Clone(req.Context())
+		local.URL.Scheme = target.Scheme
+		local.URL.Host = target.Host
+		return transport.RoundTrip(local)
+	})}
 	defer func() { authHTTPClient = original }()
 
 	started := time.Now()
@@ -56,10 +72,19 @@ func TestCreateInstallationTokenTimesOutOnHungUpstream(t *testing.T) {
 		PrivateKey:     string(keyPEM),
 	})
 	elapsed := time.Since(started)
-	if err == nil {
-		t.Fatal("hung token exchange must fail")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("want client timeout, got %v", err)
+	}
+	select {
+	case <-received:
+	default:
+		t.Fatal("mock upstream was never reached")
 	}
 	if elapsed > 5*time.Second {
 		t.Fatalf("token exchange took %v, want a fast timeout failure", elapsed)
 	}
 }
+
+type tokenTestTransport func(*http.Request) (*http.Response, error)
+
+func (f tokenTestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
