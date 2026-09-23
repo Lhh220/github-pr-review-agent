@@ -549,7 +549,7 @@ Day 5 线上验收步骤：
 阶段三 Day 5 静态检查线上验收步骤：
 
 1. push 代码到 `main`，等待 Railway 部署完成。
-2. 设置 `AGENT_MODE=tool_calling`、`AGENT_ENABLE_STATIC_CHECKS=true`、`AGENT_TOOL_TIMEOUT=3m`、`AGENT_STATIC_CHECK_TIMEOUT=2m`。
+2. 设置 `AGENT_MODE=tool_calling`、`AGENT_ENABLE_STATIC_CHECKS=true`、`AGENT_TOOL_TIMEOUT=4m30s`、`AGENT_STATIC_CHECK_TIMEOUT=2m`。
 3. 如需下载依赖，设置 `AGENT_STATIC_CHECK_GOPROXY=https://goproxy.cn,direct`；如果保持 `off`，依赖必须在本地 Go module cache 中已存在。
 4. 提一个会引入编译错误的 PR。
 5. bot 评论应引用 `go test ./...` 或 `go vet ./...` 的失败输出；在 `/tasks/<task_id>/tool-calls` 中应能看到 `run_static_checks` 的输入、输出和耗时。

@@ -21,6 +21,10 @@ RUN apk add --no-cache ca-certificates tzdata gcc musl-dev \
 COPY --from=builder /out/app /app
 COPY --from=builder /usr/local/go /usr/local/go
 
+# Reuse dependencies already downloaded while building this project.
+# Other repositories or new dependency versions may still require network access.
+COPY --from=builder --chown=app:app /go/pkg/mod /workspace/.static-checks/gomodcache
+
 ENV PATH="/usr/local/go/bin:${PATH}" \
     AGENT_STATIC_CHECK_WORK_DIR=/workspace/.static-checks
 

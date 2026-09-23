@@ -98,7 +98,7 @@ $report.case_results | Where-Object error | Select-Object name,run,error
 ```text
 AGENT_MODE=tool_calling
 AGENT_ENABLE_STATIC_CHECKS=true
-AGENT_TOOL_TIMEOUT=3m
+AGENT_TOOL_TIMEOUT=4m30s
 AGENT_STATIC_CHECK_TIMEOUT=2m
 AGENT_STATIC_CHECK_GOPROXY=https://goproxy.cn,direct
 ```
@@ -158,3 +158,13 @@ Task 26 摘要中的 OOM 尚未通过原始工具日志核实。打开 `/admin` 
 - **为什么 evidence 校验在服务端做？** 模型可能编造文件、行号或输出；服务端必须校验 file、line 和 exact source，不能只相信 JSON 格式。
 - **为什么 performance 强制 needs_verification？** 当前没有 benchmark 工具，源码只能提示风险，不能证明性能退化；等加入 benchmark 工具后再允许 confirmed。
 - **为什么评测默认离线？** 离线脚本驱动真实工具链，能在 CI 中稳定回归工具协议、evidence 校验、confidence 降级和 docs-only 行为，不消耗模型费用。
+
+### 静态检查冷启动与预算
+
+运行镜像现在复制构建阶段的 Go module 缓存到 `/workspace/.static-checks/gomodcache`，避免审查本项目相同依赖版本时再次下载。只复制依赖，不代表已编译测试；首次编译仍消耗 CPU、内存和时间。其他仓库或新版本依赖仍可能需要下载。镜像体积会增加。
+
+保持 `AGENT_STATIC_CHECK_TIMEOUT=2m`，将部署环境 `AGENT_TOOL_TIMEOUT` 调整为 `4m30s`，为顺序执行 test/vet 各两分钟留出工具级余量；整个任务仍有五分钟上限，之前的模型调用会消耗剩余预算，因此不是每个检查都保证获得完整两分钟。定位验收时优先明确只调用 go_test。不要单独把检查超时改为十分钟。
+
+重新构建部署才会包含缓存。若给 `/workspace/.static-checks` 或 gomodcache 挂载空数据卷，会遮蔽镜像内缓存，须另行预热；不得为此删除现有卷。Compose 默认关闭静态检查并使用只读文件系统，本项针对现有开启静态检查的专用部署，不直接改变 Compose 安全配置。
+
+线上验收需查看工具输出中的 timed_out、exit_code、error 和资源快照。已知编译错误应以非超时的失败输出返回；修复后检查应成功。若再次超时，检查是否依赖版本不在缓存、是否仍有下载、编译内存不足或测试本身阻塞。代码审查仍可依据源码证据输出问题，超时只能说明静态验证未完成，不能当成缺陷或通过的证据。
