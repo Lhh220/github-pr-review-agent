@@ -312,14 +312,14 @@ func (a *Agent) validateFinal(ctx context.Context, messages []llm.ChatMessage, r
 			". Re-emit exactly one valid JSON object matching the required schema, with summary and findings array (use [] for no findings). No introductory explanation, Markdown, or tool calls. Fix JSON escaping. Preserve supported review conclusions, correct finding locations when requested by validation, and quote only evidence already retrieved. Omit unsupported findings and update the summary accordingly; do not invent new findings or tool results.",
 	})
 	response, err := a.chat(ctx, llm.ChatRequest{Messages: messages})
+	if err != nil {
+		return result, fmt.Errorf("repair final response after %v: %w", validationErr, err)
+	}
 	result.ProviderCalls++
 	result.Usage.InputTokens += response.Usage.InputTokens
 	result.Usage.OutputTokens += response.Usage.OutputTokens
 	result.Usage.TotalTokens += response.Usage.TotalTokens
 	result.DurationMS += response.DurationMS
-	if err != nil {
-		return result, fmt.Errorf("repair final response after %v: %w", validationErr, err)
-	}
 	result.Content = response.Content
 	if len(response.ToolCalls) != 0 {
 		return result, fmt.Errorf("final response repair requested tools")

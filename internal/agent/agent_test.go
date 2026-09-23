@@ -404,3 +404,49 @@ func TestRepeatedOversizeReadsStopWithinBatch(t *testing.T) {
 		}
 	}
 }
+
+type repairErrorProvider struct {
+	firstResponse llm.ChatResponse
+	firstUsage    llm.ChatResponse // usage returned alongside the deliberate error
+	calls         int
+}
+
+func (p *repairErrorProvider) ChatWithTools(ctx context.Context, request llm.ChatRequest) (llm.ChatResponse, error) {
+	p.calls++
+	if p.calls == 1 {
+		return p.firstResponse, nil
+	}
+	// A failed repair may still carry usage in principle; it must be ignored.
+	return p.firstUsage, fmt.Errorf("repair transport failure")
+}
+
+func TestFinalRepairFailureDoesNotAccumulateUsageOrProviderCalls(t *testing.T) {
+	registry, err := NewRegistry(echoTool{})
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	provider := &repairErrorProvider{
+		firstResponse: llm.ChatResponse{Content: `{"summary":"x","findings":[]}`, Usage: llm.Usage{TotalTokens: 15}},
+		firstUsage:    llm.ChatResponse{Usage: llm.Usage{TotalTokens: 999}},
+	}
+	runner, err := New(provider, registry, Options{
+		ValidateResponse: func(string) error { return fmt.Errorf("invalid schema") },
+	})
+	if err != nil {
+		t.Fatalf("new agent: %v", err)
+	}
+
+	result, runErr := runner.Run(context.Background(), Request{
+		SystemPrompt: "system",
+		UserPrompt:   "review",
+	})
+	if runErr == nil || !strings.Contains(runErr.Error(), "repair final response") {
+		t.Fatalf("run error = %v, want repair failure", runErr)
+	}
+	if result.Usage.TotalTokens != 15 {
+		t.Fatalf("usage total = %d, want 15 (failed repair usage must not accumulate)", result.Usage.TotalTokens)
+	}
+	if result.ProviderCalls != 1 {
+		t.Fatalf("provider calls = %d, want 1 (failed repair must not count)", result.ProviderCalls)
+	}
+}
