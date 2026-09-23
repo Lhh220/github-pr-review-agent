@@ -8,3 +8,9 @@
 go run ./cmd/eval -cases eval/review-regressions
 go run ./cmd/eval -cases eval/review-regressions -live -runs 3 -timeout 15m
 ```
+
+## 首次 live 结果与修正
+
+报告 `report-20260923T093110.782191000Z.json`：6/6 执行成功，缺陷版三次全部漏报，修复版三次无误报。缺陷版 rejected=0，最终模型原文明确错误地断言“替换客户端因此连接到 httptest 服务器”，并将“没有生产代码变更”作为不报告问题的理由。不是证据过滤或静态执行失败。
+
+针对性修改仅限审查提示：测试本身的错误可以报告并定位到测试；客户端超时与请求路由分开核对；必须检查实际 URL、Transport/Dial/代理或 base URL 接线。正反样本、标签及评分不变。现有 prompt 字符串回归只能防止指令丢失，不能证明模型理解。需使用同命令重新 live 验证，六次运行全完成并不等于质量通过。

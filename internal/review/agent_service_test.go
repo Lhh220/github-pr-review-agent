@@ -269,6 +269,8 @@ func TestAgentSystemPromptRequiresEvidenceAndConfidenceLevels(t *testing.T) {
 		"performance risks",
 		"needs_verification",
 		"documentation-only",
+		"Test-only changes require correctness review",
+		"changing Timeout alone does NOT redirect",
 	} {
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("system prompt missing %q: %s", required, prompt)

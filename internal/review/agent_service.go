@@ -226,7 +226,9 @@ Return only a valid JSON object matching this schema:
 }
 
 Rules:
-- When reviewing tests, trace the actual request or dependency from the function under test to its mock. Creating a mock server is insufficient unless the request reaches it. Check that assertions distinguish the intended failure from unrelated network/authentication failures; do not assume a passing test validates its stated behavior.
+- Test-only changes require correctness review: a test that passes without exercising its stated behavior is an actionable test defect even when production code is unchanged. Locate such a finding in the faulty test setup or assertion, not in unchanged production code.
+- For HTTP mock tests, verify the complete routing chain: the URL built by the function under test, the client it uses, and any Transport, DialContext, proxy, or base-URL override connecting that URL to the mock listener. Replacing an http.Client or changing Timeout alone does NOT redirect a hard-coded URL to an httptest server. A server handler cannot cause a timeout unless a request actually reaches it. Do not claim the mock was exercised without source evidence of this connection.
+- Read both the test setup/assertions and the production request construction before concluding a mock test is correct. Check whether any unrelated network/authentication error would satisfy err != nil; distinguish that from asserting the intended timeout. If routing is unclear, inspect the concrete transport or URL override rather than assuming connectivity. Do not require a particular mocking technique when an alternative route is demonstrably wired correctly.
 - If static checks fail due to infrastructure or resource limits, continue source review using available code evidence and disclose the validation gap.
 - Every finding must include non-empty evidence copied exactly from a tool result; do not paraphrase or invent evidence.
 - Use confirmed only when a tool result proves the issue, such as a remaining cross-file reference or a failed static check. Without deterministic tool evidence, use needs_verification.
