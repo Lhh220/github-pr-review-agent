@@ -13,15 +13,21 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/liaohonghui/github-pr-review-agent/internal/httputil"
 )
 
 var ErrMissingAppConfig = errors.New("github app config incomplete")
+
+// authHTTPClient replaces http.DefaultClient, which has no timeout: a hung
+// token exchange would otherwise block NewAppClient's cached-token mutex
+// forever and stall every GitHub call behind it.
+var authHTTPClient = &http.Client{Timeout: 15 * time.Second}
 
 type AppAuth struct {
 	AppID          string
@@ -158,14 +164,14 @@ func CreateInstallationToken(auth AppAuth) (*InstallationToken, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+jwt)
 	req.Header.Set("Accept", "application/vnd.github+json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := authHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("get installation token: status=%d body=%s", resp.StatusCode, string(body))
+		body := httputil.ReadErrorBody(resp.Body, 0)
+		return nil, fmt.Errorf("get installation token: status=%d body=%s", resp.StatusCode, body)
 	}
 	var out struct {
 		Token               string                   `json:"token"`

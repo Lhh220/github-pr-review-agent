@@ -199,6 +199,11 @@ func startServer(
 		Addr:              ":" + cfg.Port,
 		Handler:           r,
 		ReadHeaderTimeout: 5 * time.Second,
+		// ReadTimeout bounds reading a (up to 25 MiB) webhook body from slow
+		// connections; WriteTimeout covers handler execution and the response.
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 	serverErrors := make(chan error, 1)
 	go func() {
