@@ -289,6 +289,8 @@ func staticCheckEnvironment(baseDir, goProxy string) []string {
 		"GOPROXY=" + goProxy,
 		"GOFLAGS=-mod=mod -p=1",
 		"GOMAXPROCS=2",
+		// Soft Go heap budget for compiler/test subprocesses, not a container limit.
+		"GOMEMLIMIT=512MiB",
 		"CGO_ENABLED=1",
 	}
 }
@@ -357,7 +359,7 @@ func staticCheckDiagnosticEnvironment(env []string) map[string]string {
 	result := map[string]string{}
 	for _, entry := range env {
 		key, value, ok := strings.Cut(entry, "=")
-		if ok && (key == "GOFLAGS" || key == "GOMAXPROCS" || key == "GOTOOLCHAIN" || key == "CGO_ENABLED") {
+		if ok && (key == "GOFLAGS" || key == "GOMAXPROCS" || key == "GOMEMLIMIT" || key == "GOTOOLCHAIN" || key == "CGO_ENABLED") {
 			result[key] = value
 		}
 	}

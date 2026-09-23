@@ -226,6 +226,8 @@ Return only a valid JSON object matching this schema:
 }
 
 Rules:
+- When reviewing tests, trace the actual request or dependency from the function under test to its mock. Creating a mock server is insufficient unless the request reaches it. Check that assertions distinguish the intended failure from unrelated network/authentication failures; do not assume a passing test validates its stated behavior.
+- If static checks fail due to infrastructure or resource limits, continue source review using available code evidence and disclose the validation gap.
 - Every finding must include non-empty evidence copied exactly from a tool result; do not paraphrase or invent evidence.
 - Use confirmed only when a tool result proves the issue, such as a remaining cross-file reference or a failed static check. Without deterministic tool evidence, use needs_verification.
 - Treat architectural concerns, performance risks, and concurrency concerns that need human confirmation as needs_verification.
