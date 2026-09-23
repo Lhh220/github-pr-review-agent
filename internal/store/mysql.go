@@ -742,15 +742,6 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	return created, nil
 }
 
-func (s *Store) GetReviewResult(ctx context.Context, id uint64) (*ReviewResult, error) {
-	row := s.db.QueryRowContext(ctx, `
-SELECT id, task_id, summary, payload_json, raw_response, model,
-       input_tokens, output_tokens, total_tokens, llm_duration_ms, created_at
-FROM review_result
-WHERE id = ?`, id)
-	return scanReviewResult(row.Scan)
-}
-
 func (s *Store) GetReviewResultByTaskID(ctx context.Context, taskID uint64) (*ReviewResult, error) {
 	row := s.db.QueryRowContext(ctx, `
 SELECT id, task_id, summary, payload_json, raw_response, model,
