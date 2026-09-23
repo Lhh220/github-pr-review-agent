@@ -46,3 +46,30 @@ func TestRescorePreservesFailuresAndProvenance(t *testing.T) {
 		t.Fatal("accepted empty report")
 	}
 }
+
+func TestSessionConstructorAlternative(t *testing.T) {
+	cases, err := LoadCases("retrieval")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		if c.Name != "001-uninitialized-cache" {
+			continue
+		}
+		for _, tc := range []struct {
+			file string
+			line int
+			want float64
+		}{
+			{"session/put.go", 4, 1},
+			{"session/session.go", 5, 1},
+			{"session/session.go", 4, 0},
+			{"session/session_test.go", 3, 0},
+		} {
+			r := Evaluate([]CaseInput{{Expected: c.Expected.Findings, Actual: RunResult{Findings: []store.Finding{{File: tc.file, Line: tc.line, Category: "bug"}}}}})
+			assertFloat(t, r.Precision, tc.want)
+		}
+		return
+	}
+	t.Fatal("session fixture missing")
+}

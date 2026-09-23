@@ -5,7 +5,13 @@
       "file": "session/put.go",
       "line": 4,
       "severity": "high",
-      "confidence": "confirmed"
+      "confidence": "confirmed",
+      "accepted_locations": [
+        {
+          "file": "session/session.go",
+          "line": 5
+        }
+      ]
     }
   ]
 }

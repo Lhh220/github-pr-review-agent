@@ -756,7 +756,7 @@ func validateReviewCandidate(content string, corpus []string) error {
 		for _, evidence := range finding.Evidence {
 			if evidence.Type == "reference" && evidence.File != "" && evidence.Line > 0 &&
 				(finding.File != evidence.File || finding.Line != evidence.Line) && parsedCorpus.referenceEvidence(evidence) {
-				return fmt.Errorf("finding %d location does not match its verified reference evidence at %s:%d; anchor the finding to the failing usage if appropriate, or omit it; do not alter or invent the source quote", i+1, evidence.File, evidence.Line)
+				return fmt.Errorf("finding %d location does not match its verified reference evidence at %s:%d; first preserve the production defect location and attach its exact source quote from the already retrieved tool results (including diff and retrieval matches). Supporting evidence from another file does not require moving the finding there. If necessary, use a verified production fix location; do not move a production defect to a test or example merely because it demonstrates the failure. If no appropriate location has retrieved evidence, omit it; do not alter or invent the source quote", i+1, evidence.File, evidence.Line)
 			}
 		}
 	}
