@@ -141,3 +141,32 @@ func TestRetrievalFixturesReturnRequiredSource(t *testing.T) {
 		})
 	}
 }
+
+// This runs deterministic scripts, not model inference. Keep quality assertions
+// here because a completed eval command alone does not imply correct findings.
+func TestMockWiringHoldoutOffline(t *testing.T) {
+	cases, err := LoadCases("mock-wiring-holdout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cases) != 6 {
+		t.Fatalf("got %d cases, want 6", len(cases))
+	}
+	for _, c := range cases {
+		t.Run(c.Name, func(t *testing.T) {
+			result, err := RunCase(context.Background(), c, NewScriptProvider(c), RunnerOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, tool := range result.Tools {
+				if tool.Error != "" {
+					t.Fatal(tool.Error)
+				}
+			}
+			report := Evaluate([]CaseInput{{Name: c.Name, Expected: c.Expected.Findings, Actual: result}})
+			if report.CaseResults[0].FalsePositives != 0 || report.CaseResults[0].FalseNegatives != 0 || len(result.RejectedFindings) != 0 {
+				t.Fatalf("unexpected scoring or evidence rejection: %+v, %+v", report.CaseResults[0], result.RejectedFindings)
+			}
+		})
+	}
+}

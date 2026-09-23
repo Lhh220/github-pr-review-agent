@@ -1,0 +1,21 @@
+[
+  {
+    "tool_calls": [
+      {
+        "id": "test",
+        "name": "read_file_context",
+        "arguments": "{\"path\": \"service_test.go\", \"start_line\": 1, \"end_line\": 23}"
+      },
+      {
+        "id": "prod",
+        "name": "read_file_context",
+        "arguments": "{\"path\": \"service.go\", \"start_line\": 1, \"end_line\": 40}"
+      }
+    ],
+    "model": "fixture"
+  },
+  {
+    "content": "{\"summary\": \"Source review complete.\", \"findings\": []}",
+    "model": "fixture"
+  }
+]

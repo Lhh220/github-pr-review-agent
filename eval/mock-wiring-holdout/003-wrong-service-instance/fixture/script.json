@@ -1,0 +1,21 @@
+[
+  {
+    "tool_calls": [
+      {
+        "id": "test",
+        "name": "read_file_context",
+        "arguments": "{\"path\": \"service_test.go\", \"start_line\": 1, \"end_line\": 28}"
+      },
+      {
+        "id": "prod",
+        "name": "read_file_context",
+        "arguments": "{\"path\": \"service.go\", \"start_line\": 1, \"end_line\": 40}"
+      }
+    ],
+    "model": "fixture"
+  },
+  {
+    "content": "{\"summary\": \"Source review complete.\", \"findings\": [{\"category\": \"bug\", \"file\": \"service_test.go\", \"line\": 24, \"severity\": \"medium\", \"confidence\": \"confirmed\", \"comment\": \"The test configures mocked.HTTP but invokes a different Service with no injected client. The simulated 503 response is never used, and unrelated external errors can pass the assertion.\", \"suggestion\": \"Invoke the configured service and assert the transport was reached.\", \"evidence\": [{\"type\": \"reference\", \"file\": \"service_test.go\", \"line\": 24, \"text\": \"target := Service{}\"}]}]}",
+    "model": "fixture"
+  }
+]

@@ -1,0 +1,11 @@
+{
+  "findings": [
+    {
+      "category": "bug",
+      "file": "service_test.go",
+      "line": 25,
+      "severity": "medium",
+      "confidence": "confirmed"
+    }
+  ]
+}

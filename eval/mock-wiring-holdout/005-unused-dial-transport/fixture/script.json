@@ -1,0 +1,21 @@
+[
+  {
+    "tool_calls": [
+      {
+        "id": "test",
+        "name": "read_file_context",
+        "arguments": "{\"path\": \"service_test.go\", \"start_line\": 1, \"end_line\": 28}"
+      },
+      {
+        "id": "prod",
+        "name": "read_file_context",
+        "arguments": "{\"path\": \"service.go\", \"start_line\": 1, \"end_line\": 40}"
+      }
+    ],
+    "model": "fixture"
+  },
+  {
+    "content": "{\"summary\": \"Source review complete.\", \"findings\": [{\"category\": \"bug\", \"file\": \"service_test.go\", \"line\": 25, \"severity\": \"medium\", \"confidence\": \"confirmed\", \"comment\": \"The local dial override is installed on a cloned transport, but the client uses http.DefaultTransport. The stalled mock server does not receive the request; any external error can satisfy this test.\", \"suggestion\": \"Use the configured transport in the client and assert receipt and timeout.\", \"evidence\": [{\"type\": \"reference\", \"file\": \"service_test.go\", \"line\": 25, \"text\": \"client := &http.Client{Timeout: 200*time.Millisecond, Transport: http.DefaultTransport}\"}]}]}",
+    "model": "fixture"
+  }
+]

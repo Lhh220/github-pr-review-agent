@@ -1,0 +1,21 @@
+[
+  {
+    "tool_calls": [
+      {
+        "id": "test",
+        "name": "read_file_context",
+        "arguments": "{\"path\": \"service_test.go\", \"start_line\": 1, \"end_line\": 21}"
+      },
+      {
+        "id": "prod",
+        "name": "read_file_context",
+        "arguments": "{\"path\": \"service.go\", \"start_line\": 1, \"end_line\": 40}"
+      }
+    ],
+    "model": "fixture"
+  },
+  {
+    "content": "{\"summary\": \"Source review complete.\", \"findings\": [{\"category\": \"bug\", \"file\": \"service_test.go\", \"line\": 18, \"severity\": \"medium\", \"confidence\": \"confirmed\", \"comment\": \"The test leaves BaseURL empty, so Check uses service.invalid rather than the local stalled server. Any unrelated request error can satisfy the assertion.\", \"suggestion\": \"Set BaseURL to server.URL and verify receipt and a deadline error.\", \"evidence\": [{\"type\": \"reference\", \"file\": \"service_test.go\", \"line\": 18, \"text\": \"service := Service{HTTP: &http.Client{Timeout: 200*time.Millisecond}}\"}]}]}",
+    "model": "fixture"
+  }
+]
